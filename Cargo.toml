@@ -1,0 +1,8 @@
+
+[workspace.dependencies]
+tch = "0.19.0"
+ndarray = "0.16.1"
+
+[workspace]
+resolver = "2"
+members = ["ek-benchmark"]
