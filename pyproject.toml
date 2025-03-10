@@ -1,0 +1,14 @@
+[project]
+name = "expert-kit"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "duckdb>=1.2.1",
+    "matplotlib>=3.10.1",
+    "onnx>=1.17.0",
+    "onnxscript>=0.2.2",
+    "polar>=0.0.127",
+    "torch>=2.6.0",
+]

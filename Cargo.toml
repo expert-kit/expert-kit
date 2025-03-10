@@ -2,6 +2,22 @@
 [workspace.dependencies]
 tch = "0.19.0"
 ndarray = "0.16.1"
+ndarray-rand = "0.15.0"
+ort = {version="2.0.0-rc.9",features=["load-dynamic"]}
+polars = { version = "0.46.0", features = [
+    "simd",
+    "sql",
+    "ndarray",
+    "lazy",
+    "serde",
+    "json",
+    "parquet",
+] }
+
+log = "0.4.26"
+clap = { version = "4.5.31", features = ["derive"] }
+polars-io = "0.46.0"
+pretty_env_logger = "0.5.0"
 
 [workspace]
 resolver = "2"

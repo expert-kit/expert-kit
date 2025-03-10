@@ -3,7 +3,16 @@ name = "ek-benchmark"
 version = "0.1.0"
 edition = "2024"
 
+
 [dependencies]
 
 tch = { workspace = true }
 ndarray = { workspace = true }
+ndarray-rand = { workspace = true }
+ort = { workspace = true }
+polars = { workspace = true }
+polars-io = { workspace = true }
+clap = { workspace = true }
+pretty_env_logger = { workspace = true }
+sysinfo = "0.33.1"
+log = { workspace = true }

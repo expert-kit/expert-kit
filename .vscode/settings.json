@@ -8,6 +8,16 @@
         "vendor/**/*": true
     },
     "rust-analyzer.server.extraEnv": {
-        "LIBTORCH": "${workspaceFolder}/vendor/libtorch"
-    }
+        "LIBTORCH": "${workspaceFolder}/vendor/libtorch",
+        "ORT_LIB_LOCATION": "${workspaceFolder}/vendor/onnxruntime"
+    },
+    "terminal.integrated.env.osx": {
+        "LIBTORCH": "${workspaceFolder}/vendor/libtorch",
+        "ORT_LIB_LOCATION": "${workspaceFolder}/vendor/onnxruntime"
+    },
+    "cSpell.words": [
+        "ndarray",
+        "Onnx",
+        "onnxruntime"
+    ]
 }
