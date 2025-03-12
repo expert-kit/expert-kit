@@ -10,8 +10,6 @@ import os
 import sys
 import time
 import io
-import atexit
-import signal
 from typing import Dict, List
 from splitter.planner import create_splitting_plan
 from splitter.dal import DALStorage
@@ -267,11 +265,15 @@ async def process_split(args, splitting_plan, storage):
 
     async def worker(q: asyncio.Queue, dq: asyncio.Queue):
         while True:
-            output_file = await q.get()
-            weights = splitting_plan[output_file]
-            fut  =  process_file(args, output_file, weights, storage)
-            await asyncio.wait_for(fut, 30)
-            q.task_done()
+            try:
+                output_file = await q.get()
+                weights = splitting_plan[output_file]
+                fut  =  process_file(args, output_file, weights, storage)
+                await asyncio.wait_for(fut, 90)
+            except Exception as e:
+                print(traceback.format_exc())
+            finally:
+                q.task_done()
 
     async def feeder(q: asyncio.Queue):
         for output_file in files_to_process:
@@ -357,24 +359,6 @@ async def main():
         if not args.skip_upload:
             await storage.save_json("splitting_plan.json", splitting_plan)
             logger.info("Saved splitting plan to storage")
-
-    # Register exit handler to backup state on program exit
-    atexit.register(
-        handle_exit,
-        storage=storage,
-        args=args,
-        splitting_plan=splitting_plan,
-    )
-
-    # Register signal handlers for common termination signalssdk
-    for sig in [signal.SIGINT, signal.SIGTERM]:
-        signal.signal(
-            sig,
-            lambda s, f: (
-                logger.warning(f"Received signal {s}, shutting down..."),
-                sys.exit(1),
-            ),
-        )
 
     # If plan_only, exit here
     if args.plan_only:
