@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
+import traceback
+import time
 import argparse
 import asyncio
+import concurrent
 import uvloop
-
 import json
 import os
 import sys
@@ -16,6 +18,8 @@ from splitter.planner import create_splitting_plan
 from splitter.dal import DALStorage
 import logging
 from tqdm import tqdm
+from safetensors import safe_open
+from safetensors.torch import save
 
 # Configure logging
 logging.basicConfig(
@@ -25,14 +29,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger("model_splitter")
 
-# Try to import optional dependencies
-try:
-    from safetensors import safe_open
-    from safetensors.torch import save_file
 
-except ImportError:
-    logger.error("SafeTensors is required. Install with: pip install safetensors torch")
-    sys.exit(1)
 
 
 def parse_args():
@@ -156,6 +153,8 @@ def setup_storage(args):
         return DALStorage("fs", root=args.output_dir)
 
 
+opened_st= {}
+
 def load_safetensor_file(file_path: str, weight_names: List[str]):
     """
     Load specific weights from a safetensor file
@@ -167,18 +166,47 @@ def load_safetensor_file(file_path: str, weight_names: List[str]):
     Returns:
         Dictionary mapping weight names to their tensor data
     """
-    try:
-        tensors = {}
-        with safe_open(file_path, framework="pt") as f:
-            for name in weight_names:
-                if name in f.keys():
-                    tensors[name] = f.get_tensor(name)
+    tensors = {}
+    f = opened_st.get(file_path)
+    if f is None:
+        f = safe_open(file_path, framework="pt") 
+        opened_st[file_path] =f
 
-        return tensors
-    except Exception as e:
-        logger.error(f"Error loading safetensor file {file_path}: {e}")
-        return {}
+    for name in weight_names:
+        if name in f.keys():
+            tensors[name] = f.get_tensor(name)
+    return tensors
 
+
+
+def process_file_sync(
+    args,
+    output_file,
+    weights,
+    tracker: FileProcessTracker,
+    storage: DALStorage):
+    tracker.mark_in_progress(output_file)
+    logger.debug(f"Processing {output_file} with {len(weights)} weights")
+    # Group weights by source file for efficient loading
+    by_source = {}
+    for weight_name, source_file in weights.items():
+        if source_file not in by_source:
+            by_source[source_file] = []
+        by_source[source_file].append(weight_name)
+
+    # Extract weights from each source file
+    all_tensors = {}
+    for source_file, weight_names in by_source.items():
+        source_path = os.path.join(args.model_dir, source_file)
+        tensors = load_safetensor_file(source_path, weight_names)
+        all_tensors.update(tensors)
+
+    if not all_tensors:
+        raise ValueError(f"No weights found for {output_file}")
+
+    # Create the new safetensor file
+    st_bytes= save(all_tensors)
+    return st_bytes
 
 async def process_file(
     args,
@@ -187,44 +215,13 @@ async def process_file(
     tracker: FileProcessTracker,
     storage: DALStorage,
 ):
-    """
-    Process a single file according to the splitting plan
-
-    Args:
-        args: Command line arguments
-        output_file: Name of the output file to create
-        weights: Dictionary of weights to extract
-        tracker: FileProcessTracker instance
-        storage: Storage handler
-    """
+    logger.info(f"process {output_file} start ")
+    start = time.perf_counter()
     try:
-        # Mark file as in progress
-        tracker.mark_in_progress(output_file)
-        logger.debug(f"Processing {output_file} with {len(weights)} weights")
-
-        # Group weights by source file for efficient loading
-        by_source = {}
-        for weight_name, source_file in weights.items():
-            if source_file not in by_source:
-                by_source[source_file] = []
-            by_source[source_file].append(weight_name)
-
-        # Extract weights from each source file
-        all_tensors = {}
-        for source_file, weight_names in by_source.items():
-            source_path = os.path.join(args.model_dir, source_file)
-            tensors = load_safetensor_file(source_path, weight_names)
-            all_tensors.update(tensors)
-
-        if not all_tensors:
-            raise ValueError(f"No weights found for {output_file}")
-
-        # Create the new safetensor file
-        bio = io.BytesIO()
-        save_file(all_tensors, bio)
-        # Upload to storage if not skipping
+        future = asyncio.gather(asyncio.to_thread(process_file_sync,args,output_file,weights,tracker,storage))
+        st_bytes = await asyncio.wait_for(future, 30)
         if not args.skip_upload:
-            success = await storage.save_file_async(output_file, bio.getvalue())
+            success = await storage.save_file_async(output_file, st_bytes)
             if success:
                 # Mark as completed
                 tracker.mark_completed(output_file)
@@ -232,14 +229,22 @@ async def process_file(
                 raise ValueError(f"Failed to save {output_file}")
         else:
             logger.info(f"[SKIP] Would save {output_file}")
-            tracker.mark_completed(output_file)
+           # tracker.mark_completed(output_file)
 
         return True
 
     except Exception as e:
+        print(traceback.format_exc())
+
         logger.error(f"Error processing {output_file}: {e}")
         tracker.mark_failed(output_file, str(e))
         return False
+
+    finally:
+        now = time.perf_counter()
+        logger.info(f"process {output_file} done, elapsed = {now-start}")
+
+    
 
 
 async def process_split(args, splitting_plan, storage, tracker):
@@ -258,36 +263,35 @@ async def process_split(args, splitting_plan, storage, tracker):
         f"Processing {len(files_to_process)} out of {len(splitting_plan)} files"
     )
 
-    parallelism = 100
+    parallelism = 16
     task_q = asyncio.Queue(parallelism)
     done_q = asyncio.Queue(parallelism)
 
-    async def display_progress():
+    async def display_progress(dq: asyncio.Queue):
         with tqdm(total=len(files_to_process), desc="Processing files") as pbar:
             while True:
-                await done_q.get()
+                await dq.get()
                 pbar.update(1)
-                asyncio.sleep(0)
+                dq.task_done()
+                await asyncio.sleep(0)
 
     async def worker(q: asyncio.Queue, dq: asyncio.Queue):
         while True:
             output_file = await q.get()
             weights = splitting_plan[output_file]
-            await process_file(args, output_file, weights, tracker, storage)
+            fut  =  process_file(args, output_file, weights, tracker, storage)
+            await asyncio.wait_for(fut, 30)
             q.task_done()
-            dq.put(1)
 
     async def feeder(q: asyncio.Queue):
         for output_file in files_to_process:
             if q.full():
-                # yield control
-                asyncio.sleep(0)
+                await asyncio.sleep(1)
             await q.put(output_file)
-            asyncio.sleep(0)
+            await asyncio.sleep(0)
 
-    workers = [asyncio.create_task(worker(task_q)) for _ in range(parallelism)]
+    workers = [asyncio.create_task(worker(task_q,done_q)) for _ in range(parallelism)]
     producer = asyncio.create_task(feeder(task_q))
-    display = asyncio.create_task(display_progress())
 
     await asyncio.gather(producer)
     await task_q.join()
@@ -319,15 +323,12 @@ def handle_exit(tracker=None, storage=None, args=None, splitting_plan=None):
     if splitting_plan is not None:
         # First save locally if args is available
         if args is not None:
-            try:
-                plan_file_local = os.path.join(args.work_dir, "splitting_plan.json")
-                with open(plan_file_local, "w") as f:
-                    json.dump(splitting_plan, f, indent=2)
-                logger.info(
-                    f"Saved final splitting plan to local file: {plan_file_local}"
-                )
-            except Exception as e:
-                logger.error(f"Failed to save local splitting plan: {e}")
+            plan_file_local = os.path.join(args.work_dir, "splitting_plan.json")
+            with open(plan_file_local, "w") as f:
+                json.dump(splitting_plan, f, indent=2)
+            logger.info(
+                f"Saved final splitting plan to local file: {plan_file_local}"
+            )
 
         # Then back up to storage
         if storage is not None:
@@ -377,7 +378,7 @@ async def main():
 
         # 2. Save to output storage
         if not args.skip_upload:
-            storage.save_json("splitting_plan.json", splitting_plan)
+            await storage.save_json("splitting_plan.json", splitting_plan)
             logger.info("Saved splitting plan to storage")
 
     # Register exit handler to backup state on program exit
@@ -395,7 +396,7 @@ async def main():
             sig,
             lambda s, f: (
                 logger.warning(f"Received signal {s}, shutting down..."),
-                handle_exit(tracker, storage, args, splitting_plan),
+                #handle_exit(tracker, storage, args, splitting_plan),
                 sys.exit(1),
             ),
         )
@@ -414,7 +415,7 @@ async def main():
         for weight_name in weights.keys():
             new_index["weight_map"][weight_name] = new_file
 
-    storage.save_json("model.safetensors.index.json", new_index)
+    await storage.save_json("model.safetensors.index.json", new_index)
 
     # Calculate stats
     completed = tracker.get_completed_files()
@@ -435,4 +436,5 @@ async def main():
 
 
 if __name__ == "__main__":
+    asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
     uvloop.run(main())

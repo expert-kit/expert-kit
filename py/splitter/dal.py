@@ -1,6 +1,7 @@
 import logging
 import sys
-
+import json
+from typing  import Optional
 logger = logging.getLogger("dal")
 try:
     import opendal
@@ -30,41 +31,29 @@ class DALStorage:
             access_key = kwargs.get("access_key")
             secret_key = kwargs.get("secret_key")
 
+
+            assert(access_key!=None)
+            assert(secret_key!=None)
             match storage_type:
                 case "s3":
-                    if access_key and secret_key:
-                        s3_config["access_key"] = access_key
-                        s3_config["secret_key"] = secret_key
+                    s3_config["access_key"] = access_key
+                    s3_config["secret_key"] = secret_key
                 case "oss":
-                    if access_key and secret_key:
-                        s3_config["access_key_id"] = access_key
-                        s3_config["access_key_secret"] = secret_key
+                    s3_config["access_key_id"] = access_key
+                    s3_config["access_key_secret"] = secret_key
 
             # Add custom endpoint for non-AWS S3 services (like Aliyun OSS, MinIO, etc.)
             if kwargs.get("endpoint"):
                 s3_config["endpoint"] = kwargs.get("endpoint")
 
             self.operator = opendal.Operator(storage_type, **s3_config)
+            self.async_operator = opendal.AsyncOperator(
+                storage_type, **s3_config
+            )
         else:
             raise ValueError(f"Unsupported storage type: {storage_type}")
 
-        # Create async operator for parallel operations
-        self.async_operator = opendal.AsyncOperator(
-            storage_type, **{k: v for k, v in kwargs.items() if v is not None}
-        )
-
-        # Cache for file existence to avoid unnecessary checks
         self._file_exists_cache = set()
-
-    def save_file(self, filename: str, data: bytes) -> bool:
-        """Save a file to storage"""
-        try:
-            self.operator.write(filename, data)
-            self._file_exists_cache.add(filename)
-            return True
-        except Exception as e:
-            logger.error(f"Error saving file {filename}: {e}")
-            return False
 
     async def save_file_async(self, filename: str, data: bytes) -> bool:
         """Save a file to storage asynchronously"""
@@ -106,7 +95,7 @@ class DALStorage:
             logger.debug(f"Could not load JSON file {filename}: {e}")
             return None
 
-    def save_json(self, filename: str, data: dict) -> bool:
+    async def save_json(self, filename: str, data: dict) -> bool:
         """Save JSON data to a file"""
         json_str = json.dumps(data, indent=2)
-        return self.save_file(filename, json_str.encode("utf-8"))
+        return await self.save_file_async(filename, json_str.encode("utf-8"))

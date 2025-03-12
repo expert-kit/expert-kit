@@ -3,7 +3,7 @@ name = "expert-kit"
 version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
-requires-python = ">=3.13"
+requires-python = ">=3.12"
 dependencies = [
     "duckdb>=1.2.1",
     "matplotlib>=3.10.1",
@@ -16,6 +16,4 @@ dependencies = [
     "uvloop>=0.21.0",
 ]
 
-[tool.uv.workspace]
-members = ["py/*"]
 
