@@ -13,7 +13,6 @@ import io
 import atexit
 import signal
 from typing import Dict, List
-from splitter.tracker import FileProcessTracker
 from splitter.planner import create_splitting_plan
 from splitter.dal import DALStorage
 import logging
@@ -28,8 +27,6 @@ logging.basicConfig(
     handlers=[logging.StreamHandler()],
 )
 logger = logging.getLogger("model_splitter")
-
-
 
 
 def parse_args():
@@ -183,9 +180,7 @@ def process_file_sync(
     args,
     output_file,
     weights,
-    tracker: FileProcessTracker,
     storage: DALStorage):
-    tracker.mark_in_progress(output_file)
     logger.debug(f"Processing {output_file} with {len(weights)} weights")
     # Group weights by source file for efficient loading
     by_source = {}
@@ -212,24 +207,22 @@ async def process_file(
     args,
     output_file,
     weights,
-    tracker: FileProcessTracker,
     storage: DALStorage,
 ):
     logger.info(f"process {output_file} start ")
     start = time.perf_counter()
     try:
-        future = asyncio.gather(asyncio.to_thread(process_file_sync,args,output_file,weights,tracker,storage))
+        future = asyncio.gather(asyncio.to_thread(process_file_sync,args,output_file,weights,storage))
         st_bytes = (await asyncio.wait_for(future, 30))[0]
         if not args.skip_upload:
             success = await storage.save_file_async(output_file, st_bytes)
             if success:
+                pass
                 # Mark as completed
-                tracker.mark_completed(output_file)
             else:
                 raise ValueError(f"Failed to save {output_file}")
         else:
             logger.info(f"[SKIP] Would save {output_file}")
-           # tracker.mark_completed(output_file)
 
         return True
 
@@ -237,7 +230,6 @@ async def process_file(
         print(traceback.format_exc())
 
         logger.error(f"Error processing {output_file}: {e}")
-        tracker.mark_failed(output_file, str(e))
         return False
 
     finally:
@@ -247,17 +239,15 @@ async def process_file(
     
 
 
-async def process_split(args, splitting_plan, storage, tracker):
+async def process_split(args, splitting_plan, storage):
     """Process the actual splitting according to the plan"""
-    completed_files = set(tracker.get_completed_files())
+    completed_files = []
     files_to_process = []
 
     for file_name in splitting_plan.keys():
         if file_name not in completed_files:
             files_to_process.append(file_name)
 
-    # Update the tracker with pending files
-    tracker.mark_pending(files_to_process)
 
     logger.info(
         f"Processing {len(files_to_process)} out of {len(splitting_plan)} files"
@@ -279,7 +269,7 @@ async def process_split(args, splitting_plan, storage, tracker):
         while True:
             output_file = await q.get()
             weights = splitting_plan[output_file]
-            fut  =  process_file(args, output_file, weights, tracker, storage)
+            fut  =  process_file(args, output_file, weights, storage)
             await asyncio.wait_for(fut, 30)
             q.task_done()
 
@@ -287,6 +277,7 @@ async def process_split(args, splitting_plan, storage, tracker):
         for output_file in files_to_process:
             if q.full():
                 await asyncio.sleep(1)
+                continue
             await q.put(output_file)
             await asyncio.sleep(0)
 
@@ -300,25 +291,13 @@ async def process_split(args, splitting_plan, storage, tracker):
         w.cancel()
     display.cancel()
 
-    # Check for failed files
-    failed_files = tracker.get_failed_files()
-    if failed_files:
-        logger.warning(f"{len(failed_files)} files failed to process")
-        for f, error in failed_files.items():
-            logger.warning(f"  - {f}: {error['error']}")
 
 
 # Function to handle clean exit
-def handle_exit(tracker=None, storage=None, args=None, splitting_plan=None):
+def handle_exit( storage=None, args=None, splitting_plan=None):
     """Handle program exit by saving state and plan"""
     logger.info("Program exiting, performing cleanup tasks...")
 
-    if tracker is not None:
-        logger.info("Backing up tracker state...")
-        # First ensure the local status file is up-to-date
-        tracker._save()
-        # Then back it up to remote storage
-        tracker.backup_to_storage()
 
     if splitting_plan is not None:
         # First save locally if args is available
@@ -346,8 +325,6 @@ async def main():
     # Set up storage
     storage = setup_storage(args)
 
-    # Initialize file tracker with the work_dir and storage for backups
-    tracker = FileProcessTracker(work_dir=args.work_dir, storage=storage)
 
     # Load original weight map
     model_index_path = os.path.join(args.model_dir, "model.safetensors.index.json")
@@ -384,19 +361,17 @@ async def main():
     # Register exit handler to backup state on program exit
     atexit.register(
         handle_exit,
-        tracker=tracker,
         storage=storage,
         args=args,
         splitting_plan=splitting_plan,
     )
 
-    # Register signal handlers for common termination signals
+    # Register signal handlers for common termination signalssdk
     for sig in [signal.SIGINT, signal.SIGTERM]:
         signal.signal(
             sig,
             lambda s, f: (
                 logger.warning(f"Received signal {s}, shutting down..."),
-                #handle_exit(tracker, storage, args, splitting_plan),
                 sys.exit(1),
             ),
         )
@@ -407,7 +382,7 @@ async def main():
         return
 
     # Process the splitting
-    await process_split(args, splitting_plan, storage, tracker)
+    await process_split(args, splitting_plan, storage)
 
     # Create a new index file
     new_index = {"weight_map": {}}
@@ -418,9 +393,6 @@ async def main():
     await storage.save_json("model.safetensors.index.json", new_index)
 
     # Calculate stats
-    completed = tracker.get_completed_files()
-    failed = tracker.get_failed_files()
-    status = tracker.status
     duration = time.time() - status["start_time"]
 
     logger.info(f"Splitting completed in {duration:.2f} seconds!")
