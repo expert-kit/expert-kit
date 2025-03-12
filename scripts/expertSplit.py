@@ -1,32 +1,35 @@
 #!/usr/bin/env python3
 import argparse
+import asyncio
+import uvloop
+
 import json
 import os
 import re
 import sys
 import time
-import tempfile
 import threading
+import io
 import atexit
 import signal
 import concurrent
-from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
-from pathlib import Path
-from typing import Dict, List, Optional, Set, Callable
+from concurrent.futures import ThreadPoolExecutor
+from typing import Dict, List, Optional
 import logging
 from tqdm import tqdm
 
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[logging.StreamHandler()]
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    handlers=[logging.StreamHandler()],
 )
 logger = logging.getLogger("model_splitter")
 
 # Try to import optional dependencies
 try:
     import opendal
+
     OPENDAL_AVAILABLE = True
 except ImportError:
     OPENDAL_AVAILABLE = False
@@ -34,6 +37,7 @@ except ImportError:
 try:
     from safetensors import safe_open
     from safetensors.torch import save_file
+
     SAFETENSORS_AVAILABLE = True
 except ImportError:
     SAFETENSORS_AVAILABLE = False
@@ -41,65 +45,108 @@ except ImportError:
 
 def parse_args():
     """Parse command line arguments"""
-    parser = argparse.ArgumentParser(
-        description="Split DeepSeek-R1 model weights")
+    parser = argparse.ArgumentParser(description="Split DeepSeek-R1 model weights")
 
     # Input/Output locations
-    parser.add_argument("--model_dir", type=str, required=True,
-                        help="Directory containing the original model files")
-    parser.add_argument("--output_dir", type=str, required=True,
-                        help="Directory for saving the split model files or plan")
-    parser.add_argument("--work_dir", type=str, default=".",
-                        help="Directory for storing state files and local copies of the plan (default: current directory)")
+    parser.add_argument(
+        "--model_dir",
+        type=str,
+        required=True,
+        help="Directory containing the original model files",
+    )
+    parser.add_argument(
+        "--output_dir",
+        type=str,
+        required=True,
+        help="Directory for saving the split model files or plan",
+    )
+    parser.add_argument(
+        "--work_dir",
+        type=str,
+        default=".",
+        help="Directory for storing state files and local copies of the plan (default: current directory)",
+    )
 
     # Storage options
-    parser.add_argument("--storage_type", type=str, choices=["fs", "s3", "oss"], default="fs",
-                        help="Storage type: filesystem (fs) or S3 bucket (s3) (default: fs)")
-    parser.add_argument("--s3_bucket", type=str,
-                        help="S3 bucket name (required if storage_type is {s3, oss})")
-    parser.add_argument("--s3_prefix", type=str, default="",
-                        help="Prefix for S3 objects (default: \"\")")
-    parser.add_argument("--access_key", type=str,
-                        help="AWS Access Key ID for S3 access")
-    parser.add_argument("--access_secret", type=str,
-                        help="AWS Secret Access Key for S3 access")
-    parser.add_argument("--s3_endpoint_url", type=str,
-                        help="Custom S3 endpoint URL for S3-compatible services (e.g., Aliyun OSS, MinIO)")
-    parser.add_argument("--s3_region", type=str, default="us-east-1",
-                        help="AWS region for S3 (default: us-east-1)")
+    parser.add_argument(
+        "--storage_type",
+        type=str,
+        choices=["fs", "s3", "oss"],
+        default="fs",
+        help="Storage type: filesystem (fs) or S3 bucket (s3) (default: fs)",
+    )
+    parser.add_argument(
+        "--s3_bucket",
+        type=str,
+        help="S3 bucket name (required if storage_type is {s3, oss})",
+    )
+    parser.add_argument(
+        "--s3_prefix", type=str, default="", help='Prefix for S3 objects (default: "")'
+    )
+    parser.add_argument(
+        "--access_key", type=str, help="AWS Access Key ID for S3 access"
+    )
+    parser.add_argument(
+        "--access_secret", type=str, help="AWS Secret Access Key for S3 access"
+    )
+    parser.add_argument(
+        "--s3_endpoint_url",
+        type=str,
+        help="Custom S3 endpoint URL for S3-compatible services (e.g., Aliyun OSS, MinIO)",
+    )
+    parser.add_argument(
+        "--s3_region",
+        type=str,
+        default="us-east-1",
+        help="AWS region for S3 (default: us-east-1)",
+    )
 
     # Operation mode
-    parser.add_argument("--plan_only", action="store_true",
-                        help="Only generate the splitting plan without creating the files")
-    parser.add_argument("--plan_file", type=str,
-                        help="Use an existing splitting plan file instead of generating a new one")
-    parser.add_argument("--resume", action="store_true",
-                        help="Resume a previously interrupted splitting operation")
-    parser.add_argument("--skip_upload", action="store_true",
-                        help="Do not upload/save the split files (useful for testing)")
+    parser.add_argument(
+        "--plan_only",
+        action="store_true",
+        help="Only generate the splitting plan without creating the files",
+    )
+    parser.add_argument(
+        "--plan_file",
+        type=str,
+        help="Use an existing splitting plan file instead of generating a new one",
+    )
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="Resume a previously interrupted splitting operation",
+    )
+    parser.add_argument(
+        "--skip_upload",
+        action="store_true",
+        help="Do not upload/save the split files (useful for testing)",
+    )
 
     # Performance options
-    parser.add_argument("--thread_num", type=int, default=1,
-                        help="Number of files to process in parallel (default: 1)")
-    parser.add_argument("--verbose", action="store_true",
-                        help="Enable verbose output")
+    parser.add_argument(
+        "--thread_num",
+        type=int,
+        default=1,
+        help="Number of files to process in parallel (default: 1)",
+    )
+    parser.add_argument("--verbose", action="store_true", help="Enable verbose output")
 
     args = parser.parse_args()
 
     # Validate arguments
     if not SAFETENSORS_AVAILABLE:
         logger.error(
-            "SafeTensors is required. Install with: pip install safetensors torch")
+            "SafeTensors is required. Install with: pip install safetensors torch"
+        )
         sys.exit(1)
 
     if not OPENDAL_AVAILABLE:
-        logger.error(
-            "OpenDAL is required. Install with: pip install opendal")
+        logger.error("OpenDAL is required. Install with: pip install opendal")
         sys.exit(1)
 
     if args.storage_type in ["s3", "oss"] and not args.s3_bucket:
-        parser.error(
-            "--s3_bucket is required when --storage_type is {s3, oss}")
+        parser.error("--s3_bucket is required when --storage_type is {s3, oss}")
 
     if args.plan_file and not os.path.isfile(args.plan_file):
         parser.error(f"Plan file not found: {args.plan_file}")
@@ -168,8 +215,7 @@ class DALStorage:
 
         # Create OpenDAL operator based on storage type
         if storage_type == "fs":
-            self.operator = opendal.Operator(
-                "fs", root=kwargs.get("root", "./"))
+            self.operator = opendal.Operator("fs", root=kwargs.get("root", "./"))
         elif storage_type in ["s3", "oss"]:
             # Handle S3-compatible services
             s3_config = {
@@ -201,8 +247,7 @@ class DALStorage:
 
         # Create async operator for parallel operations
         self.async_operator = opendal.AsyncOperator(
-            storage_type,
-            **{k: v for k, v in kwargs.items() if v is not None}
+            storage_type, **{k: v for k, v in kwargs.items() if v is not None}
         )
 
         # Cache for file existence to avoid unnecessary checks
@@ -253,7 +298,7 @@ class DALStorage:
         """Load JSON data from a file"""
         try:
             data = self.operator.read(filename)
-            return json.loads(data.decode('utf-8'))
+            return json.loads(data.decode("utf-8"))
         except Exception as e:
             logger.debug(f"Could not load JSON file {filename}: {e}")
             return None
@@ -261,19 +306,24 @@ class DALStorage:
     def save_json(self, filename: str, data: dict) -> bool:
         """Save JSON data to a file"""
         json_str = json.dumps(data, indent=2)
-        return self.save_file(filename, json_str.encode('utf-8'))
+        return self.save_file(filename, json_str.encode("utf-8"))
 
 
 class FileProcessTracker:
     """Tracks the status of files being processed"""
 
-    def __init__(self, work_dir=".", storage=None, status_filename="file_status.json", backup_interval=60):
+    def __init__(
+        self,
+        work_dir=".",
+        storage=None,
+        status_filename="file_status.json",
+        backup_interval=60,
+    ):
         self.work_dir = work_dir
         self.filename = status_filename
         self.backup_filename = status_filename.replace(".json", ".bak.json")
         self.local_path = os.path.join(self.work_dir, self.filename)
-        self.local_backup_path = os.path.join(
-            self.work_dir, self.backup_filename)
+        self.local_backup_path = os.path.join(self.work_dir, self.backup_filename)
         self.storage = storage  # Storage handler for remote backup
         self.lock = threading.Lock()
         self.backup_interval = backup_interval  # Backup interval in seconds
@@ -282,19 +332,19 @@ class FileProcessTracker:
         # Try to load existing status from local file first
         if os.path.exists(self.local_path):
             try:
-                with open(self.local_path, 'r') as f:
+                with open(self.local_path, "r") as f:
                     self.status = json.load(f)
-                logger.info(
-                    f"Loaded file status from local file: {self.local_path}")
+                logger.info(f"Loaded file status from local file: {self.local_path}")
             except Exception as e:
                 logger.warning(f"Failed to load local status file: {e}")
                 # try to recover from backup file
                 if os.path.exists(self.local_backup_path):
                     try:
-                        with open(self.local_backup_path, 'r') as f:
+                        with open(self.local_backup_path, "r") as f:
                             self.status = json.load(f)
                         logger.info(
-                            f"Recovered from backup file: {self.local_backup_path}")
+                            f"Recovered from backup file: {self.local_backup_path}"
+                        )
                     except Exception as e2:
                         logger.warning(f"Failed to load backup file: {e2}")
                         self.status = self._create_new_status()
@@ -306,7 +356,8 @@ class FileProcessTracker:
 
         # start backup thread
         self.backup_thread = threading.Thread(
-            target=self._periodic_backup_thread, daemon=True)
+            target=self._periodic_backup_thread, daemon=True
+        )
         self.backup_thread.start()
 
     def _periodic_backup_thread(self):
@@ -329,13 +380,11 @@ class FileProcessTracker:
         try:
             with self.lock:
                 # 1. create local backup
-                os.makedirs(os.path.dirname(
-                    self.local_backup_path), exist_ok=True)
-                with open(self.local_backup_path, 'w') as f:
+                os.makedirs(os.path.dirname(self.local_backup_path), exist_ok=True)
+                with open(self.local_backup_path, "w") as f:
                     json.dump(self.status, f, indent=2)
 
-                logger.debug(
-                    f"Created local backup at {self.local_backup_path}")
+                logger.debug(f"Created local backup at {self.local_backup_path}")
 
                 # # 2. create remote backup if storage is available
                 # if self.storage is not None:
@@ -355,21 +404,22 @@ class FileProcessTracker:
     def _create_new_status(self):
         """Create a new empty status dictionary and save it to disk"""
         status = {
-            "pending": [],      # Files waiting to be processed
+            "pending": [],  # Files waiting to be processed
             "in_progress": {},  # Files currently being processed with start time
-            "completed": [],    # Successfully processed files
-            "failed": {},       # Failed files with error messages
+            "completed": [],  # Successfully processed files
+            "failed": {},  # Failed files with error messages
             "start_time": time.time(),
-            "last_updated": time.time()
+            "last_updated": time.time(),
         }
 
         # Ensure the status is immediately saved to disk
         try:
             os.makedirs(os.path.dirname(self.local_path), exist_ok=True)
-            with open(self.local_path, 'w') as f:
+            with open(self.local_path, "w") as f:
                 json.dump(status, f, indent=2)
             logger.info(
-                f"Created new status file at: {self.local_path}, with status: {status}")
+                f"Created new status file at: {self.local_path}, with status: {status}"
+            )
         except Exception as e:
             logger.error(f"Failed to create initial status file: {e}")
 
@@ -378,8 +428,7 @@ class FileProcessTracker:
     def mark_pending(self, files):
         """Mark files as pending processing"""
         with self.lock:
-            self.status["pending"] = list(
-                set(files) - set(self.status["completed"]))
+            self.status["pending"] = list(set(files) - set(self.status["completed"]))
             self._save()
 
     def mark_in_progress(self, filename):
@@ -407,10 +456,7 @@ class FileProcessTracker:
         with self.lock:
             if filename in self.status["in_progress"]:
                 del self.status["in_progress"][filename]
-            self.status["failed"][filename] = {
-                "error": str(error),
-                "time": time.time()
-            }
+            self.status["failed"][filename] = {"error": str(error), "time": time.time()}
             self._save()
 
     def get_pending_files(self):
@@ -445,7 +491,7 @@ class FileProcessTracker:
             os.makedirs(os.path.dirname(self.local_path), exist_ok=True)
 
             # Save to local file
-            with open(self.local_path, 'w') as f:
+            with open(self.local_path, "w") as f:
                 json.dump(self.status, f, indent=2)
 
             logger.debug(f"Saved status to local file: {self.local_path}")
@@ -470,19 +516,20 @@ class FileProcessTracker:
                 # Make sure the file exists in local storage first
                 if not os.path.exists(self.local_path):
                     logger.warning(
-                        f"Local status file doesn't exist, creating it first")
-                    with open(self.local_path, 'w') as f:
+                        f"Local status file doesn't exist, creating it first"
+                    )
+                    with open(self.local_path, "w") as f:
                         json.dump(self.status, f, indent=2)
 
                 # Now read and upload it
-                with open(self.local_path, 'r') as f:
+                with open(self.local_path, "r") as f:
                     status_data = f.read()
 
                 storage_success = self.storage.save_file(
-                    self.filename, status_data.encode('utf-8'))
+                    self.filename, status_data.encode("utf-8")
+                )
                 if storage_success:
-                    logger.info(
-                        f"Backed up status file to storage at {self.filename}")
+                    logger.info(f"Backed up status file to storage at {self.filename}")
                 else:
                     logger.warning(f"Failed to backup status file to storage")
 
@@ -504,7 +551,7 @@ def setup_storage(args):
             access_key=args.access_key,
             secret_key=args.access_secret,
             endpoint=args.s3_endpoint_url,
-            region=args.s3_region
+            region=args.s3_region,
         )
     else:
         # Create filesystem storage
@@ -535,7 +582,13 @@ def load_safetensor_file(file_path: str, weight_names: List[str]):
         return {}
 
 
-def process_file(args, output_file, weights, temp_dir, tracker, storage):
+async def process_file(
+    args,
+    output_file,
+    weights,
+    tracker: FileProcessTracker,
+    storage: DALStorage,
+):
     """
     Process a single file according to the splitting plan
 
@@ -543,7 +596,6 @@ def process_file(args, output_file, weights, temp_dir, tracker, storage):
         args: Command line arguments
         output_file: Name of the output file to create
         weights: Dictionary of weights to extract
-        temp_dir: Temporary directory for intermediate files
         tracker: FileProcessTracker instance
         storage: Storage handler
     """
@@ -569,19 +621,12 @@ def process_file(args, output_file, weights, temp_dir, tracker, storage):
         if not all_tensors:
             raise ValueError(f"No weights found for {output_file}")
 
-        # Create a temporary output file
-        temp_output = os.path.join(temp_dir, output_file)
-        Path(os.path.dirname(temp_output)).mkdir(parents=True, exist_ok=True)
-
         # Create the new safetensor file
-        save_file(all_tensors, temp_output)
-
+        bio = io.BytesIO()
+        save_file(all_tensors, bio)
         # Upload to storage if not skipping
         if not args.skip_upload:
-            with open(temp_output, 'rb') as f:
-                data = f.read()
-
-            success = storage.save_file(output_file, data)
+            success = await storage.save_file_async(output_file, bio.getvalue())
             if success:
                 # Mark as completed
                 tracker.mark_completed(output_file)
@@ -599,62 +644,66 @@ def process_file(args, output_file, weights, temp_dir, tracker, storage):
         return False
 
 
-def process_split(args, splitting_plan, storage, tracker):
+async def process_split(args, splitting_plan, storage, tracker):
     """Process the actual splitting according to the plan"""
-    # Create a temporary directory for intermediate files
-    with tempfile.TemporaryDirectory() as temp_dir:
-        # Get the list of files to process
-        completed_files = set(tracker.get_completed_files())
-        files_to_process = []
+    completed_files = set(tracker.get_completed_files())
+    files_to_process = []
 
-        for file_name in splitting_plan.keys():
-            if file_name not in completed_files:
-                files_to_process.append(file_name)
+    for file_name in splitting_plan.keys():
+        if file_name not in completed_files:
+            files_to_process.append(file_name)
 
-        # Update the tracker with pending files
-        tracker.mark_pending(files_to_process)
+    # Update the tracker with pending files
+    tracker.mark_pending(files_to_process)
 
-        logger.info(
-            f"Processing {len(files_to_process)} out of {len(splitting_plan)} files"
-        )
+    logger.info(
+        f"Processing {len(files_to_process)} out of {len(splitting_plan)} files"
+    )
 
-        with ThreadPoolExecutor(max_workers=args.thread_num) as executor:
-            # with ProcessPoolExecutor(max_workers=args.thread_num) as executor:
-            # Create a progress bar
-            with tqdm(total=len(files_to_process), desc="Processing files") as pbar:
-                future_to_file = {}
+    parallelism = 100
+    task_q = asyncio.Queue(parallelism)
+    done_q = asyncio.Queue(parallelism)
 
-                # Submit all tasks to the executor
-                for output_file in files_to_process:
-                    weights = splitting_plan[output_file]
-                    future = executor.submit(
-                        process_file,
-                        args,
-                        output_file,
-                        weights,
-                        temp_dir,
-                        tracker,
-                        storage
-                    )
-                    future_to_file[future] = output_file
+    async def display_progress():
+        with tqdm(total=len(files_to_process), desc="Processing files") as pbar:
+            while True:
+                await done_q.get()
+                pbar.update(1)
+                asyncio.sleep(0)
 
-                # Process as they complete
-                for future in concurrent.futures.as_completed(future_to_file):
-                    output_file = future_to_file[future]
-                    try:
-                        result = future.result()
-                        pbar.update(1)
-                        logger.debug(f"Completed processing {output_file}")
-                    except Exception as e:
-                        logger.error(
-                            f"Processing error for {output_file}: {e}")
+    async def worker(q: asyncio.Queue, dq: asyncio.Queue):
+        while True:
+            output_file = await q.get()
+            weights = splitting_plan[output_file]
+            await process_file(args, output_file, weights, tracker, storage)
+            q.task_done()
+            dq.put(1)
 
-        # Check for failed files
-        failed_files = tracker.get_failed_files()
-        if failed_files:
-            logger.warning(f"{len(failed_files)} files failed to process")
-            for f, error in failed_files.items():
-                logger.warning(f"  - {f}: {error['error']}")
+    async def feeder(q: asyncio.Queue):
+        for output_file in files_to_process:
+            if q.full():
+                # yield control
+                asyncio.sleep(0)
+            await q.put(output_file)
+            asyncio.sleep(0)
+
+    workers = [asyncio.create_task(worker(task_q)) for _ in range(parallelism)]
+    producer = asyncio.create_task(feeder(task_q))
+    display = asyncio.create_task(display_progress())
+
+    await asyncio.gather(producer)
+    await task_q.join()
+    await done_q.join()
+    for w in workers:
+        w.cancel()
+    display.cancel()
+
+    # Check for failed files
+    failed_files = tracker.get_failed_files()
+    if failed_files:
+        logger.warning(f"{len(failed_files)} files failed to process")
+        for f, error in failed_files.items():
+            logger.warning(f"  - {f}: {error['error']}")
 
 
 # Function to handle clean exit
@@ -673,12 +722,12 @@ def handle_exit(tracker=None, storage=None, args=None, splitting_plan=None):
         # First save locally if args is available
         if args is not None:
             try:
-                plan_file_local = os.path.join(
-                    args.work_dir, "splitting_plan.json")
-                with open(plan_file_local, 'w') as f:
+                plan_file_local = os.path.join(args.work_dir, "splitting_plan.json")
+                with open(plan_file_local, "w") as f:
                     json.dump(splitting_plan, f, indent=2)
                 logger.info(
-                    f"Saved final splitting plan to local file: {plan_file_local}")
+                    f"Saved final splitting plan to local file: {plan_file_local}"
+                )
             except Exception as e:
                 logger.error(f"Failed to save local splitting plan: {e}")
 
@@ -689,7 +738,7 @@ def handle_exit(tracker=None, storage=None, args=None, splitting_plan=None):
             storage.save_json("splitting_plan.json", splitting_plan)
 
 
-def main():
+async def main():
     args = parse_args()
 
     if args.verbose:
@@ -702,18 +751,17 @@ def main():
     tracker = FileProcessTracker(work_dir=args.work_dir, storage=storage)
 
     # Load original weight map
-    model_index_path = os.path.join(
-        args.model_dir, "model.safetensors.index.json")
+    model_index_path = os.path.join(args.model_dir, "model.safetensors.index.json")
     if not os.path.isfile(model_index_path):
         logger.error(f"Model index file not found: {model_index_path}")
         sys.exit(1)
 
-    with open(model_index_path, 'r') as f:
+    with open(model_index_path, "r") as f:
         weight_map = json.load(f)["weight_map"]
 
     # Generate or load splitting plan
     if args.plan_file:
-        with open(args.plan_file, 'r') as f:
+        with open(args.plan_file, "r") as f:
             splitting_plan = json.load(f)
         logger.info(f"Loaded splitting plan from {args.plan_file}")
     else:
@@ -725,7 +773,7 @@ def main():
         # Save the plan to both work_dir and storage
         # 1. Save to work_dir
         plan_file_local = os.path.join(args.work_dir, "splitting_plan.json")
-        with open(plan_file_local, 'w') as f:
+        with open(plan_file_local, "w") as f:
             json.dump(splitting_plan, f, indent=2)
         logger.info(f"Saved splitting plan to local file: {plan_file_local}")
 
@@ -735,15 +783,24 @@ def main():
             logger.info("Saved splitting plan to storage")
 
     # Register exit handler to backup state on program exit
-    atexit.register(handle_exit, tracker=tracker, storage=storage,
-                    args=args, splitting_plan=splitting_plan)
+    atexit.register(
+        handle_exit,
+        tracker=tracker,
+        storage=storage,
+        args=args,
+        splitting_plan=splitting_plan,
+    )
 
     # Register signal handlers for common termination signals
     for sig in [signal.SIGINT, signal.SIGTERM]:
-        signal.signal(sig, lambda s, f: (logger.warning(f"Received signal {s}, shutting down..."),
-                                         handle_exit(
-                                             tracker, storage, args, splitting_plan),
-                                         sys.exit(1)))
+        signal.signal(
+            sig,
+            lambda s, f: (
+                logger.warning(f"Received signal {s}, shutting down..."),
+                handle_exit(tracker, storage, args, splitting_plan),
+                sys.exit(1),
+            ),
+        )
 
     # If plan_only, exit here
     if args.plan_only:
@@ -751,7 +808,7 @@ def main():
         return
 
     # Process the splitting
-    process_split(args, splitting_plan, storage, tracker)
+    await process_split(args, splitting_plan, storage, tracker)
 
     # Create a new index file
     new_index = {"weight_map": {}}
@@ -774,9 +831,10 @@ def main():
 
     if failed:
         logger.warning(
-            "Some files failed to process. See file_status.json for details.")
+            "Some files failed to process. See file_status.json for details."
+        )
         sys.exit(1)
 
 
 if __name__ == "__main__":
-    main()
+    uvloop.run(main())
