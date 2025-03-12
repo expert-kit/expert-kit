@@ -8,7 +8,7 @@ import json
 import os
 import sys
 import time
-from typing import List
+from typing import List, Optional
 from splitter.planner import create_splitting_plan
 from splitter.dal import DALStorage
 import logging
@@ -27,7 +27,8 @@ logger = logging.getLogger("model_splitter")
 
 def parse_args():
     """Parse command line arguments"""
-    parser = argparse.ArgumentParser(description="Split DeepSeek-R1 model weights")
+    parser = argparse.ArgumentParser(
+        description="Split DeepSeek-R1 model weights")
 
     # Input/Output locations
     parser.add_argument(
@@ -105,6 +106,24 @@ def parse_args():
         help="Do not upload/save the split files (useful for testing)",
     )
 
+    # Option for checking remote files
+    parser.add_argument(
+        "--check_remote",
+        action="store_true",
+        help="Check if all files in splitting_plan.json exist in remote storage",
+    )
+    parser.add_argument(
+        "--upload_missing",
+        action="store_true",
+        help="Check for missing files in remote storage and re-upload them",
+    )
+    parser.add_argument(
+        "--missing_files_output",
+        type=str,
+        default="missing_files.txt",
+        help="File to output missing files list (default: missing_files.txt)",
+    )
+
     # Performance options
     parser.add_argument(
         "--thread_num",
@@ -112,12 +131,14 @@ def parse_args():
         default=1,
         help="Number of files to process in parallel (default: 1)",
     )
-    parser.add_argument("--verbose", action="store_true", help="Enable verbose output")
+    parser.add_argument("--verbose", action="store_true",
+                        help="Enable verbose output")
 
     args = parser.parse_args()
 
     if args.storage_type in ["s3", "oss"] and not args.s3_bucket:
-        parser.error("--s3_bucket is required when --storage_type is {s3, oss}")
+        parser.error(
+            "--s3_bucket is required when --storage_type is {s3, oss}")
 
     if args.plan_file and not os.path.isfile(args.plan_file):
         parser.error(f"Plan file not found: {args.plan_file}")
@@ -128,7 +149,7 @@ def parse_args():
     return args
 
 
-def setup_storage(args):
+def setup_storage(args) -> DALStorage:
     """Set up storage handler based on arguments"""
     if args.storage_type in ["s3", "oss"]:
         # Create S3 storage
@@ -172,7 +193,12 @@ def load_safetensor_file(file_path: str, weight_names: List[str]):
     return tensors
 
 
-def process_file_sync(args, output_file, weights, storage: DALStorage):
+def process_file_sync(
+        args,
+        output_file,
+        weights,
+        storage: DALStorage
+):
     logger.debug(f"Processing {output_file} with {len(weights)} weights")
     # Group weights by source file for efficient loading
     by_source = {}
@@ -205,9 +231,8 @@ async def process_file(
     logger.info(f"process {output_file} start ")
     start = time.perf_counter()
     try:
-        future = asyncio.gather(
-            asyncio.to_thread(process_file_sync, args, output_file, weights, storage)
-        )
+        future = asyncio.gather(asyncio.to_thread(
+            process_file_sync, args, output_file, weights, storage))
         st_bytes = (await asyncio.wait_for(future, 30))[0]
         if not args.skip_upload:
             success = await storage.save_file_async(output_file, st_bytes)
@@ -232,14 +257,20 @@ async def process_file(
         logger.info(f"process {output_file} done, elapsed = {now-start}")
 
 
-async def process_split(args, splitting_plan, storage):
+async def process_split(
+    args,
+    splitting_plan,
+    storage: DALStorage,
+    files_to_process: Optional[list] = None
+):
     """Process the actual splitting according to the plan"""
     completed_files = []
-    files_to_process = []
 
-    for file_name in splitting_plan.keys():
-        if file_name not in completed_files:
-            files_to_process.append(file_name)
+    if files_to_process is None:
+        files_to_process = []
+        for file_name in splitting_plan.keys():
+            if file_name not in completed_files:
+                files_to_process.append(file_name)
 
     logger.info(
         f"Processing {len(files_to_process)} out of {len(splitting_plan)} files"
@@ -280,14 +311,66 @@ async def process_split(args, splitting_plan, storage):
             await q.put(output_file)
             await asyncio.sleep(0)
 
-    workers = [asyncio.create_task(worker(task_q, done_q)) for _ in range(parallelism)]
+    workers = [asyncio.create_task(worker(task_q, done_q))
+               for _ in range(parallelism)]
     producer = asyncio.create_task(feeder(task_q))
+    display = asyncio.create_task(display_progress(done_q))
 
     await asyncio.gather(producer)
     await task_q.join()
     await done_q.join()
     for w in workers:
         w.cancel()
+
+
+async def check_remote_files(args, splitting_plan, storage: DALStorage):
+    """Check if all files defined in splitting_plan exist in remote storage"""
+    logger.info(
+        f"Checking if {len(splitting_plan)} files exist in remote storage...")
+
+    # Get all planned files
+    planned_files = set(splitting_plan.keys())
+
+    # Get all existing files in one operation
+    try:
+        logger.info("Fetching remote file list...")
+        all_files = storage.list_files("")
+        existing_files = set(all_files)
+
+        logger.info(f"Found {len(existing_files)} files in remote storage")
+
+        # Find missing files by set difference
+        missing_files = list(planned_files - existing_files)
+
+    except Exception as e:
+        # Fallback to one-by-one checking if bulk listing fails
+        logger.info(
+            f"Bulk listing failed ({str(e)}), falling back to individual file checks")
+        missing_files = []
+
+        # Create a progress bar for checking files
+        with tqdm(total=len(splitting_plan), desc="Checking remote files") as pbar:
+            for file_name in splitting_plan.keys():
+                exists = await storage.file_exists_async(file_name)
+                if not exists:
+                    missing_files.append(file_name)
+                pbar.update(1)
+
+    # Output results
+    if missing_files:
+        logger.info(
+            f"Found {len(missing_files)} missing files out of {len(splitting_plan)} total files")
+
+        # Save missing files to output file
+        with open(args.missing_files_output, "w") as f:
+            for file_name in missing_files:
+                f.write(f"{file_name}\n")
+
+        logger.info(f"Missing files list saved to {args.missing_files_output}")
+    else:
+        logger.info("All files exist in remote storage! ✓")
+
+    return missing_files
 
 
 # Function to handle clean exit
@@ -298,10 +381,12 @@ def handle_exit(storage=None, args=None, splitting_plan=None):
     if splitting_plan is not None:
         # First save locally if args is available
         if args is not None:
-            plan_file_local = os.path.join(args.work_dir, "splitting_plan.json")
+            plan_file_local = os.path.join(
+                args.work_dir, "splitting_plan.json")
             with open(plan_file_local, "w") as f:
                 json.dump(splitting_plan, f, indent=2)
-            logger.info(f"Saved final splitting plan to local file: {plan_file_local}")
+            logger.info(
+                f"Saved final splitting plan to local file: {plan_file_local}")
 
         # Then back up to storage
         if storage is not None:
@@ -319,21 +404,27 @@ async def main():
     # Set up storage
     storage = setup_storage(args)
 
-    # Load original weight map
-    model_index_path = os.path.join(args.model_dir, "model.safetensors.index.json")
-    if not os.path.isfile(model_index_path):
-        logger.error(f"Model index file not found: {model_index_path}")
-        sys.exit(1)
+    # Initialize status dict
+    status = {"start_time": time.time(), "completed": [], "failed": []}
+    completed = []
+    failed = []
 
-    with open(model_index_path, "r") as f:
-        weight_map = json.load(f)["weight_map"]
-
-    # Generate or load splitting plan
+    # Load or generate splitting plan
     if args.plan_file:
         with open(args.plan_file, "r") as f:
             splitting_plan = json.load(f)
         logger.info(f"Loaded splitting plan from {args.plan_file}")
     else:
+        # Load original weight map
+        model_index_path = os.path.join(
+            args.model_dir, "model.safetensors.index.json")
+        if not os.path.isfile(model_index_path):
+            logger.error(f"Model index file not found: {model_index_path}")
+            sys.exit(1)
+
+        with open(model_index_path, "r") as f:
+            weight_map = json.load(f)["weight_map"]
+
         splitting_plan = create_splitting_plan(weight_map)
         logger.info(
             f"Generated new splitting plan with {len(splitting_plan)} output files"
@@ -351,13 +442,36 @@ async def main():
             await storage.save_json("splitting_plan.json", splitting_plan)
             logger.info("Saved splitting plan to storage")
 
+    # If check_remote option is specified, check remote files
+    if args.check_remote or args.upload_missing:
+        missing_files = await check_remote_files(args, splitting_plan, storage)
+        if not missing_files:
+            logger.info(
+                "All files from splitting plan exist in remote storage.")
+        else:
+            logger.info(
+                f"{len(missing_files)} files are missing from remote storage.")
+            logger.info(
+                f"Missing files list saved to {args.missing_files_output}")
+
+            # If upload_missing flag is set, process the missing files
+            if args.upload_missing:
+                logger.info(
+                    f"Starting to upload {len(missing_files)} missing files...")
+                await process_split(args, splitting_plan, storage, missing_files)
+                logger.info("Re-upload of missing files completed!")
+
+        if not args.upload_missing:
+            return
+
     # If plan_only, exit here
-    if args.plan_only:
+    if args.plan_only and not args.upload_missing:
         logger.info("Plan generated. Exiting as requested.")
         return
 
-    # Process the splitting
-    await process_split(args, splitting_plan, storage)
+    # Process the splitting for all files if not just uploading missing ones
+    if not args.upload_missing:
+        await process_split(args, splitting_plan, storage)
 
     # Create a new index file
     new_index = {"weight_map": {}}
@@ -370,6 +484,13 @@ async def main():
     # Calculate stats
 
     logger.info(f"Total files: {len(splitting_plan)}")
+    logger.info(f"Successfully processed: {len(completed)}")
+    logger.info(f"Failed: {len(failed)}")
+
+    if failed:
+        logger.warning(
+            "Some files failed to process. See file_status.json for details."
+        )
 
 
 if __name__ == "__main__":

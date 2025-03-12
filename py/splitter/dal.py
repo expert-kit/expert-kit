@@ -1,7 +1,7 @@
 import logging
 import sys
 import json
-from typing  import Optional
+from typing import Optional, List
 logger = logging.getLogger("dal")
 try:
     import opendal
@@ -19,7 +19,9 @@ class DALStorage:
 
         # Create OpenDAL operator based on storage type
         if storage_type == "fs":
-            self.operator = opendal.Operator("fs", root=kwargs.get("root", "./"))
+            self.operator = opendal.Operator(
+                "fs", root=kwargs.get("root", "./")
+            )
         elif storage_type in ["s3", "oss"]:
             # Handle S3-compatible services
             s3_config = {
@@ -31,9 +33,8 @@ class DALStorage:
             access_key = kwargs.get("access_key")
             secret_key = kwargs.get("secret_key")
 
-
-            assert(access_key!=None)
-            assert(secret_key!=None)
+            assert (access_key != None)
+            assert (secret_key != None)
             match storage_type:
                 case "s3":
                     s3_config["access_key"] = access_key
@@ -65,6 +66,19 @@ class DALStorage:
             logger.error(f"Error saving file {filename}: {e}")
             return False
 
+    async def file_exists_async(self, filename: str) -> bool:
+        """Check if a file exists in storage or cache asynchronously"""
+        if filename in self._file_exists_cache:
+            return True
+
+        try:
+            # Try to stat the file
+            await self.async_operator.stat(filename)
+            self._file_exists_cache.add(filename)
+            return True
+        except:
+            return False
+
     def file_exists(self, filename: str) -> bool:
         """Check if a file exists in storage or cache"""
         if filename in self._file_exists_cache:
@@ -77,6 +91,14 @@ class DALStorage:
             return True
         except:
             return False
+
+    def list_files(self, prefix: str = "") -> List[str]:
+        """List files in storage"""
+        try:
+            return [str(file) for file in self.operator.list(prefix)]
+        except Exception as e:
+            logger.error(f"Error listing files: {e}")
+            return []
 
     def load_data(self, filename: str) -> Optional[bytes]:
         """Load binary data from a file"""
