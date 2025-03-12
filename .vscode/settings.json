@@ -16,8 +16,10 @@
         "ORT_LIB_LOCATION": "${workspaceFolder}/vendor/onnxruntime"
     },
     "cSpell.words": [
+        "ekproto",
         "ndarray",
         "Onnx",
-        "onnxruntime"
+        "onnxruntime",
+        "serde"
     ]
 }
