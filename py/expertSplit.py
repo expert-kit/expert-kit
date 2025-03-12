@@ -205,7 +205,7 @@ def process_file_sync(
         raise ValueError(f"No weights found for {output_file}")
 
     # Create the new safetensor file
-    st_bytes= save(all_tensors)
+    st_bytes = save(all_tensors)
     return st_bytes
 
 async def process_file(
@@ -219,7 +219,7 @@ async def process_file(
     start = time.perf_counter()
     try:
         future = asyncio.gather(asyncio.to_thread(process_file_sync,args,output_file,weights,tracker,storage))
-        st_bytes = await asyncio.wait_for(future, 30)
+        st_bytes = (await asyncio.wait_for(future, 30))[0]
         if not args.skip_upload:
             success = await storage.save_file_async(output_file, st_bytes)
             if success:
