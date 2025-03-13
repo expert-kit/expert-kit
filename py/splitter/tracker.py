@@ -1,4 +1,8 @@
-import os, json, time, threading, logging
+import os
+import json
+import time
+import threading
+import logging
 
 logger = logging.getLogger("tracker")
 
@@ -210,7 +214,7 @@ class FileProcessTracker:
                 # Make sure the file exists in local storage first
                 if not os.path.exists(self.local_path):
                     logger.warning(
-                        f"Local status file doesn't exist, creating it first"
+                        "Local status file doesn't exist, creating it first"
                     )
                     with open(self.local_path, "w") as f:
                         json.dump(self.status, f, indent=2)
@@ -225,7 +229,7 @@ class FileProcessTracker:
                 if storage_success:
                     logger.info(f"Backed up status file to storage at {self.filename}")
                 else:
-                    logger.warning(f"Failed to backup status file to storage")
+                    logger.warning("Failed to backup status file to storage")
 
         except Exception as e:
             logger.error(f"Error backing up status file to storage: {e}")

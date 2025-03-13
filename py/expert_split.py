@@ -7,9 +7,8 @@ import uvloop
 import json
 import os
 import sys
-import time
 from typing import List, Optional
-from splitter.planner import create_splitting_plan
+from splitter.planner import check_remote_files, create_splitting_plan
 from splitter.dal import DALStorage
 import logging
 from tqdm import tqdm
@@ -27,8 +26,7 @@ logger = logging.getLogger("model_splitter")
 
 def parse_args():
     """Parse command line arguments"""
-    parser = argparse.ArgumentParser(
-        description="Split DeepSeek-R1 model weights")
+    parser = argparse.ArgumentParser(description="Split DeepSeek-R1 model weights")
 
     # Input/Output locations
     parser.add_argument(
@@ -131,14 +129,12 @@ def parse_args():
         default=1,
         help="Number of files to process in parallel (default: 1)",
     )
-    parser.add_argument("--verbose", action="store_true",
-                        help="Enable verbose output")
+    parser.add_argument("--verbose", action="store_true", help="Enable verbose output")
 
     args = parser.parse_args()
 
     if args.storage_type in ["s3", "oss"] and not args.s3_bucket:
-        parser.error(
-            "--s3_bucket is required when --storage_type is {s3, oss}")
+        parser.error("--s3_bucket is required when --storage_type is {s3, oss}")
 
     if args.plan_file and not os.path.isfile(args.plan_file):
         parser.error(f"Plan file not found: {args.plan_file}")
@@ -193,12 +189,7 @@ def load_safetensor_file(file_path: str, weight_names: List[str]):
     return tensors
 
 
-def process_file_sync(
-        args,
-        output_file,
-        weights,
-        storage: DALStorage
-):
+def process_file_sync(args, output_file, weights, storage: DALStorage):
     logger.debug(f"Processing {output_file} with {len(weights)} weights")
     # Group weights by source file for efficient loading
     by_source = {}
@@ -231,9 +222,10 @@ async def process_file(
     logger.info(f"process {output_file} start ")
     start = time.perf_counter()
     try:
-        future = asyncio.gather(asyncio.to_thread(
-            process_file_sync, args, output_file, weights, storage))
-        st_bytes = (await asyncio.wait_for(future, 30))[0]
+        future = asyncio.gather(
+            asyncio.to_thread(process_file_sync, args, output_file, weights, storage)
+        )
+        st_bytes = (await asyncio.wait_for(future, 300))[0]
         if not args.skip_upload:
             success = await storage.save_file_async(output_file, st_bytes)
             if success:
@@ -258,10 +250,7 @@ async def process_file(
 
 
 async def process_split(
-    args,
-    splitting_plan,
-    storage: DALStorage,
-    files_to_process: Optional[list] = None
+    args, splitting_plan, storage: DALStorage, files_to_process: Optional[list] = None
 ):
     """Process the actual splitting according to the plan"""
     completed_files = []
@@ -283,7 +272,10 @@ async def process_split(
     async def display_progress(dq: asyncio.Queue):
         with tqdm(total=len(files_to_process), desc="Processing files") as pbar:
             while True:
-                await dq.get()
+                try:
+                    await dq.get()
+                except asyncio.CancelledError:
+                    return
                 pbar.update(1)
                 dq.task_done()
                 await asyncio.sleep(0)
@@ -296,8 +288,9 @@ async def process_split(
                 claimed = True
                 weights = splitting_plan[output_file]
                 fut = process_file(args, output_file, weights, storage)
-                await asyncio.wait_for(fut, 90)
-            except Exception as e:
+                await asyncio.wait_for(fut, 600)
+                await dq.put(1)
+            except Exception:
                 print(traceback.format_exc())
             finally:
                 if claimed:
@@ -311,8 +304,7 @@ async def process_split(
             await q.put(output_file)
             await asyncio.sleep(0)
 
-    workers = [asyncio.create_task(worker(task_q, done_q))
-               for _ in range(parallelism)]
+    workers = [asyncio.create_task(worker(task_q, done_q)) for _ in range(parallelism)]
     producer = asyncio.create_task(feeder(task_q))
     display = asyncio.create_task(display_progress(done_q))
 
@@ -321,56 +313,7 @@ async def process_split(
     await done_q.join()
     for w in workers:
         w.cancel()
-
-
-async def check_remote_files(args, splitting_plan, storage: DALStorage):
-    """Check if all files defined in splitting_plan exist in remote storage"""
-    logger.info(
-        f"Checking if {len(splitting_plan)} files exist in remote storage...")
-
-    # Get all planned files
-    planned_files = set(splitting_plan.keys())
-
-    # Get all existing files in one operation
-    try:
-        logger.info("Fetching remote file list...")
-        all_files = storage.list_files("")
-        existing_files = set(all_files)
-
-        logger.info(f"Found {len(existing_files)} files in remote storage")
-
-        # Find missing files by set difference
-        missing_files = list(planned_files - existing_files)
-
-    except Exception as e:
-        # Fallback to one-by-one checking if bulk listing fails
-        logger.info(
-            f"Bulk listing failed ({str(e)}), falling back to individual file checks")
-        missing_files = []
-
-        # Create a progress bar for checking files
-        with tqdm(total=len(splitting_plan), desc="Checking remote files") as pbar:
-            for file_name in splitting_plan.keys():
-                exists = await storage.file_exists_async(file_name)
-                if not exists:
-                    missing_files.append(file_name)
-                pbar.update(1)
-
-    # Output results
-    if missing_files:
-        logger.info(
-            f"Found {len(missing_files)} missing files out of {len(splitting_plan)} total files")
-
-        # Save missing files to output file
-        with open(args.missing_files_output, "w") as f:
-            for file_name in missing_files:
-                f.write(f"{file_name}\n")
-
-        logger.info(f"Missing files list saved to {args.missing_files_output}")
-    else:
-        logger.info("All files exist in remote storage! ✓")
-
-    return missing_files
+    display.cancel()
 
 
 # Function to handle clean exit
@@ -381,12 +324,10 @@ def handle_exit(storage=None, args=None, splitting_plan=None):
     if splitting_plan is not None:
         # First save locally if args is available
         if args is not None:
-            plan_file_local = os.path.join(
-                args.work_dir, "splitting_plan.json")
+            plan_file_local = os.path.join(args.work_dir, "splitting_plan.json")
             with open(plan_file_local, "w") as f:
                 json.dump(splitting_plan, f, indent=2)
-            logger.info(
-                f"Saved final splitting plan to local file: {plan_file_local}")
+            logger.info(f"Saved final splitting plan to local file: {plan_file_local}")
 
         # Then back up to storage
         if storage is not None:
@@ -405,7 +346,6 @@ async def main():
     storage = setup_storage(args)
 
     # Initialize status dict
-    status = {"start_time": time.time(), "completed": [], "failed": []}
     completed = []
     failed = []
 
@@ -416,8 +356,7 @@ async def main():
         logger.info(f"Loaded splitting plan from {args.plan_file}")
     else:
         # Load original weight map
-        model_index_path = os.path.join(
-            args.model_dir, "model.safetensors.index.json")
+        model_index_path = os.path.join(args.model_dir, "model.safetensors.index.json")
         if not os.path.isfile(model_index_path):
             logger.error(f"Model index file not found: {model_index_path}")
             sys.exit(1)
@@ -446,18 +385,14 @@ async def main():
     if args.check_remote or args.upload_missing:
         missing_files = await check_remote_files(args, splitting_plan, storage)
         if not missing_files:
-            logger.info(
-                "All files from splitting plan exist in remote storage.")
+            logger.info("All files from splitting plan exist in remote storage.")
         else:
-            logger.info(
-                f"{len(missing_files)} files are missing from remote storage.")
-            logger.info(
-                f"Missing files list saved to {args.missing_files_output}")
+            logger.info(f"{len(missing_files)} files are missing from remote storage.")
+            logger.info(f"Missing files list saved to {args.missing_files_output}")
 
             # If upload_missing flag is set, process the missing files
             if args.upload_missing:
-                logger.info(
-                    f"Starting to upload {len(missing_files)} missing files...")
+                logger.info(f"Starting to upload {len(missing_files)} missing files...")
                 await process_split(args, splitting_plan, storage, missing_files)
                 logger.info("Re-upload of missing files completed!")
 
