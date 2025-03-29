@@ -20,7 +20,7 @@ impl ExpertComputation for BasicExpertImpl {
             .map_err(|_e| Status::invalid_argument("invalid tensor"))?;
 
         Ok(Response::new(ExpertForwardReply {
-            output_tensor: vec![],
+            output_tensor: vec![1],
         }))
     }
 }

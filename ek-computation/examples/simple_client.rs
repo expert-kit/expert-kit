@@ -18,6 +18,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         idx: 0,
         batch_size: 0,
     });
-    client.forward(request).await?;
+    let resp = client.forward(request).await?;
+    let output_size = resp.get_ref().output_tensor.len();
+    println!("simple forward success output_size={}", output_size);
     Ok(())
 }

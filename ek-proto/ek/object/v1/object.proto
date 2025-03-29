@@ -1,0 +1,31 @@
+syntax = "proto3";
+package ek.object.v1;
+
+message Metadata {
+  string id = 1;
+  string name = 2;
+  map<string, string> tags = 3;
+}
+
+message ExpertSlice {
+  Metadata meta = 1;
+  repeated Metadata expert_meta = 2;
+  repeated int64 replication = 3;
+}
+
+message Node {
+  Metadata meta = 1;
+  string control_address = 2;
+  string data_address = 3;
+}
+
+message SliceAffinity {
+  string node_id = 1;
+  string slice_id = 2;
+}
+
+message SchedulePlan {
+  Metadata meta = 1;
+  repeated ExpertSlice slices = 2;
+  repeated SliceAffinity affinity = 3;
+}
