@@ -1,3 +1,4 @@
+#![feature(pattern)]
 pub mod ffn;
 mod gate;
 pub mod proto;

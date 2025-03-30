@@ -1,3 +1,4 @@
+#![feature(pattern)]
 mod proto;
 use proto::ek::worker::v1::{
     ForwardReq, ForwardResp,

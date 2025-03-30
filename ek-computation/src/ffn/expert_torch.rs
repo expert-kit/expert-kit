@@ -8,9 +8,15 @@ use tch::{
     nn::{self, Module},
 };
 
-use super::{DType, Device, EkTensor, Expert, ExpertShape, ExpertWeight};
+use super::{DType, Device, EkTensor, Expert, ExpertShape, ExpertWeight, FromSafeTensor};
 
 pub struct TchTensor(Tensor);
+
+impl From<tch::Tensor> for TchTensor {
+    fn from(value: tch::Tensor) -> Self {
+        return TchTensor(value);
+    }
+}
 
 impl Borrow<Tensor> for TchTensor {
     fn borrow(&self) -> &Tensor {
@@ -65,7 +71,19 @@ impl EkTensor for TchTensor {
             .map_err(|_e| EKError::SafeTensorError)
             .unwrap()
     }
+
+    fn from_raw(data: &[u8], shape: &[usize], dtype: DType) -> Self {
+        Tensor::f_from_data_size(
+            data,
+            &shape.iter().map(|x| *x as i64).collect::<Vec<i64>>(),
+            dtype.into(),
+        )
+        .unwrap() // TODO: is it safe to unwrap?
+        .into()
+    }
 }
+
+impl FromSafeTensor for TchTensor {}
 
 impl TorchFFN {
     pub fn new(dim: usize, hidden: usize) -> Self {
