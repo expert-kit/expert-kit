@@ -9,7 +9,7 @@ pub trait Expert<T> {
     fn backend(&self) -> std::string::String;
     fn shape(&self) -> ExpertShape;
     fn rand_input(&self, batch: usize) -> T;
-    fn forward(&self, x: T) -> T;
+    fn forward(&self, x: &T) -> T;
 }
 
 #[derive(Clone, Copy)]
@@ -28,8 +28,10 @@ pub enum Device {
     CPU,
 }
 
-pub trait EkTensor {
+pub trait EkTensor: Sized {
     fn rand(shape: Vec<usize>, dtype: DType, dev: Device) -> Self;
+    fn cat(tensors: &[Self], dim: usize) -> Self;
+    fn serialize(&self) -> Vec<u8>;
 }
 
 pub struct ExpertWeight<T>

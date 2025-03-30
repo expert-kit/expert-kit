@@ -20,6 +20,7 @@
         "ndarray",
         "Onnx",
         "onnxruntime",
+        "safetensors",
         "serde"
     ]
 }

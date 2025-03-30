@@ -1,4 +1,7 @@
-use crate::tch_safetensors::read_safetensors;
+use std::borrow::Borrow;
+
+use crate::tch_safetensors::{read_safetensors, write_safetensors};
+
 use ek_base::error::{EKError, EKResult};
 use tch::{
     self, Tensor,
@@ -8,6 +11,12 @@ use tch::{
 use super::{DType, Device, EkTensor, Expert, ExpertShape, ExpertWeight};
 
 pub struct TchTensor(Tensor);
+
+impl Borrow<Tensor> for TchTensor {
+    fn borrow(&self) -> &Tensor {
+        &self.0
+    }
+}
 
 pub struct TorchFFN {
     dim: usize,
@@ -46,6 +55,16 @@ impl EkTensor for TchTensor {
         );
         return TchTensor(rand);
     }
+
+    fn cat(tensors: &[Self], dim: usize) -> Self {
+        TchTensor(tch::Tensor::cat(tensors, dim as i64))
+    }
+
+    fn serialize(&self) -> Vec<u8> {
+        write_safetensors(&[("output", &self.0)])
+            .map_err(|_e| EKError::SafeTensorError)
+            .unwrap()
+    }
 }
 
 impl TorchFFN {
@@ -77,11 +96,11 @@ impl TorchFFN {
     }
 }
 
-impl TryFrom<Vec<u8>> for TchTensor {
+impl TryFrom<&[u8]> for TchTensor {
     type Error = ek_base::error::EKError;
 
-    fn try_from(value: Vec<u8>) -> EKResult<Self> {
-        let tensors = read_safetensors(value.as_slice()).map_err(|_e| EKError::SafeTensorError)?;
+    fn try_from(value: &[u8]) -> EKResult<Self> {
+        let tensors = read_safetensors(value).map_err(|_e| EKError::SafeTensorError)?;
         assert!(tensors.len() == 1);
         let pos = tensors.iter().position(|x| x.0 == "input");
         if let Some(pos) = pos {
@@ -94,8 +113,15 @@ impl TryFrom<Vec<u8>> for TchTensor {
     }
 }
 
+impl TryFrom<Vec<u8>> for TchTensor {
+    type Error = ek_base::error::EKError;
+    fn try_from(value: Vec<u8>) -> EKResult<Self> {
+        return Self::try_from(value.as_slice());
+    }
+}
+
 impl Expert<TchTensor> for TorchFFN {
-    fn forward(&self, x: TchTensor) -> TchTensor {
+    fn forward(&self, x: &TchTensor) -> TchTensor {
         let res = self.module.forward(&x.0);
         TchTensor(res)
     }
