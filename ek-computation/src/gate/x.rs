@@ -1,19 +1,23 @@
+use std::collections::BTreeMap;
+
+use bytes::Bytes;
 use ek_base::error::EKResult;
-use opendal;
 use opendal::Operator;
+use opendal::{self, Buffer};
 use safetensors::tensor::{Dtype, SafeTensors, View};
 
-use crate::tch_safetensors::read_safetensors;
-pub struct SafeTensorLoader {
+pub struct SafeTensorDB {
     dal: Operator,
+    data: BTreeMap<String, Bytes>,
 }
 
-impl SafeTensorLoader {
-    async fn load(&self, key: &str) -> EKResult<()> {
+impl SafeTensorDB {
+    async fn load<'a>(&'a mut self, key: &str) -> EKResult<SafeTensors<'a>> {
         let raw = self.dal.read(key).await?;
-        let tensor = read_safetensors(raw.to_bytes().as_ref())?;
-
-        Ok(())
+        self.data.insert(key.into(), raw.to_bytes());
+        let buf = self.data.get(key).unwrap();
+        let st = safetensors::SafeTensors::deserialize(&buf)?;
+        Ok(st)
     }
 }
 

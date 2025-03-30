@@ -67,9 +67,7 @@ impl EkTensor for TchTensor {
     }
 
     fn serialize(&self) -> Vec<u8> {
-        write_safetensors(&[("output", &self.0)])
-            .map_err(|_e| EKError::SafeTensorError)
-            .unwrap()
+        write_safetensors(&[("output", &self.0)]).unwrap()
     }
 
     fn from_raw(data: &[u8], shape: &[usize], dtype: DType) -> Self {
@@ -111,30 +109,6 @@ impl TorchFFN {
             dim: dim as usize,
             module: Box::new(module),
         };
-    }
-}
-
-impl TryFrom<&[u8]> for TchTensor {
-    type Error = ek_base::error::EKError;
-
-    fn try_from(value: &[u8]) -> EKResult<Self> {
-        let tensors = read_safetensors(value).map_err(|_e| EKError::SafeTensorError)?;
-        assert!(tensors.len() == 1);
-        let pos = tensors.iter().position(|x| x.0 == "input");
-        if let Some(pos) = pos {
-            // TODO: can we zero copy here?
-            let tensor = tensors[pos].1.copy();
-            return Ok(TchTensor(tensor));
-        } else {
-            return Err(ek_base::error::EKError::SafeTensorError);
-        }
-    }
-}
-
-impl TryFrom<Vec<u8>> for TchTensor {
-    type Error = ek_base::error::EKError;
-    fn try_from(value: Vec<u8>) -> EKResult<Self> {
-        return Self::try_from(value.as_slice());
     }
 }
 

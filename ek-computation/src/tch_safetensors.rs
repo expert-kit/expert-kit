@@ -44,19 +44,15 @@ pub fn dtype_to_tch_kind(dtype: Dtype) -> Result<Kind, TchError> {
 }
 
 pub fn read_safetensors(data: &[u8]) -> Result<Vec<(String, Tensor)>, EKError> {
-    let safetensors = SafeTensors::deserialize(data).map_err(|_e| EKError::SafeTensorError)?;
+    let safetensors = SafeTensors::deserialize(data)?;
     safetensors
         .tensors()
         .into_iter()
         .map(|(name, view)| {
             let size: Vec<i64> = view.shape().iter().map(|&x| x as i64).collect();
             let kind: Kind = dtype_to_tch_kind(view.dtype()).unwrap();
-            let tensor_w: Result<Tensor, _> = Tensor::f_from_data_size(view.data(), &size, kind);
-            if let Ok(tensor) = tensor_w {
-                Ok((name, tensor))
-            } else {
-                Err(EKError::SafeTensorError)
-            }
+            let tensor = Tensor::f_from_data_size(view.data(), &size, kind).unwrap();
+            Ok((name, tensor))
         })
         .collect()
 }
@@ -118,8 +114,7 @@ pub fn write_safetensors<S: AsRef<str>, T: AsRef<Tensor>>(
         .map(|(name, tensor)| {
             Ok::<(&str, SafeView), TchError>((name.as_ref(), tensor.as_ref().try_into()?))
         })
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|_e| EKError::SafeTensorError)?;
+        .collect::<Result<Vec<_>, _>>()?;
 
-    safetensors::tensor::serialize(views, &None).map_err(|_e| EKError::SafeTensorError)
+    safetensors::tensor::serialize(views, &None).map_err(|_e| _e.into())
 }

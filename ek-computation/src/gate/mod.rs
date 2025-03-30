@@ -2,7 +2,7 @@ mod x;
 use super::ffn::Expert;
 use crate::{ffn::EkTensor, proto::ek};
 use ek_base::error::EKResult;
-use std::{collections::BTreeMap, marker::PhantomData, result};
+use std::collections::BTreeMap;
 
 use tokio::sync::RwLock;
 
@@ -22,9 +22,7 @@ where
             experts: RwLock::new(BTreeMap::new()),
         }
     }
-    async fn create_expert(&mut self, meta: ek::object::v1::Metadata) {
-        // meta.tags.get("safetensor_key")
-    }
+    async fn create_expert(&mut self, meta: ek::object::v1::Metadata) {}
 
     pub async fn add_expert(&mut self, name: String, expert: Box<dyn Expert<T> + 'static>) {
         let mut exps = self.experts.write().await;

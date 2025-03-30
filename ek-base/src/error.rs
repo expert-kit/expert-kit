@@ -6,7 +6,10 @@ use thiserror::Error;
 #[derive(Error, Debug)]
 pub enum EKError {
     #[error("error related to safe tensor conversion")]
-    SafeTensorError,
+    SafeTensorError(#[from] safetensors::SafeTensorError),
+
+    #[error("error related tch-rs")]
+    TchError(#[from] tch::TchError),
 
     #[error("tensor name not found")]
     SafeTensorNotFound,
@@ -15,13 +18,7 @@ pub enum EKError {
     ExpertNotFound(string::String),
 
     #[error("opendal error")]
-    OpenDALError(opendal::Error),
+    OpenDALError(#[from] opendal::Error),
 }
 
 pub type EKResult<T> = std::result::Result<T, EKError>;
-
-impl From<opendal::Error> for EKError {
-    fn from(value: opendal::Error) -> Self {
-        return Self::OpenDALError(value);
-    }
-}

@@ -727,6 +727,8 @@ name = "ek_base"
 version = "0.1.0"
 dependencies = [
  "opendal",
+ "safetensors 0.5.3",
+ "tch",
  "thiserror 2.0.12",
 ]
 
@@ -735,6 +737,7 @@ name = "ek_computation"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "bytes",
  "clap",
  "ek_base",
  "log",
