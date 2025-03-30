@@ -4,9 +4,7 @@ use polars::frame::DataFrame;
 use polars::frame::row::Row;
 use polars::prelude::*;
 
-use crate::expert::{Expert, ExpertShape};
-use crate::expert_ort::OnnxFFN;
-use crate::expert_torch::TorchFFN;
+use ek_computation::ffn::{Expert, ExpertShape, expert_ort::OnnxFFN, expert_torch::TorchFFN};
 
 pub enum GenericExpert {
     Torch(TorchFFN),

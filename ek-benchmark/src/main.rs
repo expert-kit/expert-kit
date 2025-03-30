@@ -1,9 +1,6 @@
 #![feature(f16)]
 
 mod bench;
-mod expert;
-mod expert_ort;
-mod expert_torch;
 use std::{
     fs::File,
     path::PathBuf,
@@ -12,7 +9,8 @@ use std::{
 
 use bench::{BenchmarkerImpl, GenericExpert};
 use clap::{Parser, ValueEnum};
-use expert_torch::TorchFFN;
+use ek_computation::ffn::expert_ort;
+use ek_computation::ffn::expert_torch::TorchFFN;
 use polars::prelude::{IntoLazy, ParquetWriter, col};
 extern crate pretty_env_logger;
 #[macro_use]
@@ -36,7 +34,7 @@ struct Cli {
     #[clap(value_enum, short, long,default_value_t=Backend::Torch)]
     backend: Backend,
 
-    #[clap(short, long, value_delimiter = ',')]
+    #[clap(short, long, value_delimiter = ',',default_values_t=vec![1,2,4,8])]
     range: Vec<usize>,
 
     #[clap(short, long, default_value_t = 2048)]
@@ -64,11 +62,12 @@ fn main() {
     pretty_env_logger::init();
     let m = Cli::parse();
 
-    let expert_count = 10;
+    let expert_count = m.experts;
     let mut experts: Vec<GenericExpert> = vec![];
-    for _ in 0..expert_count {
+    for i in 0..expert_count {
         match m.backend {
             Backend::Torch => {
+                info!("create torch expert {}", i);
                 let exp = TorchFFN::new(m.dim, m.hidden);
                 experts.push(GenericExpert::Torch(exp));
             }

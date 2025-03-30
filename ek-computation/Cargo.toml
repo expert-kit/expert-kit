@@ -22,6 +22,7 @@ sysinfo = "0.33.1"
 log = { workspace = true }
 safetensors = "0.5.3"
 ek_base = { path = "../ek-base" }
+async-trait = "0.1.88"
 
 
 [build-dependencies]
