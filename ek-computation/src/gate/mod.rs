@@ -20,6 +20,10 @@ where
             experts: RwLock::new(BTreeMap::new()),
         }
     }
+    async fn create_expert(&mut self, name: String) {
+        
+
+    }
 
     pub async fn add_expert(&mut self, name: String, expert: Box<dyn Expert<T> + 'static>) {
         let mut exps = self.experts.write().await;

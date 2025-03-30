@@ -62,11 +62,12 @@ fn main() {
     pretty_env_logger::init();
     let m = Cli::parse();
 
-    let expert_count = 10;
+    let expert_count = m.experts;
     let mut experts: Vec<GenericExpert> = vec![];
-    for _ in 0..expert_count {
+    for i in 0..expert_count {
         match m.backend {
             Backend::Torch => {
+                info!("create torch expert {}", i);
                 let exp = TorchFFN::new(m.dim, m.hidden);
                 experts.push(GenericExpert::Torch(exp));
             }
