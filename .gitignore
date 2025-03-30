@@ -3,3 +3,6 @@ vendor
 .venv
 data
 __pycache__
+
+*.egg-info/
+.vscode/

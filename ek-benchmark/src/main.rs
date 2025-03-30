@@ -13,7 +13,7 @@ use std::{
 use bench::{BenchmarkerImpl, GenericExpert};
 use clap::{Parser, ValueEnum};
 use expert_torch::TorchFFN;
-use polars::prelude::{IntoLazy, ParquetWriter, SortMultipleOptions, col};
+use polars::prelude::{IntoLazy, ParquetWriter, col};
 extern crate pretty_env_logger;
 #[macro_use]
 extern crate log;
