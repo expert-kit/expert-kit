@@ -2,9 +2,9 @@ use ndarray::ArrayD;
 use ndarray_rand::{RandomExt, rand_distr::Standard};
 use ort::session::{Session, builder::GraphOptimizationLevel};
 
-use crate::expert::{Expert, ExpertShape};
+use super::{Expert, ExpertShape};
 
-pub(crate) struct OnnxFFN {
+pub struct OnnxFFN {
     dim: usize,
     hidden: usize,
     sess: Session,
@@ -43,7 +43,7 @@ impl Expert<ArrayD<f32>> for OnnxFFN {
         vals.to_owned()
     }
 
-    fn shape(&self) -> crate::expert::ExpertShape {
+    fn shape(&self) -> super::ExpertShape {
         ExpertShape {
             dim: self.dim,
             hidden: self.hidden,

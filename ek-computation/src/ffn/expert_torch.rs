@@ -1,9 +1,16 @@
+use ort::execution_providers::TensorRTExecutionProvider;
+use tonic::Status;
+
+use crate::tch_safetensors::read_safetensors;
+use ek_base::error::{EKError, EKResult};
 use tch::{
     Device, Tensor,
     nn::{self, Module},
 };
 
-use crate::expert::{Expert, ExpertShape};
+use super::{Expert, ExpertShape};
+
+pub struct TchTensor(Tensor);
 
 pub struct TorchFFN {
     dim: usize,
@@ -28,18 +35,35 @@ impl TorchFFN {
     }
 }
 
-impl Expert<Tensor> for TorchFFN {
-    fn forward(&self, x: Tensor) -> Tensor {
-        let res = self.module.forward(&x);
-        res
+impl TryFrom<Vec<u8>> for TchTensor {
+    type Error = ek_base::error::EKError;
+
+    fn try_from(value: Vec<u8>) -> EKResult<Self> {
+        let tensors = read_safetensors(value.as_slice()).map_err(|_e| EKError::SafeTensorError)?;
+        assert!(tensors.len() == 1);
+        let pos = tensors.iter().position(|x| x.0 == "input");
+        if let Some(pos) = pos {
+            // TODO: can we zero copy here?
+            let tensor = tensors[pos].1.copy();
+            return Ok(TchTensor(tensor));
+        } else {
+            return Err(ek_base::error::EKError::SafeTensorError);
+        }
+    }
+}
+
+impl Expert<TchTensor> for TorchFFN {
+    fn forward(&self, x: TchTensor) -> TchTensor {
+        let res = self.module.forward(&x.0);
+        TchTensor(res)
     }
 
-    fn rand_input(&self, batch: usize) -> Tensor {
+    fn rand_input(&self, batch: usize) -> TchTensor {
         let input = Tensor::randn(
             [batch as i64, self.dim as i64],
             (tch::Kind::Float, Device::Cpu),
         );
-        input
+        TchTensor(input)
     }
 
     fn shape(&self) -> ExpertShape {
@@ -53,30 +77,3 @@ impl Expert<Tensor> for TorchFFN {
         "torch".to_string()
     }
 }
-
-// pub fn batch_scan() {
-//     let dim = 2048;
-//     let hidden = 7168;
-//     let expert_count = 64;
-//     let mut experts = Vec::new();
-
-//     for _ in 0..expert_count {
-//         let expert = TorchFFN::new(dim, hidden);
-//         experts.push(expert);
-//     }
-
-//     for batch in [1, 2, 4, 8, 16, 32, 64].iter() {
-//         let start = Instant::now();
-//         for expert in experts.iter() {
-//             let input = Tensor::randn([*batch as i64, dim], (tch::Kind::Float, Device::Cpu));
-//             let _ = expert.forward(input);
-//         }
-//         println!(
-//             "batch={} total={}ms layer={} layer_elapsed={} ms",
-//             batch,
-//             start.elapsed().as_millis(),
-//             expert_count,
-//             start.elapsed().as_millis() as f64 / expert_count as f64
-//         );
-//     }
-// }

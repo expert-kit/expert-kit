@@ -1,9 +1,6 @@
 #![feature(f16)]
 
 mod bench;
-mod expert;
-mod expert_ort;
-mod expert_torch;
 use std::{
     fs::File,
     path::PathBuf,
@@ -12,8 +9,9 @@ use std::{
 
 use bench::{BenchmarkerImpl, GenericExpert};
 use clap::{Parser, ValueEnum};
-use expert_torch::TorchFFN;
-use polars::prelude::{IntoLazy, ParquetWriter, SortMultipleOptions, col};
+use ek_computation::ffn::expert_ort;
+use ek_computation::ffn::expert_torch::TorchFFN;
+use polars::prelude::{IntoLazy, ParquetWriter, col};
 extern crate pretty_env_logger;
 #[macro_use]
 extern crate log;
@@ -36,7 +34,7 @@ struct Cli {
     #[clap(value_enum, short, long,default_value_t=Backend::Torch)]
     backend: Backend,
 
-    #[clap(short, long, value_delimiter = ',')]
+    #[clap(short, long, value_delimiter = ',',default_values_t=vec![1,2,4,8])]
     range: Vec<usize>,
 
     #[clap(short, long, default_value_t = 2048)]
