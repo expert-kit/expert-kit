@@ -1,6 +1,5 @@
 syntax = "proto3";
 package ek.control.v1;
-
 import "ek/object/v1/object.proto";
 
 message CreatePlanReq {
