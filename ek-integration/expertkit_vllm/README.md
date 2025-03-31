@@ -57,7 +57,6 @@ This plugin replaces the `DeepseekV2MoE` implementation with `ExpertKitMoE`, whi
 ## Requirements
 
 - vLLM
-- PyTorch >= 2.6.0
 - grpcio >= 1.71.0
 - Protobuf >= 5.29.4
 
@@ -66,9 +65,6 @@ This plugin replaces the `DeepseekV2MoE` implementation with `ExpertKitMoE`, whi
 To deploy the ExpertKit service on a separate GPU machine:
 
 ```bash
-# On the ExpertKit server
-python expertkit_server.py --port 50051
-
 # On the vLLM server
 export EXPERTKIT_ENABLE=1
 python -m vllm.entrypoints.openai.api_server \
