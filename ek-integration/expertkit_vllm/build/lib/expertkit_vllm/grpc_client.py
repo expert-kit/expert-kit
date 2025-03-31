@@ -1,8 +1,7 @@
 import grpc
 import torch
 import io
-from expertkit_vllm.pbpy.ek.worker.v1 import expert_pb2_grpc, expert_pb2
-from typing import List
+from expertkit_vllm.pbpy import expert_pb2_grpc, expert_pb2
 
 
 class ExpertKitClient:
@@ -14,45 +13,42 @@ class ExpertKitClient:
             timeout_sec: gRPC timeout in seconds (default: 2.0s)
         """
         self.channel = grpc.insecure_channel(expertkit_addr)
-        self.stub = expert_pb2_grpc.ComputationServiceStub(self.channel)
+        self.stub = expert_pb2_grpc.ExpertComputationStub(self.channel)
         self.timeout = timeout_sec
 
     def forward_expert(
         self,
-        expert_ids: List[List[str]],
+        layer: int,
+        idx: int,
         hidden_state: torch.Tensor
     ) -> torch.Tensor:
         """Blocking call to expert-kit. Raises on any failure.
 
         Args:
-            expert_ids: Experts activated for each sequence, shape in [batch_size, n_routed_experts]
-            hidden_state: Attention output, shape in [batch_size, attn_dim]
+            layer: Layer ID 
+            idx: Expert index
+            hidden_state: Input tensor
 
         Returns:
-            Output tensor from remote expert computation, shape in [batch_size, n_routed_experts, expert_dim]
+            Output tensor from remote expert computation
 
         Raises:
             RuntimeError: On any gRPC or tensor serialization failure
         """
+        # Get batch size from input tensor
+        batch_size = hidden_state.size(0)
+
         # Serialize tensor (no compression)
         buf = io.BytesIO()
         torch.save(hidden_state, buf)
         tensor_data = buf.getvalue()
 
-        # Genereate expert ids info
-        seq_infos = []
-        for ids in expert_ids:
-            seq_infos.append(
-                expert_pb2.ForwardReq.SequenceInfo(
-                    experts=ids
-                )
-            )
-
         try:
-            response: expert_pb2.ForwardResp = self.stub.Forward(
-                expert_pb2.ForwardReq(
-                    instance_id="test",
-                    sequences=seq_infos,
+            response = self.stub.Forward(
+                expert_pb2.ExpertForwardRequest(
+                    layer=layer,
+                    idx=idx,
+                    batch_size=batch_size,
                     tensor=tensor_data
                 ),
                 timeout=self.timeout

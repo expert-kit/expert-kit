@@ -19,9 +19,6 @@ class ExpertKitMoE(nn.Module):
     raw tensor transfer without compression.
     """
 
-    # sharing grpc client
-    client: Optional[ExpertKitClient] = None
-
     def __init__(
         self,
         config: PretrainedConfig,
@@ -35,7 +32,6 @@ class ExpertKitMoE(nn.Module):
 
         # Extract layer ID from prefix for gRPC call
         try:
-            # TODO: now hard code for Deepseek Model, layer_id may in different position
             self.layer_id = int(prefix.split(".")[-2])
         except (IndexError, ValueError):
             self.layer_id = 0
@@ -46,9 +42,7 @@ class ExpertKitMoE(nn.Module):
 
         # Initialize gRPC client
         timeout_sec = getattr(config, "expertkit_timeout_sec", 2.0)
-
-        if self.client is None:
-            self.client = ExpertKitClient(config.expertkit_addr, timeout_sec)
+        self.client = ExpertKitClient(config.expertkit_addr, timeout_sec)
 
         # We still need the gate for routing
         self.gate = ReplicatedLinear(
@@ -84,7 +78,7 @@ class ExpertKitMoE(nn.Module):
         Raises:
             RuntimeError: On any remote computation failure
         """
-        batch_size, hidden_dim = hidden_states.shape
+        num_tokens, hidden_dim = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_dim)
 
         # Compute routing (same as original)
@@ -94,6 +88,8 @@ class ExpertKitMoE(nn.Module):
         top_k = min(self.num_experts_per_tok, self.n_routed_experts)
         routing_weights, routing_indices = torch.topk(
             router_logits, top_k, dim=-1)
+        
+        print("routing indices: ", routing_indices)
 
         # Normalize weights (if required)
         if self.norm_topk_prob:
@@ -101,31 +97,41 @@ class ExpertKitMoE(nn.Module):
         else:
             routing_weights = torch.sigmoid(routing_weights)
 
-        # Convert expert indices to string IDs as required by forward_expert
-        # Assuming you have a mapping from indices to expert string IDs
-        expert_ids = []
-        for seq_idx in range(batch_size):
-            # Get expert indices for current token
-            token_expert_indices = routing_indices[seq_idx].tolist()
-            # Convert indices to string IDs (adjust this based on your actual ID mapping)
-            token_expert_ids = [
-                f"{self.layer}_{expert_idx}" for expert_idx in token_expert_indices]
-            expert_ids.append(token_expert_ids)
+        # For each token, compute weighted sum of expert outputs
+        # Initialize output with zeros
+        output = torch.zeros_like(hidden_states)
 
-        # Call remote expert service with all tokens and their assigned experts
-        # This returns a tensor with shape [seq, expert, dim]
-        expert_outputs = self.client.forward_expert(
-            expert_ids=expert_ids,
-            hidden_state=hidden_states
-        )
+        # For each expert, collect tokens that route to it
+        for expert_idx in range(self.n_routed_experts):
+            # Find which tokens route to this expert and their positions
+            mask = routing_indices == expert_idx
+            if not mask.any():
+                continue  # Skip if no tokens route to this expert
 
-        # expert_outputs shape is [num_tokens, top_k, hidden_dim]
+            # Get positions and weights for this expert
+            positions = torch.nonzero(mask)
+            token_indices = positions[:, 0]  # Which tokens
+            weight_indices = positions[:, 1]  # Which position in the top-k
 
-        # Calculate weighted sum
-        # Expand routing_weights to [num_tokens, top_k, 1] for broadcast calculation
-        expanded_weights = routing_weights.unsqueeze(-1)
+            # Get weights for these positions
+            weights = routing_weights[token_indices,
+                                      weight_indices].unsqueeze(1)
 
-        # Compute weighted sum across expert dimension: [num_tokens, hidden_dim]
-        output = torch.sum(expanded_weights * expert_outputs, dim=1)
+            # Get input for this expert
+            expert_input = hidden_states[token_indices]
 
-        return output.view(batch_size, hidden_dim)
+            # Forward through the remote expert
+            expert_output = self.client.forward_expert(
+                layer=self.layer_id,
+                idx=expert_idx,
+                hidden_state=expert_input
+            )
+
+            # Add weighted expert output to the result
+            output[token_indices] += weights * expert_output
+
+        # Apply tensor model parallel reduction if needed
+        if self.tp_size > 1:
+            output = tensor_model_parallel_all_reduce(output)
+
+        return output.view(num_tokens, hidden_dim)
