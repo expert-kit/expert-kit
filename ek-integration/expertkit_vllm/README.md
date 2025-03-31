@@ -54,30 +54,6 @@ outputs = llm.generate("Hello, world!", max_tokens=100)
 
 This plugin replaces the `DeepseekV2MoE` implementation with `ExpertKitMoE`, which routes expert computation to ExpertKit service.
 
-### Protocol Definition
-
-The gRPC service is defined in `expert.proto`:
-
-```protobuf
-syntax = "proto3";
-package ek;
-
-message ExpertForwardRequest {
-  int32 layer = 1;
-  int32 idx = 2;
-  int32 batch_size = 3;
-  bytes tensor = 4;
-}
-
-message ExpertForwardReply {
-  bytes output_tensor = 1;
-}
-
-service ExpertComputation {
-  rpc Forward(ExpertForwardRequest) returns (ExpertForwardReply);
-}
-```
-
 ## Requirements
 
 - vLLM
