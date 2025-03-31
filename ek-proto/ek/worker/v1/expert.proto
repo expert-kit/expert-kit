@@ -4,17 +4,23 @@ package ek.worker.v1;
 import "ek/object/v1/object.proto";
 
 message ForwardReq {
-  string expert_id = 1;
-  int32 batch_size = 2;
+  message SequenceInfo {
+    repeated string experts = 2;
+  }
+  string instance_id = 1;
+  repeated SequenceInfo sequences = 2;
+  // dimension: [seq,dim]
   bytes tensor = 3;
 }
 
 message ForwardResp {
+  //dimension: [seq,expert,dim]
   bytes output_tensor = 1;
 }
 
 service ComputationService {
   rpc Forward(ForwardReq) returns (ForwardResp);
+  //TODO: Batch Forward
 }
 
 message ExpertState {

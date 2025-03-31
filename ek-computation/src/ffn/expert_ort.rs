@@ -33,8 +33,11 @@ impl Expert<ArrayD<f32>> for OnnxFFN {
         input
     }
 
-    fn forward(&self, x: ArrayD<f32>) -> ArrayD<f32> {
-        let outputs = self.sess.run(ort::inputs!["input"=>x].unwrap()).unwrap();
+    fn forward(&self, x: &ArrayD<f32>) -> ArrayD<f32> {
+        let outputs = self
+            .sess
+            .run(ort::inputs!["input"=>x.clone()].unwrap())
+            .unwrap();
         let vals = outputs
             .get("output")
             .unwrap()

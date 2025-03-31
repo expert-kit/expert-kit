@@ -10,9 +10,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let tensor = tch::Tensor::rand([1, 2048], (tch::Kind::Float, Device::Cpu));
     let vec = write_safetensors(&[("input".to_string(), tensor)]).unwrap();
     let request = tonic::Request::new(ForwardReq {
-        expert_id: "test".to_string(),
         tensor: vec,
-        batch_size: 0,
+        instance_id: "0".into(),
+        sequences: vec![],
     });
     let resp = client.forward(request).await?;
     let output_size = resp.get_ref().output_tensor.len();

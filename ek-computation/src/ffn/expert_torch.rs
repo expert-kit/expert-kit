@@ -1,13 +1,28 @@
-use crate::tch_safetensors::read_safetensors;
+use std::borrow::Borrow;
+
+use crate::tch_safetensors::{read_safetensors, write_safetensors};
+
 use ek_base::error::{EKError, EKResult};
 use tch::{
     self, Tensor,
     nn::{self, Module},
 };
 
-use super::{DType, Device, EkTensor, Expert, ExpertShape, ExpertWeight};
+use super::{DType, Device, EkTensor, Expert, ExpertShape, ExpertWeight, FromSafeTensor};
 
 pub struct TchTensor(Tensor);
+
+impl From<tch::Tensor> for TchTensor {
+    fn from(value: tch::Tensor) -> Self {
+        return TchTensor(value);
+    }
+}
+
+impl Borrow<Tensor> for TchTensor {
+    fn borrow(&self) -> &Tensor {
+        &self.0
+    }
+}
 
 pub struct TorchFFN {
     dim: usize,
@@ -46,7 +61,27 @@ impl EkTensor for TchTensor {
         );
         return TchTensor(rand);
     }
+
+    fn cat(tensors: &[Self], dim: usize) -> Self {
+        TchTensor(tch::Tensor::cat(tensors, dim as i64))
+    }
+
+    fn serialize(&self) -> Vec<u8> {
+        write_safetensors(&[("output", &self.0)]).unwrap()
+    }
+
+    fn from_raw(data: &[u8], shape: &[usize], dtype: DType) -> Self {
+        Tensor::f_from_data_size(
+            data,
+            &shape.iter().map(|x| *x as i64).collect::<Vec<i64>>(),
+            dtype.into(),
+        )
+        .unwrap() // TODO: is it safe to unwrap?
+        .into()
+    }
 }
+
+impl FromSafeTensor for TchTensor {}
 
 impl TorchFFN {
     pub fn new(dim: usize, hidden: usize) -> Self {
@@ -77,25 +112,8 @@ impl TorchFFN {
     }
 }
 
-impl TryFrom<Vec<u8>> for TchTensor {
-    type Error = ek_base::error::EKError;
-
-    fn try_from(value: Vec<u8>) -> EKResult<Self> {
-        let tensors = read_safetensors(value.as_slice()).map_err(|_e| EKError::SafeTensorError)?;
-        assert!(tensors.len() == 1);
-        let pos = tensors.iter().position(|x| x.0 == "input");
-        if let Some(pos) = pos {
-            // TODO: can we zero copy here?
-            let tensor = tensors[pos].1.copy();
-            return Ok(TchTensor(tensor));
-        } else {
-            return Err(ek_base::error::EKError::SafeTensorError);
-        }
-    }
-}
-
 impl Expert<TchTensor> for TorchFFN {
-    fn forward(&self, x: TchTensor) -> TchTensor {
+    fn forward(&self, x: &TchTensor) -> TchTensor {
         let res = self.module.forward(&x.0);
         TchTensor(res)
     }

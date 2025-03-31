@@ -32,15 +32,14 @@ impl GenericExpert {
         match self {
             GenericExpert::Torch(exp) => {
                 let input = exp.rand_input(batch);
-
                 let start = Instant::now();
-                let _ = exp.forward(input);
+                let _ = exp.forward(&input);
                 start
             }
             GenericExpert::Ort(exp) => {
                 let input = exp.rand_input(batch);
                 let start = Instant::now();
-                let _ = exp.forward(input);
+                let _ = exp.forward(&input);
                 start
             }
         }
