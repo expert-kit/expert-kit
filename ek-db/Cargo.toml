@@ -1,0 +1,13 @@
+[package]
+name = "ek_db"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+
+opendal = { workspace = true }
+safetensors = { workspace = true }
+tch = { workspace = true }
+bytes = { workspace = true }
+tokio = { workspace = true }
+ek_base = { path = "../ek-base" }

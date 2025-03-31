@@ -7,10 +7,13 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use bench::{BenchmarkerImpl, GenericExpert};
+use bench::{BenchmarkExpert, BenchmarkerImpl};
 use clap::{Parser, ValueEnum};
-use ek_computation::ffn::expert_ort;
-use ek_computation::ffn::expert_torch::TorchFFN;
+use ek_computation::{ffn::expert_torch::TorchFFN, x::ExpertBackendType};
+use ek_computation::{
+    ffn::{ExpertBackend, expert_ort},
+    x,
+};
 use polars::prelude::{IntoLazy, ParquetWriter, col};
 extern crate pretty_env_logger;
 #[macro_use]
@@ -20,19 +23,14 @@ extern crate log;
 enum Mode {
     ScanBatch,
 }
-#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, ValueEnum, Debug)]
-enum Backend {
-    Torch,
-    Ort,
-}
 #[derive(Parser)]
 #[command(version, about, long_about = None)]
 struct Cli {
     #[clap(short, long, value_enum, default_value_t=Mode::ScanBatch)]
     mode: Mode,
 
-    #[clap(value_enum, short, long,default_value_t=Backend::Torch)]
-    backend: Backend,
+    #[clap(value_enum, short, long,default_value_t=x::ExpertBackendType::Torch)]
+    backend: x::ExpertBackendType,
 
     #[clap(short, long, value_delimiter = ',',default_values_t=vec![1,2,4,8])]
     range: Vec<usize>,
@@ -63,21 +61,27 @@ fn main() {
     let m = Cli::parse();
 
     let expert_count = m.experts;
-    let mut experts: Vec<GenericExpert> = vec![];
+    let mut experts: Vec<BenchmarkExpert> = vec![];
+    let instance = ek_computation::x::EKInstance {
+        dim: m.dim,
+        hidden: m.hidden,
+        backend: m.backend.into(),
+    };
     for i in 0..expert_count {
         match m.backend {
-            Backend::Torch => {
+            ExpertBackendType::Torch => {
                 info!("create torch expert {}", i);
-                let exp = TorchFFN::new(m.dim, m.hidden);
-                experts.push(GenericExpert::Torch(exp));
+                let exp = TorchFFN::new(instance);
+                experts.push(BenchmarkExpert(ExpertBackend::Torch(exp)));
             }
-            Backend::Ort => {
-                if m.onnx.is_none() {
-                    panic!("Ort backend requires an onnx file");
-                }
-                let exp = expert_ort::OnnxFFN::new(m.onnx.clone().unwrap(), m.dim, m.hidden);
-                experts.push(GenericExpert::Ort(exp));
-            }
+            _ => todo!(),
+            // ::Ort => {
+            //     if m.onnx.is_none() {
+            //         panic!("Ort backend requires an onnx file");
+            //     }
+            //     let exp = expert_ort::OnnxFFN::new(m.onnx.clone().unwrap(), m.dim, m.hidden);
+            //     experts.push(GenericExpert::Ort(exp));
+            // }
         }
     }
     let mut bencher = BenchmarkerImpl::new(experts);

@@ -1,32 +1,35 @@
-mod x;
 use super::ffn::Expert;
-use crate::{ffn::EkTensor, proto::ek};
+use crate::{
+    ffn::{EkTensor, ExpertBackend, expert_torch::TchTensor},
+    proto::ek,
+};
 use ek_base::error::EKResult;
-use std::collections::BTreeMap;
+use ek_db;
+use std::{collections::BTreeMap, result};
 
+use crate::x;
 use tokio::sync::RwLock;
 
-pub struct EKInstanceGate<T>
-where
-    T: for<'a> From<&'a [u8]>,
-{
-    experts: RwLock<BTreeMap<String, Box<dyn Expert<T> + 'static>>>,
+pub struct EKInstanceGate {
+    experts: RwLock<BTreeMap<String, Box<ExpertBackend>>>,
+    tensor_db: ek_db::safetensor::SafeTensorDB,
+    instance: x::EKInstance,
 }
 
-impl<T> EKInstanceGate<T>
-where
-    T: for<'a> From<&'a [u8]> + EkTensor,
-{
+impl EKInstanceGate {
     pub fn new() -> Self {
         EKInstanceGate {
             experts: RwLock::new(BTreeMap::new()),
+            tensor_db: ek_db::safetensor::SafeTensorDB::new(),
+            instance: x::EKInstance::default(),
         }
     }
-    async fn create_expert(&mut self, meta: ek::object::v1::Metadata) {}
-
-    pub async fn add_expert(&mut self, name: String, expert: Box<dyn Expert<T> + 'static>) {
+    async fn create_expert(&mut self, meta: ek::object::v1::Metadata) -> EKResult<()> {
+        let safe_tensor = self.tensor_db.load(&meta.id).await?;
+        let backend = ExpertBackend::build(self.instance, &safe_tensor).await?;
         let mut exps = self.experts.write().await;
-        exps.insert(name, expert);
+        exps.insert(meta.id, Box::new(backend));
+        Ok(())
     }
 
     pub async fn forward(
@@ -36,23 +39,28 @@ where
         let lg = self.experts.read().await;
         let dim = 7168;
 
-        let seq_idx = 0;
         let input_tensor = req.tensor;
         let mut output = vec![];
+        let mut seq_idx = 0;
         for inp in req.sequences.iter() {
-            let seq_data = &input_tensor.as_slice()[seq_idx * dim..(seq_idx + 1) + dim];
-            let tensor = T::from(seq_data);
+            let seq_input = &input_tensor.as_slice()[seq_idx * dim..(seq_idx + 1) + dim];
             for exp_id in &inp.experts {
                 let exp = lg
                     .get(exp_id)
                     .ok_or_else(|| ek_base::error::EKError::ExpertNotFound(exp_id.clone()))?;
                 // TODO: batching here
-                let result = exp.forward(&tensor);
-                output.push(result);
+                let res = exp.forward(seq_input)?;
+                output.push((seq_idx, exp_id, res));
+                // output.push(result);
             }
+            seq_idx += 1;
         }
-        let output_tensor = T::cat(&output, 0);
-        let output_bytes = output_tensor.serialize();
+        output.sort_by(|a, b| a.0.cmp(&b.0));
+        let tensors = output.into_iter().map(|x| x.2).collect::<Vec<TchTensor>>();
+
+        let output_tensor = tch::Tensor::cat(&tensors, 0);
+        // let output_tensor = ::cat(&output, 0);
+        let output_bytes = TchTensor::from(output_tensor).serialize();
         let resp = ek::worker::v1::ForwardResp {
             output_tensor: output_bytes,
         };

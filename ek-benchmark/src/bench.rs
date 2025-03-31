@@ -4,50 +4,42 @@ use polars::frame::DataFrame;
 use polars::frame::row::Row;
 use polars::prelude::*;
 
-use ek_computation::ffn::{Expert, ExpertShape, expert_ort::OnnxFFN, expert_torch::TorchFFN};
+use ek_computation::ffn::{Expert, ExpertBackend, ExpertShape};
 
-pub enum GenericExpert {
-    Torch(TorchFFN),
-    Ort(OnnxFFN),
-}
 pub struct BenchmarkerImpl {
     iterations: usize,
-    experts: Vec<GenericExpert>,
+    experts: Vec<BenchmarkExpert>,
 }
+pub struct BenchmarkExpert(pub ExpertBackend);
 
-impl GenericExpert {
+impl BenchmarkExpert {
     fn backend(&self) -> std::string::String {
-        match self {
-            GenericExpert::Torch(exp) => exp.backend(),
-            GenericExpert::Ort(exp) => exp.backend(),
+        match &self.0 {
+            ExpertBackend::Torch(exp) => exp.backend(),
+            ExpertBackend::Onnx(exp) => todo!(),
         }
     }
     fn shape(&self) -> ExpertShape {
-        match self {
-            GenericExpert::Torch(exp) => exp.shape(),
-            GenericExpert::Ort(exp) => exp.shape(),
+        match &self.0 {
+            ExpertBackend::Torch(exp) => exp.shape(),
+            ExpertBackend::Onnx(exp) => todo!(),
         }
     }
     fn forward(&self, batch: usize) -> Instant {
-        match self {
-            GenericExpert::Torch(exp) => {
+        match &self.0 {
+            ExpertBackend::Torch(exp) => {
                 let input = exp.rand_input(batch);
                 let start = Instant::now();
                 let _ = exp.forward(&input);
                 start
             }
-            GenericExpert::Ort(exp) => {
-                let input = exp.rand_input(batch);
-                let start = Instant::now();
-                let _ = exp.forward(&input);
-                start
-            }
+            ExpertBackend::Onnx(exp) => todo!(),
         }
     }
 }
 
 impl BenchmarkerImpl {
-    pub fn new(experts: Vec<GenericExpert>) -> Self {
+    pub fn new(experts: Vec<BenchmarkExpert>) -> Self {
         BenchmarkerImpl {
             experts,
             iterations: 10,

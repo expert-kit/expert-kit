@@ -740,6 +740,7 @@ dependencies = [
  "bytes",
  "clap",
  "ek_base",
+ "ek_db",
  "log",
  "ndarray",
  "ndarray-rand",
@@ -757,6 +758,18 @@ dependencies = [
  "tokio",
  "tonic",
  "tonic-build",
+]
+
+[[package]]
+name = "ek_db"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "ek_base",
+ "opendal",
+ "safetensors 0.5.3",
+ "tch",
+ "tokio",
 ]
 
 [[package]]

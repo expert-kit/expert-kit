@@ -18,13 +18,14 @@ polars = { workspace = true }
 polars-io = { workspace = true }
 clap = { workspace = true }
 pretty_env_logger = { workspace = true }
-sysinfo = "0.33.1"
 log = { workspace = true }
 safetensors = { workspace = true }
-ek_base = { path = "../ek-base" }
+async-trait = { workspace = true }
 opendal = { workspace = true }
-async-trait = "0.1.88"
-bytes = "1.10.1"
+sysinfo = { workspace = true }
+bytes = { workspace = true }
+ek_base = { path = "../ek-base" }
+ek_db = { path = "../ek-db" }
 
 
 [build-dependencies]

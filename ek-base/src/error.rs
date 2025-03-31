@@ -17,6 +17,9 @@ pub enum EKError {
     #[error("expert not found in the computation node")]
     ExpertNotFound(string::String),
 
+    #[error("expert weight not found in tensor bundle")]
+    ExpertWeightNotFound(string::String),
+
     #[error("opendal error")]
     OpenDALError(#[from] opendal::Error),
 }

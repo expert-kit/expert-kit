@@ -12,7 +12,17 @@ pub struct SafeTensorDB {
 }
 
 impl SafeTensorDB {
-    async fn load<'a>(&'a mut self, key: &str) -> EKResult<SafeTensors<'a>> {
+    pub fn new() -> Self {
+        SafeTensorDB {
+            data: BTreeMap::new(),
+            dal: todo!(),
+        }
+    }
+}
+
+// TODO: abstract to trait
+impl SafeTensorDB {
+    pub async fn load<'a>(&'a mut self, key: &str) -> EKResult<SafeTensors<'a>> {
         let raw = self.dal.read(key).await?;
         self.data.insert(key.into(), raw.to_bytes());
         let buf = self.data.get(key).unwrap();
