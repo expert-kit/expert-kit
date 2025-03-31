@@ -2,7 +2,6 @@ use ek_base::error::{EKError, EKResult};
 use expert_ort::OnnxFFN;
 use expert_torch::{TchTensor, TorchFFN};
 use safetensors::tensor::TensorView;
-use tch::Tensor;
 
 use crate::{
     tch_safetensors::dtype_to_tch_kind,
@@ -62,13 +61,14 @@ where
     fn lookup_suffix(st: &safetensors::SafeTensors, name: &str) -> Option<Self> {
         let idx = st.names().iter().position(|x| x.ends_with(name));
         let tensors = st.tensors();
-        idx.map(|x| {
+        if let Some(x) = idx {
             let (_name, view) = tensors.get(x).unwrap();
-            let size: Vec<usize> = view.shape().iter().map(|&x| x as usize).collect();
+            let size: Vec<usize> = view.shape().to_vec();
             let kind: DType = DType::from(dtype_to_tch_kind(view.dtype()).unwrap());
-            Self::from_raw(view.data(), &size, kind);
-        });
-        None
+            Some(Self::from_raw(view.data(), &size, kind))
+        } else {
+            None
+        }
     }
 }
 
@@ -104,14 +104,14 @@ impl<T: EkTensor + FromSafeTensor> ExpertWeight<T> {
     }
 
     pub fn rand(dim: usize, hidden: usize, dtype: DType, dev: Device) -> Self {
-        return Self {
+        Self {
             down_w: T::rand(vec![dim, hidden], dtype, dev),
             down_b: None,
             up_w: T::rand(vec![hidden, dim], dtype, dev),
             up_b: None,
             gate_w: T::rand(vec![hidden, dim], dtype, dev),
             gate_b: None,
-        };
+        }
     }
 }
 
@@ -162,7 +162,7 @@ impl ExpertBackend {
                 let inp = TchTensor::from_tensor_view(tensor_view);
                 Ok(exp.forward(&inp))
             }
-            ExpertBackend::Onnx(exp) => {
+            ExpertBackend::Onnx(_exp) => {
                 todo!()
             }
         }

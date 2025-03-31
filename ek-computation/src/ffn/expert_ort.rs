@@ -1,6 +1,3 @@
-use std::clone;
-
-use ek_base::error::EKError;
 use ndarray::ArrayD;
 use ndarray_rand::{
     RandomExt,
@@ -68,11 +65,11 @@ where
     }
 }
 
-impl<D> Into<Value> for NDArrayTensor<D>
+impl<D> From<NDArrayTensor<D>> for Value
 where
     D: OrtDType,
 {
-    fn into(self) -> Value {
+    fn from(val: NDArrayTensor<D>) -> Self {
         todo!()
     }
 }

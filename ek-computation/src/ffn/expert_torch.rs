@@ -1,12 +1,12 @@
 use std::borrow::Borrow;
 
 use crate::{
-    tch_safetensors::{read_safetensors, tch_kind_to_dtype, write_safetensors},
+    tch_safetensors::{tch_kind_to_dtype, write_safetensors},
     x,
 };
 
-use ek_base::error::{EKError, EKResult};
-use safetensors::{Dtype, View, tensor::TensorView};
+use ek_base::error::EKResult;
+use safetensors::tensor::TensorView;
 use tch::{
     self, Tensor,
     nn::{self, Module},
@@ -18,7 +18,7 @@ pub struct TchTensor(Tensor);
 
 impl From<tch::Tensor> for TchTensor {
     fn from(value: tch::Tensor) -> Self {
-        return TchTensor(value);
+        TchTensor(value)
     }
 }
 
@@ -34,9 +34,9 @@ pub struct TorchFFN {
     module: Box<dyn Module>,
 }
 
-impl Into<tch::Kind> for DType {
-    fn into(self) -> tch::Kind {
-        match self {
+impl From<DType> for tch::Kind {
+    fn from(val: DType) -> Self {
+        match val {
             DType::Uint8 => tch::Kind::Uint8,
             DType::Int16 => tch::Kind::Int16,
             DType::Int8 => tch::Kind::Int8,
@@ -48,11 +48,10 @@ impl Into<tch::Kind> for DType {
     }
 }
 
-impl Into<tch::Device> for Device {
-    fn into(self) -> tch::Device {
-        match self {
+impl From<Device> for tch::Device {
+    fn from(val: Device) -> Self {
+        match val {
             Device::CPU => tch::Device::Cpu,
-            _ => unimplemented!(),
         }
     }
 }
@@ -63,7 +62,7 @@ struct TchSafeView<'a> {
     dtype: safetensors::Dtype,
 }
 
-impl<'a> safetensors::View for TchSafeView<'a> {
+impl safetensors::View for TchSafeView<'_> {
     fn dtype(&self) -> safetensors::Dtype {
         self.dtype
     }
@@ -87,11 +86,11 @@ impl<'a> From<&'a TchTensor> for TchSafeView<'a> {
     fn from(val: &'a TchTensor) -> Self {
         let dtype = tch_kind_to_dtype(val.0.kind()).unwrap();
         let shape = val.0.size().iter().map(|&x| x as usize).collect();
-        return Self {
+        Self {
             tensor: &val.0,
             shape,
             dtype,
-        };
+        }
     }
 }
 
@@ -101,7 +100,7 @@ impl EkTensor for TchTensor {
             shape.into_iter().map(|x| x as i64).collect::<Vec<i64>>(),
             (typ.into(), dev.into()),
         );
-        return TchTensor(rand);
+        TchTensor(rand)
     }
 
     fn cat(tensors: &[Self], dim: usize) -> Self {
@@ -122,7 +121,7 @@ impl EkTensor for TchTensor {
         .into()
     }
 
-    fn from_tensor_view(tv: &TensorView<'_>) -> Self {
+    fn from_tensor_view(_tv: &TensorView<'_>) -> Self {
         todo!()
     }
 }
@@ -130,7 +129,7 @@ impl EkTensor for TchTensor {
 impl FromSafeTensor for TchTensor {}
 
 impl From<&TensorView<'_>> for TchTensor {
-    fn from(value: &TensorView<'_>) -> Self {
+    fn from(_value: &TensorView<'_>) -> Self {
         todo!()
     }
 }

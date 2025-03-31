@@ -11,7 +11,7 @@ use bench::{BenchmarkExpert, BenchmarkerImpl};
 use clap::{Parser, ValueEnum};
 use ek_computation::{ffn::expert_torch::TorchFFN, x::ExpertBackendType};
 use ek_computation::{
-    ffn::{ExpertBackend, expert_ort},
+    ffn::ExpertBackend,
     x,
 };
 use polars::prelude::{IntoLazy, ParquetWriter, col};
@@ -65,7 +65,7 @@ fn main() {
     let instance = ek_computation::x::EKInstance {
         dim: m.dim,
         hidden: m.hidden,
-        backend: m.backend.into(),
+        backend: m.backend,
     };
     for i in 0..expert_count {
         match m.backend {
