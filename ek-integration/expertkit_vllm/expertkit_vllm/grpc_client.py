@@ -39,7 +39,7 @@ class ExpertKitClient:
         torch.save(hidden_state, buf)
         tensor_data = buf.getvalue()
 
-        # Genereate expert ids info
+        # Generate expert ids info
         seq_infos = []
         for ids in expert_ids:
             seq_infos.append(

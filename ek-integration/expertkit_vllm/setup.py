@@ -10,7 +10,7 @@ setup(
         "vllm",
         "torch>=2.0.0",
         "grpcio>=1.44.0",
-        "protobuf>=3.19.0",
+        "protobuf>=5.29.0",
     ],
     entry_points={
         "vllm.general_plugins": [

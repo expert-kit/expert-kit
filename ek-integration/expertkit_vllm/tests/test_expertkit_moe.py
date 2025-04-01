@@ -77,7 +77,7 @@ class TestExpertKitMoE(unittest.TestCase):
         )
 
         # Check that the layer_id was extracted correctly
-        self.assertEqual(self.moe.layer_id, 5)
+        self.assertEqual(self.moe.layer_idx, 5)
 
         # Check that the gate was initialized
         self.assertIsNotNone(self.moe.gate)
