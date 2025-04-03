@@ -1,9 +1,18 @@
-/target
-vendor
-.venv
-data
-__pycache__
-
-*.egg-info/
-.vscode/
+# Build files
+target/
 build/
+
+# Envs
+.vscode/
+.venv
+
+# Static files
+vendor
+data
+
+# Python related
+__pycache__
+*.egg-info/
+
+# Log files
+*.log

@@ -7,10 +7,10 @@ from transformers import PretrainedConfig
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.distributed import (
     get_tensor_model_parallel_world_size,
-    tensor_model_parallel_all_reduce
 )
 from vllm.model_executor.layers.linear import ReplicatedLinear
-from .grpc_client import ExpertKitClient
+from vllm.model_executor.models.deepseek_v2 import DeepseekV2MLP
+from expertkit_vllm.grpc_client import ExpertKitClient
 
 logger = logging.getLogger(__name__)
 
@@ -65,6 +65,19 @@ class ExpertKitMoE(nn.Module):
             prefix=f"{prefix}.gate"
         )
 
+        # Prepared for shared experts
+        if config.n_shared_experts is not None:
+            intermediate_size = (config.moe_intermediate_size *
+                                 config.n_shared_experts)
+            self.shared_experts = DeepseekV2MLP(
+                    hidden_size=config.hidden_size,
+                    intermediate_size=intermediate_size,
+                    hidden_act=config.hidden_act,
+                    quant_config=quant_config,
+                    reduce_results=False,
+                    prefix=f"{prefix}.shared_experts",
+                )
+
         if config.topk_method == "noaux_tc":
             self.gate.e_score_correction_bias = nn.Parameter(
                 torch.empty(config.n_routed_experts)
@@ -93,11 +106,14 @@ class ExpertKitMoE(nn.Module):
             RuntimeError: On any remote computation failure
         """
         batch_size, hidden_dim = hidden_states.shape
+        hidden_states = hidden_states.view(-1, hidden_dim)
         if self.debug_mode:
             print(f"🚀shape: {hidden_states.shape}, batch_size: {batch_size}, hidden_dim: {hidden_dim}")
             print(f"🚀remove duplicate shape: {torch.unique(hidden_states, dim=0).shape}")
 
-        hidden_states = hidden_states.view(-1, hidden_dim)
+        shared_output = None
+        if self.n_shared_experts is not None:
+            shared_output = self.shared_experts(hidden_states)
 
         # Compute routing (same as original)
         router_logits, _ = self.gate(hidden_states)
@@ -126,7 +142,7 @@ class ExpertKitMoE(nn.Module):
         expert_ids = []
         
         # If there's no significant reduction, process normally
-        if unique_batch_size > batch_size * 0.8:  # Less than 80% duplication
+        if unique_batch_size > 0.8 * batch_size:  # Unique more than 80%(dominant), send directly
             # Convert expert indices to string IDs
             expert_ids = []
             for seq_idx in range(batch_size):
@@ -145,6 +161,8 @@ class ExpertKitMoE(nn.Module):
 
             expert_outputs = expert_outputs.to(device=hidden_states.device, dtype=hidden_states.dtype)
         else:
+            #TODO: seems only handle errors in which grpc server config with small message size
+
             # Create a mapping from unique hidden states to all original tokens
             # that share this hidden state
             unique_to_original = [[] for _ in range(unique_batch_size)]

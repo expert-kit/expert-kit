@@ -4,11 +4,12 @@ import os
 
 os.environ["EXPERTKIT_ENABLE"] = "1"
 os.environ["VLLM_MLA_DISABLE"] = "1"
-os.environ["EXPERTKIT_DEBUG_MODE"] = "0"
+os.environ["EXPERTKIT_DEBUG_MODE"] = "1"
+os.environ["EXPERTKIT_MODE"] = "moe_mode"
 
 prompts = [
     "Hello, my name is",
-    "The president of the United States is",
+    "The president of the United",
     # "The capital of France is",
     # "The future of AI is",
 ]
