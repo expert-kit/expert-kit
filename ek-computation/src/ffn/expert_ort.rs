@@ -1,13 +1,77 @@
 use ndarray::ArrayD;
-use ndarray_rand::{RandomExt, rand_distr::Standard};
-use ort::session::{Session, builder::GraphOptimizationLevel};
+use ndarray_rand::{
+    RandomExt,
+    rand_distr::{Distribution, Standard},
+};
+use ort::{
+    session::{Session, builder::GraphOptimizationLevel},
+    tensor::PrimitiveTensorElementType,
+    value::Value,
+};
+use safetensors::tensor::TensorView;
 
-use super::{Expert, ExpertShape};
+use super::{EkTensor, Expert, ExpertShape};
 
 pub struct OnnxFFN {
     dim: usize,
     hidden: usize,
     sess: Session,
+}
+trait OrtDType: PrimitiveTensorElementType {}
+
+#[derive(Clone, Debug)]
+pub struct NDArrayTensor<D: OrtDType>(ArrayD<D>);
+
+impl<D> From<TensorView<'_>> for NDArrayTensor<D>
+where
+    D: OrtDType,
+{
+    fn from(value: TensorView<'_>) -> Self {
+        todo!()
+    }
+}
+
+impl<D> From<ArrayD<D>> for NDArrayTensor<D>
+where
+    D: OrtDType,
+{
+    fn from(value: ArrayD<D>) -> Self {
+        NDArrayTensor(value)
+    }
+}
+
+impl<D> EkTensor for NDArrayTensor<D>
+where
+    D: OrtDType,
+{
+    fn rand(shape: Vec<usize>, dtype: super::DType, dev: super::Device) -> Self {
+        todo!()
+    }
+
+    fn cat(tensors: &[Self], dim: usize) -> Self {
+        todo!()
+    }
+
+    fn serialize(&self) -> Vec<u8> {
+        todo!()
+    }
+
+    fn from_raw(data: &[u8], shape: &[usize], dtype: super::DType) -> Self {
+        todo!()
+    }
+
+    fn from_tensor_view(tv: &TensorView<'_>) -> Self {
+        todo!()
+    }
+}
+
+impl<D> From<NDArrayTensor<D>> for Value
+where
+    D: OrtDType,
+{
+    fn from(val: NDArrayTensor<D>) -> Self {
+        todo!()
+    }
 }
 
 impl OnnxFFN {
@@ -26,14 +90,18 @@ impl OnnxFFN {
     }
 }
 
-impl Expert<ArrayD<f32>> for OnnxFFN {
-    fn rand_input(&self, batch: usize) -> ArrayD<f32> {
+impl<T> Expert<NDArrayTensor<T>> for OnnxFFN
+where
+    T: OrtDType + Clone,
+    Standard: Distribution<T>,
+{
+    fn rand_input(&self, batch: usize) -> NDArrayTensor<T> {
         let shape = vec![batch, self.dim];
         let input = ArrayD::random(shape, Standard);
-        input
+        input.into()
     }
 
-    fn forward(&self, x: &ArrayD<f32>) -> ArrayD<f32> {
+    fn forward(&self, x: &NDArrayTensor<T>) -> NDArrayTensor<T> {
         let outputs = self
             .sess
             .run(ort::inputs!["input"=>x.clone()].unwrap())
@@ -41,9 +109,9 @@ impl Expert<ArrayD<f32>> for OnnxFFN {
         let vals = outputs
             .get("output")
             .unwrap()
-            .try_extract_tensor::<f32>()
+            .try_extract_tensor::<T>()
             .unwrap();
-        vals.to_owned()
+        vals.to_owned().into()
     }
 
     fn shape(&self) -> super::ExpertShape {
@@ -55,5 +123,12 @@ impl Expert<ArrayD<f32>> for OnnxFFN {
 
     fn backend(&self) -> std::string::String {
         "onnxruntime".to_string()
+    }
+
+    fn construct(
+        x: crate::x::EKInstance,
+        weight: super::ExpertWeight<NDArrayTensor<T>>,
+    ) -> ek_base::error::EKResult<Self> {
+        todo!()
     }
 }

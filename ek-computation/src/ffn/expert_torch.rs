@@ -1,8 +1,12 @@
 use std::borrow::Borrow;
 
-use crate::tch_safetensors::{read_safetensors, write_safetensors};
+use crate::{
+    tch_safetensors::{tch_kind_to_dtype, write_safetensors},
+    x,
+};
 
-use ek_base::error::{EKError, EKResult};
+use ek_base::error::EKResult;
+use safetensors::tensor::TensorView;
 use tch::{
     self, Tensor,
     nn::{self, Module},
@@ -14,7 +18,7 @@ pub struct TchTensor(Tensor);
 
 impl From<tch::Tensor> for TchTensor {
     fn from(value: tch::Tensor) -> Self {
-        return TchTensor(value);
+        TchTensor(value)
     }
 }
 
@@ -30,9 +34,9 @@ pub struct TorchFFN {
     module: Box<dyn Module>,
 }
 
-impl Into<tch::Kind> for DType {
-    fn into(self) -> tch::Kind {
-        match self {
+impl From<DType> for tch::Kind {
+    fn from(val: DType) -> Self {
+        match val {
             DType::Uint8 => tch::Kind::Uint8,
             DType::Int16 => tch::Kind::Int16,
             DType::Int8 => tch::Kind::Int8,
@@ -44,11 +48,48 @@ impl Into<tch::Kind> for DType {
     }
 }
 
-impl Into<tch::Device> for Device {
-    fn into(self) -> tch::Device {
-        match self {
+impl From<Device> for tch::Device {
+    fn from(val: Device) -> Self {
+        match val {
             Device::CPU => tch::Device::Cpu,
-            _ => unimplemented!(),
+        }
+    }
+}
+
+struct TchSafeView<'a> {
+    tensor: &'a Tensor,
+    shape: Vec<usize>,
+    dtype: safetensors::Dtype,
+}
+
+impl safetensors::View for TchSafeView<'_> {
+    fn dtype(&self) -> safetensors::Dtype {
+        self.dtype
+    }
+    fn shape(&self) -> &[usize] {
+        &self.shape
+    }
+
+    fn data(&self) -> std::borrow::Cow<[u8]> {
+        let mut data = vec![0; self.data_len()];
+        let numel = self.tensor.numel();
+        self.tensor.f_copy_data_u8(&mut data, numel).unwrap();
+        data.into()
+    }
+
+    fn data_len(&self) -> usize {
+        self.tensor.numel() * self.tensor.kind().elt_size_in_bytes()
+    }
+}
+
+impl<'a> From<&'a TchTensor> for TchSafeView<'a> {
+    fn from(val: &'a TchTensor) -> Self {
+        let dtype = tch_kind_to_dtype(val.0.kind()).unwrap();
+        let shape = val.0.size().iter().map(|&x| x as usize).collect();
+        Self {
+            tensor: &val.0,
+            shape,
+            dtype,
         }
     }
 }
@@ -59,7 +100,7 @@ impl EkTensor for TchTensor {
             shape.into_iter().map(|x| x as i64).collect::<Vec<i64>>(),
             (typ.into(), dev.into()),
         );
-        return TchTensor(rand);
+        TchTensor(rand)
     }
 
     fn cat(tensors: &[Self], dim: usize) -> Self {
@@ -79,36 +120,24 @@ impl EkTensor for TchTensor {
         .unwrap() // TODO: is it safe to unwrap?
         .into()
     }
+
+    fn from_tensor_view(_tv: &TensorView<'_>) -> Self {
+        todo!()
+    }
 }
 
 impl FromSafeTensor for TchTensor {}
 
-impl TorchFFN {
-    pub fn new(dim: usize, hidden: usize) -> Self {
-        let weight = ExpertWeight::rand(dim, hidden, DType::Float, Device::CPU);
-        Self::new_with_weight(dim, hidden, weight)
+impl From<&TensorView<'_>> for TchTensor {
+    fn from(_value: &TensorView<'_>) -> Self {
+        todo!()
     }
+}
 
-    pub fn new_with_weight(dim: usize, hidden: usize, weight: ExpertWeight<TchTensor>) -> Self {
-        let vs = nn::VarStore::new(tch::Device::Cpu);
-        let path = vs.root();
-        let dim = dim as i64;
-        let hidden_dim = hidden as i64;
-        let mut w1 = nn::linear(&path / "up", dim, hidden_dim, Default::default());
-        let mut w2 = nn::linear(&path / "down", hidden_dim, dim, Default::default());
-        let mut w3 = nn::linear(&path / "gate", dim, hidden_dim, Default::default());
-        w1.ws = weight.up_w.0;
-        w1.bs = weight.up_b.map(|x| x.0);
-        w2.ws = weight.down_w.0;
-        w2.bs = weight.down_b.map(|x| x.0);
-        w3.ws = weight.gate_w.0;
-        w3.bs = weight.gate_b.map(|x| x.0);
-        let module = nn::seq().add_fn(move |x| (x.apply(&w1).silu() * x.apply(&w3)).apply(&w2));
-        return TorchFFN {
-            hidden,
-            dim: dim as usize,
-            module: Box::new(module),
-        };
+impl TorchFFN {
+    pub fn new(inst: x::EKInstance) -> Self {
+        let weight = ExpertWeight::rand(inst.dim, inst.hidden, DType::Float, Device::CPU);
+        Self::construct(inst, weight).unwrap()
     }
 }
 
@@ -131,5 +160,27 @@ impl Expert<TchTensor> for TorchFFN {
 
     fn backend(&self) -> std::string::String {
         "torch".to_string()
+    }
+
+    fn construct(x: crate::x::EKInstance, weight: ExpertWeight<TchTensor>) -> EKResult<Self> {
+        let vs = nn::VarStore::new(tch::Device::Cpu);
+        let path = vs.root();
+        let dim = x.dim as i64;
+        let hidden_dim = x.hidden as i64;
+        let mut w1 = nn::linear(&path / "up", dim, hidden_dim, Default::default());
+        let mut w2 = nn::linear(&path / "down", hidden_dim, dim, Default::default());
+        let mut w3 = nn::linear(&path / "gate", dim, hidden_dim, Default::default());
+        w1.ws = weight.up_w.0;
+        w1.bs = weight.up_b.map(|x| x.0);
+        w2.ws = weight.down_w.0;
+        w2.bs = weight.down_b.map(|x| x.0);
+        w3.ws = weight.gate_w.0;
+        w3.bs = weight.gate_b.map(|x| x.0);
+        let module = nn::seq().add_fn(move |x| (x.apply(&w1).silu() * x.apply(&w3)).apply(&w2));
+        Ok(TorchFFN {
+            hidden: x.hidden,
+            dim: dim as usize,
+            module: Box::new(module),
+        })
     }
 }

@@ -1,8 +1,12 @@
-use std::{ops::Index, str::pattern::Pattern};
+use ek_base::error::{EKError, EKResult};
+use expert_ort::OnnxFFN;
+use expert_torch::{TchTensor, TorchFFN};
+use safetensors::tensor::TensorView;
 
-use tch::Tensor;
-
-use crate::tch_safetensors::dtype_to_tch_kind;
+use crate::{
+    tch_safetensors::dtype_to_tch_kind,
+    x::{self, EKInstance},
+};
 
 pub mod expert_ort;
 pub mod expert_torch;
@@ -10,12 +14,6 @@ pub mod expert_torch;
 pub struct ExpertShape {
     pub dim: usize,
     pub hidden: usize,
-}
-pub trait Expert<T> {
-    fn backend(&self) -> std::string::String;
-    fn shape(&self) -> ExpertShape;
-    fn rand_input(&self, batch: usize) -> T;
-    fn forward(&self, x: &T) -> T;
 }
 
 #[derive(Clone, Copy)]
@@ -53,22 +51,24 @@ pub trait EkTensor: Sized {
     fn cat(tensors: &[Self], dim: usize) -> Self;
     fn serialize(&self) -> Vec<u8>;
     fn from_raw(data: &[u8], shape: &[usize], dtype: DType) -> Self;
+    fn from_tensor_view(tv: &TensorView<'_>) -> Self;
 }
 
 pub trait FromSafeTensor
 where
     Self: Sized + EkTensor,
 {
-    fn lookup(st: safetensors::SafeTensors, name: &str) -> Option<Self> {
-        let idx = st.names().iter().position(|x| x.contains(name));
+    fn lookup_suffix(st: &safetensors::SafeTensors, name: &str) -> Option<Self> {
+        let idx = st.names().iter().position(|x| x.ends_with(name));
         let tensors = st.tensors();
-        idx.map(|x| {
+        if let Some(x) = idx {
             let (_name, view) = tensors.get(x).unwrap();
-            let size: Vec<usize> = view.shape().iter().map(|&x| x as usize).collect();
+            let size: Vec<usize> = view.shape().to_vec();
             let kind: DType = DType::from(dtype_to_tch_kind(view.dtype()).unwrap());
-            Self::from_raw(view.data(), &size, kind);
-        });
-        None
+            Some(Self::from_raw(view.data(), &size, kind))
+        } else {
+            None
+        }
     }
 }
 
@@ -83,15 +83,88 @@ where
     pub gate_w: T,
     pub gate_b: Option<T>,
 }
-impl<T: EkTensor> ExpertWeight<T> {
+impl<T: EkTensor + FromSafeTensor> ExpertWeight<T> {
+    pub fn from_safetensor(st: &safetensors::SafeTensors) -> EKResult<Self> {
+        let name = "down_proj.weight";
+        let down_w =
+            T::lookup_suffix(st, name).ok_or(EKError::ExpertWeightNotFound(name.into()))?;
+        let name = "up_proj.weight";
+        let up_w = T::lookup_suffix(st, name).ok_or(EKError::ExpertWeightNotFound(name.into()))?;
+        let name = "gate_proj.weight";
+        let gate_w =
+            T::lookup_suffix(st, name).ok_or(EKError::ExpertWeightNotFound(name.into()))?;
+        Ok(Self {
+            up_w,
+            up_b: None,
+            down_w,
+            down_b: None,
+            gate_w,
+            gate_b: None,
+        })
+    }
+
     pub fn rand(dim: usize, hidden: usize, dtype: DType, dev: Device) -> Self {
-        return Self {
+        Self {
             down_w: T::rand(vec![dim, hidden], dtype, dev),
             down_b: None,
             up_w: T::rand(vec![hidden, dim], dtype, dev),
             up_b: None,
             gate_w: T::rand(vec![hidden, dim], dtype, dev),
             gate_b: None,
+        }
+    }
+}
+
+pub trait Expert<T>: Sized
+where
+    T: EkTensor,
+{
+    fn backend(&self) -> std::string::String;
+    fn shape(&self) -> ExpertShape;
+    fn rand_input(&self, batch: usize) -> T;
+    fn forward(&self, x: &T) -> T;
+    fn construct(x: EKInstance, weight: ExpertWeight<T>) -> EKResult<Self>;
+}
+
+pub enum ExpertBackend {
+    Torch(TorchFFN),
+    Onnx(OnnxFFN),
+}
+
+impl ExpertBackend {
+    pub async fn build<'a>(
+        instance: x::EKInstance,
+        tensor: &'a safetensors::SafeTensors<'a>,
+    ) -> EKResult<ExpertBackend> {
+        let backend = match instance.backend {
+            x::ExpertBackendType::Torch => {
+                let weight = ExpertWeight::<TchTensor>::from_safetensor(tensor)?;
+                ExpertBackend::Torch(TorchFFN::construct(instance, weight)?)
+            }
+            x::ExpertBackendType::Onnx => todo!(),
         };
+        Ok(backend)
+    }
+}
+
+impl ExpertBackend {
+    pub fn forward(&self, st_raw: &[u8]) -> EKResult<TchTensor> {
+        let st = safetensors::SafeTensors::deserialize(st_raw).unwrap();
+        let input_pos = st
+            .names()
+            .into_iter()
+            .position(|x| x == "input")
+            .ok_or(EKError::SafeTensorNotFound)?;
+        let tensor_view = &st.tensors()[input_pos].1;
+
+        match self {
+            ExpertBackend::Torch(exp) => {
+                let inp = TchTensor::from_tensor_view(tensor_view);
+                Ok(exp.forward(&inp))
+            }
+            ExpertBackend::Onnx(_exp) => {
+                todo!()
+            }
+        }
     }
 }

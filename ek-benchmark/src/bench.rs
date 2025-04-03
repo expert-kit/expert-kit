@@ -4,50 +4,42 @@ use polars::frame::DataFrame;
 use polars::frame::row::Row;
 use polars::prelude::*;
 
-use ek_computation::ffn::{Expert, ExpertShape, expert_ort::OnnxFFN, expert_torch::TorchFFN};
+use ek_computation::ffn::{Expert, ExpertBackend, ExpertShape};
 
-pub enum GenericExpert {
-    Torch(TorchFFN),
-    Ort(OnnxFFN),
-}
 pub struct BenchmarkerImpl {
     iterations: usize,
-    experts: Vec<GenericExpert>,
+    experts: Vec<BenchmarkExpert>,
 }
+pub struct BenchmarkExpert(pub ExpertBackend);
 
-impl GenericExpert {
+impl BenchmarkExpert {
     fn backend(&self) -> std::string::String {
-        match self {
-            GenericExpert::Torch(exp) => exp.backend(),
-            GenericExpert::Ort(exp) => exp.backend(),
+        match &self.0 {
+            ExpertBackend::Torch(exp) => exp.backend(),
+            ExpertBackend::Onnx(_exp) => todo!(),
         }
     }
     fn shape(&self) -> ExpertShape {
-        match self {
-            GenericExpert::Torch(exp) => exp.shape(),
-            GenericExpert::Ort(exp) => exp.shape(),
+        match &self.0 {
+            ExpertBackend::Torch(exp) => exp.shape(),
+            ExpertBackend::Onnx(_exp) => todo!(),
         }
     }
     fn forward(&self, batch: usize) -> Instant {
-        match self {
-            GenericExpert::Torch(exp) => {
+        match &self.0 {
+            ExpertBackend::Torch(exp) => {
                 let input = exp.rand_input(batch);
                 let start = Instant::now();
                 let _ = exp.forward(&input);
                 start
             }
-            GenericExpert::Ort(exp) => {
-                let input = exp.rand_input(batch);
-                let start = Instant::now();
-                let _ = exp.forward(&input);
-                start
-            }
+            ExpertBackend::Onnx(_exp) => todo!(),
         }
     }
 }
 
 impl BenchmarkerImpl {
-    pub fn new(experts: Vec<GenericExpert>) -> Self {
+    pub fn new(experts: Vec<BenchmarkExpert>) -> Self {
         BenchmarkerImpl {
             experts,
             iterations: 10,
@@ -71,8 +63,7 @@ impl BenchmarkerImpl {
 
         for iter in 0..self.iterations {
             for batch in size.iter() {
-                let mut eidx = 0;
-                for expert in self.experts.iter() {
+                for (eidx, expert) in self.experts.iter().enumerate() {
                     let start = expert.forward(*batch);
                     let shape = expert.shape();
                     let backend = expert.backend();
@@ -86,7 +77,6 @@ impl BenchmarkerImpl {
                         AnyValue::StringOwned(backend.into()),
                     ];
                     rows.push(Row(row));
-                    eidx += 1;
                 }
             }
         }
@@ -108,7 +98,7 @@ impl BenchmarkerImpl {
             .as_secs();
         let hardware = Series::new("hardware".into(), vec![brand; df.height()]);
         let ts = Series::new("time".into(), vec![cur_ts; df.height()]);
-        let df = df.hstack(&[hardware.into(), ts.into()]).unwrap();
-        df
+
+        df.hstack(&[hardware.into(), ts.into()]).unwrap()
     }
 }
