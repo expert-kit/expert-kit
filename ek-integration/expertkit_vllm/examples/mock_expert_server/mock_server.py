@@ -1,49 +1,40 @@
 import grpc
+import safetensors.torch
 import torch
 import io
+import safetensors
 from concurrent import futures
 import time
 import logging
 import argparse
-import json
 import numpy as np
 from typing import List, Dict, Any, Optional
 
 from expertkit_vllm.pbpy.ek.worker.v1 import expert_pb2
 from expertkit_vllm.pbpy.ek.worker.v1 import expert_pb2_grpc
 
+MAX_METADATA_SIZE = 20 * 1024  # 20 KB
+MAX_MESSAGE_LENGTH = 100 * 1024 * 1024  # 100 MB
+
 class ExpertKitServiceMock(expert_pb2_grpc.ComputationServiceServicer):
     """Mock implementation of ExpertKit computation service."""
     
-    def __init__(self, config: Dict[str, Any]):
+    def __init__(self, expert_dim: int, latency_ms: int = 0):
         """Initialize the mock service with configuration.
         
         Args:
-            config: Configuration dictionary containing:
-                - expert_dim: Dimension of expert outputs
-                - experts: Dict mapping expert IDs to their characteristics
-                - latency_ms: Optional artificial latency to simulate processing time
+            expert_dim: Dimension of expert outputs
+            latency_ms: Optional artificial latency to simulate processing time
         """
-        self.config = config
-        self.expert_dim = config.get("expert_dim", 4096)
-        self.latency_ms = config.get("latency_ms", 0)
-        self.experts = config.get("experts", {})
+        self.expert_dim = expert_dim
+        self.latency_ms = latency_ms
         self.logger = logging.getLogger("ExpertKitMock")
         
-        # Initialize fake expert weights (for demonstration)
-        self.expert_weights = {}
-        for expert_id in self.experts:
-            # Create deterministic but unique weights for each expert
-            seed = int(hash(expert_id) % 2**32)
-            np.random.seed(seed)
-            # Create a mock embedding for this expert
-            self.expert_weights[expert_id] = torch.from_numpy(
-                np.random.normal(0, 0.02, (self.expert_dim, self.expert_dim))
-            ).float()
-        
-        self.logger.info(f"Initialized mock server with {len(self.experts)} experts")
+        self.logger.info(f"Initialized mock server")
+        self.logger.info(f"Expert dimension: {self.expert_dim}")
+        self.logger.info(f"Simulated latency: {self.latency_ms}ms")
     
-    def Forward(self, request, context):
+    def Forward(self, request: expert_pb2.ForwardReq, context):
         """Handle Forward RPC requests.
         
         Args:
@@ -64,8 +55,7 @@ class ExpertKitServiceMock(expert_pb2_grpc.ComputationServiceServicer):
             
         try:
             # Deserialize input tensor
-            input_buf = io.BytesIO(request.tensor)
-            hidden_states = torch.load(input_buf)
+            hidden_states = safetensors.torch.load(request.tensor)["data"]
             
             # Validate input tensor shape
             batch_size, hidden_dim = hidden_states.shape
@@ -82,34 +72,29 @@ class ExpertKitServiceMock(expert_pb2_grpc.ComputationServiceServicer):
             results = []
             
             for seq_idx, seq_info in enumerate(request.sequences):
-                seq_experts = seq_info.experts
-                self.logger.info(f"Sequence {seq_idx} requests {len(seq_experts)} experts: {seq_experts}")
+                num_experts = len(seq_info.experts)
+                self.logger.info(f"Sequence {seq_idx} requests {num_experts} experts")
                 
-                # Process each expert for this sequence
-                expert_outputs = []
+                # Generate deterministic random outputs for requested number of experts
+                seed = int(hash(f"{request.instance_id}_{seq_idx}") % 2**32)
+                np.random.seed(seed)
                 
-                for expert_id in seq_experts:
-                    if expert_id in self.expert_weights:
-                        # Apply mock expert computation (simple matrix multiply)
-                        input_vector = hidden_states[seq_idx].view(-1, hidden_dim)
-                        output = torch.matmul(input_vector, self.expert_weights[expert_id])
-                        expert_outputs.append(output)
-                    else:
-                        # If expert not found, create a dummy output
-                        self.logger.warning(f"Expert {expert_id} not found, using zeros")
-                        expert_outputs.append(torch.zeros(1, self.expert_dim))
-                
-                # Stack all expert outputs for this sequence
-                seq_output = torch.cat([out for out in expert_outputs], dim=0)
+                if num_experts > 0:
+                    # Create random outputs of appropriate shape for all experts at once
+                    seq_output = torch.from_numpy(
+                        np.random.normal(0, 0.1, (num_experts, self.expert_dim))
+                    ).float()
+                else:
+                    # Handle case where no experts were requested
+                    seq_output = torch.zeros(0, self.expert_dim)
+                    
                 results.append(seq_output)
             
-            # Combine results from all sequences [seq, expert, dim]
-            all_results = torch.stack(results)
+            # Combine results from all sequences
+            all_results = torch.stack(results) if results else torch.zeros(0, 0, self.expert_dim)
             
             # Serialize output tensor
-            output_buf = io.BytesIO()
-            torch.save(all_results, output_buf)
-            output_bytes = output_buf.getvalue()
+            output_bytes = safetensors.torch.save({"data": all_results})
             
             self.logger.info(f"Output tensor shape: {all_results.shape}")
             
@@ -123,11 +108,12 @@ class ExpertKitServiceMock(expert_pb2_grpc.ComputationServiceServicer):
             context.set_details(error_msg)
             return expert_pb2.ForwardResp()
 
-def serve(config_path: str, port: int):
+def serve(expert_dim: int, latency_ms: int, port: int):
     """Start the gRPC server.
     
     Args:
-        config_path: Path to configuration JSON file
+        expert_dim: Dimension of expert outputs
+        latency_ms: Artificial latency in milliseconds
         port: Port to listen on
     """
     # Setup logging
@@ -137,15 +123,21 @@ def serve(config_path: str, port: int):
     )
     logger = logging.getLogger("Server")
     
-    # Load configuration
-    with open(config_path, 'r') as f:
-        config = json.load(f)
-    
     # Create server
-    server = grpc.server(futures.ThreadPoolExecutor(max_workers=10))
+    server = grpc.server(
+        futures.ThreadPoolExecutor(max_workers=10),
+        options=[
+            ('grpc.max_metadata_size', MAX_METADATA_SIZE),
+            ('grpc.max_send_message_length', MAX_MESSAGE_LENGTH),
+            ('grpc.max_receive_message_length', MAX_MESSAGE_LENGTH),
+        ],
+    )
     
     # Add servicers
-    expert_kit_service = ExpertKitServiceMock(config)
+    expert_kit_service = ExpertKitServiceMock(
+        expert_dim=expert_dim,
+        latency_ms=latency_ms
+    )
     
     expert_pb2_grpc.add_ComputationServiceServicer_to_server(
         expert_kit_service, server
@@ -157,6 +149,7 @@ def serve(config_path: str, port: int):
     server.start()
     
     logger.info(f"Server started, listening on {server_addr}")
+    logger.info(f"Configuration: expert_dim={expert_dim}, latency_ms={latency_ms}")
     logger.info("Press Ctrl+C to stop the server")
     
     try:
@@ -169,10 +162,16 @@ def serve(config_path: str, port: int):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="ExpertKit Mock Server")
     parser.add_argument(
-        "--config", 
-        type=str, 
-        default="config.json",
-        help="Path to configuration JSON file"
+        "--expert_dim", 
+        type=int, 
+        default=7168,
+        help="Dimension of expert outputs"
+    )
+    parser.add_argument(
+        "--latency_ms", 
+        type=int, 
+        default=0,
+        help="Artificial latency in milliseconds to simulate processing time"
     )
     parser.add_argument(
         "--port", 
@@ -182,4 +181,8 @@ if __name__ == "__main__":
     )
     
     args = parser.parse_args()
-    serve(args.config, args.port)
+    serve(
+        expert_dim=args.expert_dim,
+        latency_ms=args.latency_ms,
+        port=args.port
+    )

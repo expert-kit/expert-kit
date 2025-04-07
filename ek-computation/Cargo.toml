@@ -19,7 +19,7 @@ polars-io = { workspace = true }
 clap = { workspace = true }
 pretty_env_logger = { workspace = true }
 log = { workspace = true }
-safetensors = { workspace = true }
+safetensors.workspace = true
 async-trait = { workspace = true }
 opendal = { workspace = true }
 sysinfo = { workspace = true }
@@ -28,6 +28,7 @@ ek_base = { path = "../ek-base" }
 ek_db = { path = "../ek-db" }
 serde_json = "1.0.140"
 env_logger = "0.11.8"
+rand = "0.9.0"
 
 
 [build-dependencies]

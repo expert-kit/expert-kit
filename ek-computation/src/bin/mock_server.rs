@@ -3,7 +3,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use clap::Parser;
-use log::info;
+use log::{info, error};
+use safetensors::tensor::{Dtype, TensorView};
 use tokio::sync::Mutex;
 use tokio::time::sleep;
 use tonic::{transport::Server, Request, Response, Status};
@@ -89,21 +90,30 @@ impl ComputationService for ExpertKitService {
                 
                 Ok(Response::new(resp))
             },
-            Err(e) => Err(e),
+            Err(e) => {
+                error!("Error processing request: {}", e);
+                Err(e)
+            },
         }
     }
 }
 
 impl ExpertKitService {
     async fn process_request(&self, request: ForwardReq, stats: &mut ServerStats) -> Result<ForwardResp, Status> {
-        // Deserialize the tensor data to extract shape
-        let input_tensor = match tch::Tensor::load_from_stream(&mut Cursor::new(&request.tensor)) {
-            Ok(tensor) => tensor,
+        // Deserialize the tensor data using safetensors
+        let tensors = match safetensors::SafeTensors::deserialize(&request.tensor) {
+            Ok(tensors) => tensors,
             Err(e) => return Err(Status::internal(format!("Failed to deserialize tensor: {}", e))),
         };
         
-        // Get dimensions
-        let shapes = input_tensor.size();
+        // Get the tensor named "data" (assuming that's what you're using in Python)
+        let input_tensor = match tensors.tensor("data") {
+            Ok(tensor) => tensor,
+            Err(e) => return Err(Status::internal(format!("Failed to get 'data' tensor: {}", e))),
+        };
+        
+        // Get dimensions from shape
+        let shapes = input_tensor.shape();
         if shapes.len() != 2 {
             return Err(Status::invalid_argument(format!(
                 "Expected 2D tensor, got {}D", shapes.len()
@@ -124,7 +134,7 @@ impl ExpertKitService {
         info!("Input tensor shape: [{}, {}]", batch_size, hidden_dim);
         
         // Estimate unique tensors
-        stats.total_unique_tokens_processed += 1;
+        stats.total_unique_tokens_processed += batch_size as u64;
         
         // Count experts per sequence
         let mut num_experts_per_seq = Vec::new();
@@ -133,21 +143,36 @@ impl ExpertKitService {
         }
         let max_experts = num_experts_per_seq.iter().max().unwrap_or(&0);
         
+        // Create output tensor with zeros instead of random values
+        let output_shape = vec![batch_size, *max_experts, self.config.expert_dim]; // Using usize instead of u64
+        let total_elements = output_shape.iter().product::<usize>();
         
-        // let output_shape = vec![batch_size, *max_experts, self.config.expert_dim];
-        let output_tensor = tch::Tensor::rand(
-            &[batch_size as i64, *max_experts as i64, self.config.expert_dim as i64],
-            (tch::Kind::Float, tch::Device::Cpu)
-        );
+        // Create zero data for the output
+        let output_data: Vec<f32> = vec![0.0; total_elements];
         
         info!("Output tensor shape: [{}, {}, {}]", batch_size, max_experts, self.config.expert_dim);
         
-        // Serialize the tensor to bytes
-        let mut buffer = Vec::new();
-        match output_tensor.save_to_stream(&mut buffer) {
-            Ok(_) => (),
-            Err(e) => return Err(Status::internal(format!("Failed to serialize tensor: {}", e))),
-        }
+        // Convert f32 data to bytes for TensorView
+        let output_bytes = unsafe {
+            std::slice::from_raw_parts(
+                output_data.as_ptr() as *const u8,
+                output_data.len() * std::mem::size_of::<f32>()
+            )
+        };
+        
+        // Serialize using safetensors
+        let tensor_view = TensorView::new(
+            Dtype::F32, 
+            output_shape, 
+            output_bytes
+        ).map_err(|e| Status::internal(format!("Failed to create tensor view: {}", e)))?;
+        
+        let tensor_map = std::collections::HashMap::from([
+            ("data".to_string(), tensor_view)
+        ]);
+        
+        let buffer = safetensors::serialize(&tensor_map, &None)
+            .map_err(|e| Status::internal(format!("Failed to serialize tensor: {}", e)))?;
         
         Ok(ForwardResp {
             output_tensor: buffer,
@@ -164,7 +189,7 @@ struct CliArgs {
     port: u16,
 
     /// Dimension of expert output
-    #[arg(long, default_value_t = 2048)]
+    #[arg(long, default_value_t = 7168)]
     expert_dim: usize,
 
     /// Simulated latency in milliseconds
@@ -172,7 +197,7 @@ struct CliArgs {
     latency_ms: u64,
 
     /// Number of experts
-    #[arg(short, long, default_value_t = 256)]
+    #[arg(short, long, default_value_t = 8)]
     num_experts: usize,
 }
 
@@ -202,6 +227,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let addr = format!("0.0.0.0:{}", args.port).parse()?;
     info!("Starting server on {}", addr);
     
+    // let http = Http::new().max_metadata_size(1024 * 1024);
+
     Server::builder()
         .add_service(expert_service_server)
         .serve(addr)
