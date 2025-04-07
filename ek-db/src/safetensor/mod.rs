@@ -3,12 +3,18 @@ use std::collections::BTreeMap;
 use bytes::Bytes;
 use ek_base::error::EKResult;
 use opendal::Operator;
-use opendal::{self, Buffer};
-use safetensors::tensor::{Dtype, SafeTensors, View};
+use opendal::{self};
+use safetensors::tensor::SafeTensors;
 
 pub struct SafeTensorDB {
     dal: Operator,
     data: BTreeMap<String, Bytes>,
+}
+
+impl Default for SafeTensorDB {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl SafeTensorDB {
@@ -26,7 +32,7 @@ impl SafeTensorDB {
         let raw = self.dal.read(key).await?;
         self.data.insert(key.into(), raw.to_bytes());
         let buf = self.data.get(key).unwrap();
-        let st = safetensors::SafeTensors::deserialize(&buf)?;
+        let st = safetensors::SafeTensors::deserialize(buf)?;
         Ok(st)
     }
 }

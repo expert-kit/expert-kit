@@ -1,11 +1,9 @@
-use super::ffn::Expert;
 use crate::{
     ffn::{EkTensor, ExpertBackend, expert_torch::TchTensor},
     proto::ek,
 };
 use ek_base::error::EKResult;
-use ek_db;
-use std::{collections::BTreeMap, result};
+use std::collections::BTreeMap;
 
 use crate::x;
 use tokio::sync::RwLock;
@@ -16,6 +14,12 @@ pub struct EKInstanceGate {
     instance: x::EKInstance,
 }
 
+impl Default for EKInstanceGate {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl EKInstanceGate {
     pub fn new() -> Self {
         EKInstanceGate {
@@ -24,7 +28,7 @@ impl EKInstanceGate {
             instance: x::EKInstance::default(),
         }
     }
-    async fn create_expert(&mut self, meta: ek::object::v1::Metadata) -> EKResult<()> {
+    pub async fn create_expert(&mut self, meta: ek::object::v1::Metadata) -> EKResult<()> {
         let safe_tensor = self.tensor_db.load(&meta.id).await?;
         let backend = ExpertBackend::build(self.instance, &safe_tensor).await?;
         let mut exps = self.experts.write().await;
@@ -41,8 +45,7 @@ impl EKInstanceGate {
 
         let input_tensor = req.tensor;
         let mut output = vec![];
-        let mut seq_idx = 0;
-        for inp in req.sequences.iter() {
+        for (seq_idx, inp) in req.sequences.iter().enumerate() {
             let seq_input = &input_tensor.as_slice()[seq_idx * dim..(seq_idx + 1) + dim];
             for exp_id in &inp.experts {
                 let exp = lg
@@ -51,15 +54,11 @@ impl EKInstanceGate {
                 // TODO: batching here
                 let res = exp.forward(seq_input)?;
                 output.push((seq_idx, exp_id, res));
-                // output.push(result);
             }
-            seq_idx += 1;
         }
         output.sort_by(|a, b| a.0.cmp(&b.0));
         let tensors = output.into_iter().map(|x| x.2).collect::<Vec<TchTensor>>();
-
         let output_tensor = tch::Tensor::cat(&tensors, 0);
-        // let output_tensor = ::cat(&output, 0);
         let output_bytes = TchTensor::from(output_tensor).serialize();
         let resp = ek::worker::v1::ForwardResp {
             output_tensor: output_bytes,
