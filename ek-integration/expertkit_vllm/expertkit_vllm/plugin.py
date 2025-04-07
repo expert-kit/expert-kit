@@ -30,8 +30,6 @@ def register():
         case _:
             raise ValueError(f"🚀expertkit-vllm get unknown mode: {mode}")
 
-    expert_mode_register()
-    
 def expert_mode_register():
     #TODO: need test, cause A10 has limited GPU memory, too small for testing
     print("🚀expertkit-vllm integration in expert_mode mode")
