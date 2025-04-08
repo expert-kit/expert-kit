@@ -1,8 +1,8 @@
 #!/usr/bin/sh
 
 PROTO_DIR_PATH="../../ek-proto"
-OUTPUT_DIR="./expertkit_vllm/pbpy"
-PACKAGE_PREFIX="expertkit_vllm.pbpy"
+OUTPUT_DIR="./expertkit_torch/pbpy"
+PACKAGE_PREFIX="expertkit_torch.pbpy"
 
 # generate protobuff and grpc code
 python -m grpc_tools.protoc \

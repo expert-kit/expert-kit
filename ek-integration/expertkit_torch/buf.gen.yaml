@@ -3,12 +3,12 @@ managed:
   enabled: true
   override:
     - file_option: python_package
-      value: expertkit_vllm
+      value: expertkit_torch
 
 plugins:
   - remote: buf.build/grpc/python:v1.71.0
-    out: expertkit_vllm/pbpy
+    out: expertkit_torch/pbpy
   - remote: buf.build/protocolbuffers/pyi:v29.2
-    out: expertkit_vllm/pbpy
+    out: expertkit_torch/pbpy
   - remote: buf.build/protocolbuffers/python:v29.2
-    out: expertkit_vllm/pbpy
+    out: expertkit_torch/pbpy
