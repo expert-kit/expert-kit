@@ -8,7 +8,9 @@ import torch.nn.functional as F
 import torch.distributed as dist
 
 from kernel import act_quant, weight_dequant, fp8_gemm
+import os
 
+from expertkit_torch.grpc_client import ExpertKitClient
 
 world_size = 1
 rank = 0
@@ -82,7 +84,10 @@ class ModelArgs:
     beta_fast: int = 32
     beta_slow: int = 1
     mscale: float = 1.
-
+    # expert_kit info
+    layer_id: int = 0
+    ek_address: str = ""
+    timeout_sec: int = 60
 
 class ParallelEmbedding(nn.Module):
     """
@@ -658,10 +663,19 @@ class MoE(nn.Module):
         self.n_activated_experts = args.n_activated_experts
         self.experts_start_idx = rank * self.n_local_experts
         self.experts_end_idx = self.experts_start_idx + self.n_local_experts
+        # how to change here
         self.gate = Gate(args)
         self.experts = nn.ModuleList([Expert(args.dim, args.moe_inter_dim) if self.experts_start_idx <= i < self.experts_end_idx else None
                                       for i in range(self.n_routed_experts)])
         self.shared_experts = MLP(args.dim, args.n_shared_experts * args.moe_inter_dim)
+        # expert_kit
+        self.layer_id = args.layer_id
+        self.debug = os.getenv("EXPERTKIT_DEBUG_MODE", "0") == "1"
+        if MoE.client is None:
+            print(f"🚀EK Torch MoE layer: {self.layer_id} creating new gRPC client, with addr: {args.expertkit_addr}")
+            MoE.client = ExpertKitClient(args.expertkit_addr, args.timeout_sec)
+
+
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -673,20 +687,44 @@ class MoE(nn.Module):
         Returns:
             torch.Tensor: Output tensor after expert routing and computation.
         """
+         
+          
+        # batch_size, hidden_dim = x.shape
         shape = x.size()
+        if self.debug: print(f"🚀 layer: {self.layer_id} x.shape: {shape}")
         x = x.view(-1, self.dim)
+        if self.debug: print(f"🛳️ layer: {self.layer_id} x.shape: {x.size()}")
+        if self.debug: print(f"🛳️ x: {x}")
         weights, indices = self.gate(x)
+        if self.debug: print(f"🛳️ {weights.size()}, {indices.size()}")
+        if self.debug: print(f"🛳️ {indices}")
         y = torch.zeros_like(x)
         counts = torch.bincount(indices.flatten(), minlength=self.n_routed_experts).tolist()
-        for i in range(self.experts_start_idx, self.experts_end_idx):
-            if counts[i] == 0:
-                continue
-            expert = self.experts[i]
-            idx, top = torch.where(indices == i)
-            y[idx] += expert(x[idx]) * weights[idx, top, None]
-        z = self.shared_experts(x)
-        if world_size > 1:
-            dist.all_reduce(y)
+        #TODO: ek
+        expert_ids = []
+        batch_size, hidden_dim = x.shape
+        for seq_idx in range(batch_size):
+            token_expert_indices = indices[seq_idx].tolist()
+            # if self.debug: print(f"🚦 {seq_idx}: {token_expert_indices}")
+            token_expert_ids = [f"{self.layer_id}_{expert_idx}" for expert_idx in token_expert_indices]
+            expert_ids.append(token_expert_ids)
+        # if self.debug: print(f"🚦 {expert_ids}\n")
+        y = self.client.forward_expert(
+            expert_ids=expert_ids,
+            hidden_state=x
+        )
+        y = y.to(device=x.device, dtype=x.dtype)
+        expanded_weights = weights.unsqueeze(-1)
+        output = torch.sum(expanded_weights * y, dim=1)
+        # for i in range(self.experts_start_idx, self.experts_end_idx):
+        #     if counts[i] == 0:
+        #         continue
+        #     expert = self.experts[i]
+        #     idx, top = torch.where(indices == i)
+        #     y[idx] += expert(x[idx]) * weights[idx, top, None]
+        z = self.shared_experts(x) # local
+        # if world_size > 1:
+        #     dist.all_reduce(y)
         return (y + z).view(shape)
 
 
@@ -710,6 +748,7 @@ class Block(nn.Module):
         """
         super().__init__()
         self.attn = MLA(args)
+        args.layer_id = layer_id # used for expert_kit
         self.ffn = MLP(args.dim, args.inter_dim) if layer_id < args.n_dense_layers else MoE(args)
         self.attn_norm = RMSNorm(args.dim)
         self.ffn_norm = RMSNorm(args.dim)

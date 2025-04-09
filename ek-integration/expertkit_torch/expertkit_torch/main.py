@@ -1,6 +1,7 @@
 import os
 import json
 from argparse import ArgumentParser
+import time
 from typing import List
 
 import torch
@@ -95,11 +96,11 @@ def main(
   torch.cuda.set_device(local_rank)
   torch.set_default_dtype(torch.bfloat16)
   torch.set_num_threads(8)
-  # seed = int(time.time()) % (2**32)  # 使用当前时间的秒数作为种子，并限制在 32 位整数范围内
-  # torch.manual_seed(seed)
-  # random.seed(seed)
-  # np.random.seed(seed)
-  torch.manual_seed(965)
+  seed = int(time.time()) % (2**32)  # 使用当前时间的秒数作为种子，并限制在 32 位整数范围内
+  torch.manual_seed(seed)
+#   random.seed(seed)
+#   np.random.seed(seed)
+#   torch.manual_seed(965)
   with open(config) as f:
       args = ModelArgs(**json.load(f))
   print(args)
