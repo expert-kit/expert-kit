@@ -19,6 +19,7 @@ llm = LLM(
         model="/mnt/xact/kioxia/.cache/huggingface/hub/DeepSeek-R1",
         trust_remote_code=True,
 
+        # dtype=torch.float16,
         max_model_len=16,
         enforce_eager=True,
         cpu_offload_gb=64,

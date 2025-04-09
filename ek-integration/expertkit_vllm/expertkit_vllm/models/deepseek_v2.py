@@ -137,6 +137,8 @@ class ExpertKitMoE(nn.Module):
             hidden_flattened, dim=0, return_inverse=True)
         
         unique_batch_size = unique_hidden.shape[0]
+        if self.debug_mode:
+            logger.debug(f"🚀 unique_batch_size: {unique_batch_size}, batch_size: {batch_size}")
         
         # Convert expert indices to string IDs as required by forward_expert
         expert_ids = []
