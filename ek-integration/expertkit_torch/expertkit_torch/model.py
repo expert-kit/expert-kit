@@ -7,10 +7,10 @@ from torch import nn
 import torch.nn.functional as F
 import torch.distributed as dist
 
-from kernel import act_quant, weight_dequant, fp8_gemm
+from .kernel import act_quant, weight_dequant, fp8_gemm
 import os
 
-from expertkit_torch.grpc_client import ExpertKitClient
+from .grpc_client import ExpertKitClient
 
 world_size = 1
 rank = 0
@@ -822,17 +822,13 @@ class Transformer(nn.Module):
             torch.Tensor: Logits tensor of shape (batch_size, vocab_size).
         """
         seqlen = tokens.size(1)
-        print(f"tokens: {tokens.shape} {tokens}")
         h = self.embed(tokens)
-        print(f"h-0: {h.shape} {h}")
         freqs_cis = self.freqs_cis[start_pos:start_pos+seqlen]
         mask = None
         if seqlen > 1:
             mask = torch.full((seqlen, seqlen), float("-inf"), device=tokens.device).triu_(1)
-        # print(f"h-1: {h.shape} {h}")
         for layer in self.layers:
             h = layer(h, start_pos, freqs_cis, mask)
-        # print(f"h-2: {h.shape} {h}")
         h = self.norm(h)[:, -1]
         logits = self.head(h)
         if world_size > 1:

@@ -9,7 +9,11 @@ import torch.distributed as dist
 from transformers import AutoTokenizer
 from safetensors.torch import load_model, save_file
 
-from model import Transformer, ModelArgs
+import sys
+from pathlib import Path
+sys.path.append(str(Path(__file__).parent.parent))
+
+from expertkit_torch.model import Transformer, ModelArgs
 
 def sample(logits, temperature: float = 1.0):
     """
