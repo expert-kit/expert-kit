@@ -86,8 +86,8 @@ class ModelArgs:
     mscale: float = 1.
     # expert_kit info
     layer_id: int = 0
-    ek_address: str = ""
-    timeout_sec: int = 60
+    expertkit_addr: str = "localhost:50051"
+    expertkit_timeout_sec: int = 16
 
 class ParallelEmbedding(nn.Module):
     """
@@ -648,6 +648,10 @@ class MoE(nn.Module):
         experts (nn.ModuleList): List of expert modules.
         shared_experts (nn.Module): Shared experts applied to all inputs.
     """
+    
+    # shared grpc client
+    client: Optional[ExpertKitClient] = None
+
     def __init__(self, args: ModelArgs):
         """
         Initializes the MoE module.
@@ -673,8 +677,7 @@ class MoE(nn.Module):
         self.debug = os.getenv("EXPERTKIT_DEBUG_MODE", "0") == "1"
         if MoE.client is None:
             print(f"🚀EK Torch MoE layer: {self.layer_id} creating new gRPC client, with addr: {args.expertkit_addr}")
-            MoE.client = ExpertKitClient(args.expertkit_addr, args.timeout_sec)
-
+            MoE.client = ExpertKitClient(args.expertkit_addr, args.expertkit_timeout_sec)
 
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -688,44 +691,44 @@ class MoE(nn.Module):
             torch.Tensor: Output tensor after expert routing and computation.
         """
          
-          
         # batch_size, hidden_dim = x.shape
         shape = x.size()
         if self.debug: print(f"🚀 layer: {self.layer_id} x.shape: {shape}")
         x = x.view(-1, self.dim)
-        if self.debug: print(f"🛳️ layer: {self.layer_id} x.shape: {x.size()}")
-        if self.debug: print(f"🛳️ x: {x}")
+        # if self.debug: print(f"🛳️ layer: {self.layer_id} x.shape: {x.size()}")
+        # if self.debug: print(f"🛳️ x: {x}")
         weights, indices = self.gate(x)
-        if self.debug: print(f"🛳️ {weights.size()}, {indices.size()}")
-        if self.debug: print(f"🛳️ {indices}")
-        y = torch.zeros_like(x)
-        counts = torch.bincount(indices.flatten(), minlength=self.n_routed_experts).tolist()
-        #TODO: ek
+        # use grpc client to compute expert results
         expert_ids = []
         batch_size, hidden_dim = x.shape
         for seq_idx in range(batch_size):
             token_expert_indices = indices[seq_idx].tolist()
-            # if self.debug: print(f"🚦 {seq_idx}: {token_expert_indices}")
             token_expert_ids = [f"{self.layer_id}_{expert_idx}" for expert_idx in token_expert_indices]
             expert_ids.append(token_expert_ids)
-        # if self.debug: print(f"🚦 {expert_ids}\n")
-        y = self.client.forward_expert(
+        outputs = self.client.forward_expert(
             expert_ids=expert_ids,
             hidden_state=x
         )
-        y = y.to(device=x.device, dtype=x.dtype)
+        outputs = outputs.to(device=x.device, dtype=x.dtype)
         expanded_weights = weights.unsqueeze(-1)
-        output = torch.sum(expanded_weights * y, dim=1)
+        output = torch.sum(expanded_weights * outputs, dim=1)
+
+        # y = torch.zeros_like(x)
+        # counts = torch.bincount(indices.flatten(), minlength=self.n_routed_experts).tolist()
         # for i in range(self.experts_start_idx, self.experts_end_idx):
         #     if counts[i] == 0:
         #         continue
         #     expert = self.experts[i]
+        #     # compute all token allocated to expert i
         #     idx, top = torch.where(indices == i)
         #     y[idx] += expert(x[idx]) * weights[idx, top, None]
-        z = self.shared_experts(x) # local
+
+        z = self.shared_experts(x) # shared expert is computed locally
+        if self.debug: print(f"sahred shape: {z.shape}\n")
         # if world_size > 1:
         #     dist.all_reduce(y)
-        return (y + z).view(shape)
+        # return (y + z).view(shape)
+        return (output + z).view(shape)
 
 
 class Block(nn.Module):
@@ -766,7 +769,9 @@ class Block(nn.Module):
         Returns:
             torch.Tensor: Output tensor after block computation.
         """
+        # print(f"Block-1: {x.shape} \n {x}")
         x = x + self.attn(self.attn_norm(x), start_pos, freqs_cis, mask)
+        # print(f"Block-2: {x.shape} \n {x}")
         x = x + self.ffn(self.ffn_norm(x))
         return x
 
@@ -817,13 +822,17 @@ class Transformer(nn.Module):
             torch.Tensor: Logits tensor of shape (batch_size, vocab_size).
         """
         seqlen = tokens.size(1)
+        print(f"tokens: {tokens.shape} {tokens}")
         h = self.embed(tokens)
+        print(f"h-0: {h.shape} {h}")
         freqs_cis = self.freqs_cis[start_pos:start_pos+seqlen]
         mask = None
         if seqlen > 1:
             mask = torch.full((seqlen, seqlen), float("-inf"), device=tokens.device).triu_(1)
+        # print(f"h-1: {h.shape} {h}")
         for layer in self.layers:
             h = layer(h, start_pos, freqs_cis, mask)
+        # print(f"h-2: {h.shape} {h}")
         h = self.norm(h)[:, -1]
         logits = self.head(h)
         if world_size > 1:

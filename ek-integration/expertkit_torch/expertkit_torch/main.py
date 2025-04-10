@@ -7,7 +7,7 @@ from typing import List
 import torch
 import torch.distributed as dist
 from transformers import AutoTokenizer
-from safetensors.torch import load_model
+from safetensors.torch import load_model, save_file
 
 from model import Transformer, ModelArgs
 
@@ -127,6 +127,25 @@ def main(
       dist.destroy_process_group()
   
 
+def random_init_model_save(
+    dir: str,
+    config: str,
+) -> None:
+  world_size = int(os.getenv("WORLD_SIZE", "1"))
+  rank = int(os.getenv("RANK", "0"))
+  local_rank = int(os.getenv("LOCAL_RANK", "0"))
+  torch.cuda.set_device(local_rank)
+  torch.set_default_dtype(torch.bfloat16)
+  torch.set_num_threads(8)
+  seed = int(time.time()) % (2**32)
+  torch.manual_seed(seed)
+  with open(config) as f:
+      args = ModelArgs(**json.load(f))
+  print(args)
+  with torch.device("cuda"):
+      model = Transformer(args)
+  save_file(model.state_dict(), f"{dir}/model.safetensors")  
+
 
 if __name__ == "__main__":
   parser = ArgumentParser()
@@ -136,6 +155,10 @@ if __name__ == "__main__":
   parser.add_argument("--interactive", action="store_true")
   parser.add_argument("--max-new-tokens", type=int, default=200)
   parser.add_argument("--temperature", type=float, default=0.2)
+  parser.add_argument("--save-dir", type=str, default="")
   args = parser.parse_args()
   assert args.input_file or args.interactive, "Either input-file or interactive mode must be specified"
-  main(args.ckpt_path, args.config, args.input_file, args.max_new_tokens, args.temperature)
+  if args.save_dir != "":
+    random_init_model_save(args.save_dir, args.config)
+  else:
+    main(args.ckpt_path, args.config, args.input_file, args.max_new_tokens, args.temperature)
