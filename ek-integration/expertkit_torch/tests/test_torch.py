@@ -113,8 +113,7 @@ def main(
   tokenizer = AutoTokenizer.from_pretrained(ckpt_path)
   tokenizer.decode(generate(model, [tokenizer.encode("DeepSeek")], 2, -1, 1.)[0])
   
-  # load_model(model, os.path.join(ckpt_path, f"model{rank}-mp{world_size}.safetensors"))
-
+  load_model(model, os.path.join(ckpt_path, f"model.safetensors"))
   
   with open(input_file) as f:
       prompts = [line.strip() for line in f.readlines()]
@@ -135,8 +134,6 @@ def random_init_model_save(
     dir: str,
     config: str,
 ) -> None:
-  world_size = int(os.getenv("WORLD_SIZE", "1"))
-  rank = int(os.getenv("RANK", "0"))
   local_rank = int(os.getenv("LOCAL_RANK", "0"))
   torch.cuda.set_device(local_rank)
   torch.set_default_dtype(torch.bfloat16)
@@ -145,15 +142,16 @@ def random_init_model_save(
   torch.manual_seed(seed)
   with open(config) as f:
       args = ModelArgs(**json.load(f))
+  args.save_model = True
   print(args)
   with torch.device("cuda"):
       model = Transformer(args)
-  save_file(model.state_dict(), f"{dir}/model.safetensors")  
+  save_file(model.state_dict(), f"{dir}/model.safetensors")
 
 
 if __name__ == "__main__":
   parser = ArgumentParser()
-  parser.add_argument("--ckpt-path", type=str, required=True)
+  parser.add_argument("--ckpt-path", type=str)
   parser.add_argument("--config", type=str, required=True)
   parser.add_argument("--input-file", type=str, default="")
   parser.add_argument("--interactive", action="store_true")
@@ -161,8 +159,8 @@ if __name__ == "__main__":
   parser.add_argument("--temperature", type=float, default=0.2)
   parser.add_argument("--save-dir", type=str, default="")
   args = parser.parse_args()
-  assert args.input_file or args.interactive, "Either input-file or interactive mode must be specified"
   if args.save_dir != "":
     random_init_model_save(args.save_dir, args.config)
   else:
+    assert args.input_file or args.interactive, "Either input-file or interactive mode must be specified"
     main(args.ckpt_path, args.config, args.input_file, args.max_new_tokens, args.temperature)

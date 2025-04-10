@@ -88,6 +88,7 @@ class ModelArgs:
     layer_id: int = 0
     expertkit_addr: str = "localhost:50051"
     expertkit_timeout_sec: int = 16
+    save_model: bool = False
 
 class ParallelEmbedding(nn.Module):
     """
@@ -562,7 +563,11 @@ class Gate(nn.Module):
         self.topk_groups = args.n_limited_groups
         self.score_func = args.score_func
         self.route_scale = args.route_scale
-        self.weight = nn.Parameter(torch.empty(args.n_routed_experts, args.dim))
+        if args.save_model:
+            # used only for random weights generate for testing
+            self.weight = nn.Parameter(torch.randn(args.n_routed_experts, args.dim) * 0.02)
+        else:
+            self.weight = nn.Parameter(torch.empty(args.n_routed_experts, args.dim))
         self.bias = nn.Parameter(torch.empty(args.n_routed_experts)) if self.dim == 7168 else None
 
     def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -704,6 +709,7 @@ class MoE(nn.Module):
         for seq_idx in range(batch_size):
             token_expert_indices = indices[seq_idx].tolist()
             token_expert_ids = [f"{self.layer_id}_{expert_idx}" for expert_idx in token_expert_indices]
+            if self.debug: print(f"ids: {token_expert_ids}")
             expert_ids.append(token_expert_ids)
         outputs = self.client.forward_expert(
             expert_ids=expert_ids,
@@ -724,7 +730,6 @@ class MoE(nn.Module):
         #     y[idx] += expert(x[idx]) * weights[idx, top, None]
 
         z = self.shared_experts(x) # shared expert is computed locally
-        if self.debug: print(f"sahred shape: {z.shape}\n")
         # if world_size > 1:
         #     dist.all_reduce(y)
         # return (y + z).view(shape)
@@ -808,6 +813,16 @@ class Transformer(nn.Module):
         self.norm = RMSNorm(args.dim)
         self.head = ColumnParallelLinear(args.dim, args.vocab_size, dtype=torch.get_default_dtype())
         self.register_buffer("freqs_cis", precompute_freqs_cis(args), persistent=False)
+        if args.save_model:
+            self.apply(self._init_weights)
+
+    def _init_weights(self, module):
+        if isinstance(module, (Linear, ColumnParallelLinear, ParallelEmbedding, RowParallelLinear)):
+            nn.init.normal_(module.weight, mean=0.0, std=0.02)
+            if hasattr(module, 'bias') and module.bias is not None:
+                nn.init.zeros_(module.bias)
+        elif isinstance(module, RMSNorm):
+            nn.init.ones_(module.weight)
 
     @torch.inference_mode()
     def forward(self, tokens: torch.Tensor, start_pos: int = 0):
