@@ -82,12 +82,14 @@ def generate(
     return completion_tokens
 
 
-def main(
+def deepseekv3_test(
     ckpt_path: str,
     config: str,
     input_file: str = "",
     max_new_tokens: int = 100,
     temperature: float = 1.0,
+    random_seed: bool = True,
+    mode: str = "local",
 ) -> None:
   world_size = int(os.getenv("WORLD_SIZE", "1"))
   rank = int(os.getenv("RANK", "0"))
@@ -100,13 +102,14 @@ def main(
   torch.cuda.set_device(local_rank)
   torch.set_default_dtype(torch.bfloat16)
   torch.set_num_threads(8)
-  seed = int(time.time()) % (2**32)  # 使用当前时间的秒数作为种子，并限制在 32 位整数范围内
-  torch.manual_seed(seed)
-#   random.seed(seed)
-#   np.random.seed(seed)
-#   torch.manual_seed(965)
+  if random_seed:
+    seed = int(time.time()) % (2**32)
+    torch.manual_seed(seed)
+  else:  
+    torch.manual_seed(965)
   with open(config) as f:
       args = ModelArgs(**json.load(f))
+  args.expertkit_mode = mode
   print(args)
   with torch.device("cuda"):
       model = Transformer(args)
@@ -128,6 +131,8 @@ def main(
 
   if world_size > 1:
       dist.destroy_process_group()
+
+  return completions
   
 
 def random_init_model_save(
@@ -163,4 +168,4 @@ if __name__ == "__main__":
     random_init_model_save(args.save_dir, args.config)
   else:
     assert args.input_file or args.interactive, "Either input-file or interactive mode must be specified"
-    main(args.ckpt_path, args.config, args.input_file, args.max_new_tokens, args.temperature)
+    deepseekv3_test(args.ckpt_path, args.config, args.input_file, args.max_new_tokens, args.temperature)

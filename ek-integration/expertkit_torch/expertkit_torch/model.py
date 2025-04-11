@@ -86,6 +86,7 @@ class ModelArgs:
     mscale: float = 1.
     # expert_kit info
     layer_id: int = 0
+    expertkit_mode: Literal["local", "grpc"] = "local"
     expertkit_addr: str = "localhost:50051"
     expertkit_timeout_sec: int = 16
     save_model: bool = False
@@ -683,7 +684,7 @@ class MoE(nn.Module):
         if MoE.client is None:
             print(f"🚀EK Torch MoE layer: {self.layer_id} creating new gRPC client, with addr: {args.expertkit_addr}")
             MoE.client = ExpertKitClient(args.expertkit_addr, args.expertkit_timeout_sec)
-
+        self.mode = args.expertkit_mode
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -695,45 +696,47 @@ class MoE(nn.Module):
         Returns:
             torch.Tensor: Output tensor after expert routing and computation.
         """
-         
-        # batch_size, hidden_dim = x.shape
-        shape = x.size()
-        if self.debug: print(f"🚀 layer: {self.layer_id} x.shape: {shape}")
-        x = x.view(-1, self.dim)
-        # if self.debug: print(f"🛳️ layer: {self.layer_id} x.shape: {x.size()}")
-        # if self.debug: print(f"🛳️ x: {x}")
-        weights, indices = self.gate(x)
-        # use grpc client to compute expert results
-        expert_ids = []
-        batch_size, hidden_dim = x.shape
-        for seq_idx in range(batch_size):
-            token_expert_indices = indices[seq_idx].tolist()
-            token_expert_ids = [f"{self.layer_id}_{expert_idx}" for expert_idx in token_expert_indices]
-            if self.debug: print(f"ids: {token_expert_ids}")
-            expert_ids.append(token_expert_ids)
-        outputs = self.client.forward_expert(
-            expert_ids=expert_ids,
-            hidden_state=x
-        )
-        outputs = outputs.to(device=x.device, dtype=x.dtype)
-        expanded_weights = weights.unsqueeze(-1)
-        output = torch.sum(expanded_weights * outputs, dim=1)
-
-        # y = torch.zeros_like(x)
-        # counts = torch.bincount(indices.flatten(), minlength=self.n_routed_experts).tolist()
-        # for i in range(self.experts_start_idx, self.experts_end_idx):
-        #     if counts[i] == 0:
-        #         continue
-        #     expert = self.experts[i]
-        #     # compute all token allocated to expert i
-        #     idx, top = torch.where(indices == i)
-        #     y[idx] += expert(x[idx]) * weights[idx, top, None]
-
-        z = self.shared_experts(x) # shared expert is computed locally
-        # if world_size > 1:
-        #     dist.all_reduce(y)
-        # return (y + z).view(shape)
-        return (output + z).view(shape)
+        if self.mode == "grpc": 
+            shape = x.size()
+            if self.debug: print(f"🚀 layer: {self.layer_id} x.shape: {shape}")
+            x = x.view(-1, self.dim)
+            # if self.debug: print(f"🛳️ layer: {self.layer_id} x.shape: {x.size()}")
+            # if self.debug: print(f"🛳️ x: {x}")
+            weights, indices = self.gate(x)
+            # use grpc client to compute expert results
+            expert_ids = []
+            batch_size, hidden_dim = x.shape
+            for seq_idx in range(batch_size):
+                token_expert_indices = indices[seq_idx].tolist()
+                token_expert_ids = [f"{self.layer_id}_{expert_idx}" for expert_idx in token_expert_indices]
+                if self.debug: print(f"ids: {token_expert_ids}")
+                expert_ids.append(token_expert_ids)
+            outputs = self.client.forward_expert(
+                expert_ids=expert_ids,
+                hidden_state=x
+            )
+            outputs = outputs.to(device=x.device, dtype=x.dtype)
+            expanded_weights = weights.unsqueeze(-1)
+            output = torch.sum(expanded_weights * outputs, dim=1)
+            z = self.shared_experts(x) # shared expert is computed locally
+            return (output + z).view(shape)
+    
+        else:
+            shape = x.size()
+            x = x.view(-1, self.dim)
+            weights, indices = self.gate(x)
+            y = torch.zeros_like(x)
+            counts = torch.bincount(indices.flatten(), minlength=self.n_routed_experts).tolist()
+            for i in range(self.experts_start_idx, self.experts_end_idx):
+                if counts[i] == 0:
+                    continue
+                expert = self.experts[i]
+                idx, top = torch.where(indices == i)
+                y[idx] += expert(x[idx]) * weights[idx, top, None]
+            z = self.shared_experts(x)
+            if world_size > 1:
+                dist.all_reduce(y)
+            return (y + z).view(shape)
 
 
 class Block(nn.Module):
