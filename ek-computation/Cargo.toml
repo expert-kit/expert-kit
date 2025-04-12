@@ -26,6 +26,15 @@ sysinfo = { workspace = true }
 bytes = { workspace = true }
 ek_base = { path = "../ek-base" }
 ek_db = { path = "../ek-db" }
+diesel = { version = "2.2.9", features = [
+    "postgres",
+    "serde_json",
+    "r2d2",
+    "uuid",
+    "chrono",
+] }
+serde_json = "1.0.140"
+tokio-stream = "0.1.17"
 
 
 [build-dependencies]

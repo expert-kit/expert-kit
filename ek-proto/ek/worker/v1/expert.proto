@@ -33,12 +33,14 @@ message ExpertState {
   Stage stage = 1;
 }
 
-message RetrieveStateReq {}
+message RetrieveStateReq {
+  string hostname = 1;
+}
 message RetrieveStateResp {
   message ExpertWithState {
     ek.object.v1.ExpertSlice target = 1;
   }
-  repeated ExpertWithState states = 1;
+  ExpertWithState state = 1;
 }
 message UpdateStateReq {
   ek.object.v1.ExpertSlice target = 1;

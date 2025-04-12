@@ -3,7 +3,7 @@ use crate::{
     proto::ek,
 };
 use ek_base::error::EKResult;
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, sync::Arc};
 
 use crate::x;
 use tokio::sync::RwLock;
@@ -20,6 +20,8 @@ impl Default for EKInstanceGate {
     }
 }
 
+pub type GlobalEKInstanceGate = Arc<tokio::sync::Mutex<EKInstanceGate>>;
+
 impl EKInstanceGate {
     pub fn new() -> Self {
         EKInstanceGate {
@@ -34,6 +36,10 @@ impl EKInstanceGate {
         let mut exps = self.experts.write().await;
         exps.insert(meta.id, Box::new(backend));
         Ok(())
+    }
+    pub async fn current_experts(&self) -> EKResult<Vec<String>> {
+        let guard = self.experts.read().await;
+        Ok(guard.keys().cloned().collect())
     }
 
     pub async fn forward(
@@ -66,3 +72,4 @@ impl EKInstanceGate {
         Ok(resp)
     }
 }
+
