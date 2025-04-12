@@ -1,5 +1,7 @@
 use ek_base::error::EKResult;
 mod gate;
+mod manager;
+mod x;
 use gate::GlobalEKInstanceGate;
 pub mod server;
 use log::info;
@@ -63,6 +65,7 @@ impl StateClient {
         for expert in slice.expert_meta {
             if current_experts.contains(&expert.id) {
                 // update
+                // todo
             } else {
                 // create
             }
@@ -77,6 +80,3 @@ impl StateClient {
         Ok(())
     }
 }
-
-unsafe impl Send for StateClient {}
-unsafe impl Sync for StateClient {}

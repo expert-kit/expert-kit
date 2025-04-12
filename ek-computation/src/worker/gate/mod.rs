@@ -1,52 +1,52 @@
 use crate::{
-    ffn::{EkTensor, ExpertBackend, expert_torch::TchTensor},
+    ffn::{EkTensor, expert_torch::TchTensor},
     proto::ek,
 };
+use core::fmt;
 use ek_base::error::EKResult;
-use std::{collections::BTreeMap, sync::Arc};
+use std::sync::Arc;
 
 use crate::x;
 use tokio::sync::RwLock;
 
+use super::manager::ExpertDB;
+
 pub struct EKInstanceGate {
-    experts: RwLock<BTreeMap<String, Box<ExpertBackend>>>,
+    experts: Arc<RwLock<ExpertDB>>,
     tensor_db: ek_db::safetensor::SafeTensorDB,
     instance: x::EKInstance,
 }
 
+impl fmt::Debug for EKInstanceGate {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EKInstanceGate").finish()
+    }
+}
+
 impl Default for EKInstanceGate {
     fn default() -> Self {
-        Self::new()
+        todo!()
     }
 }
 
 pub type GlobalEKInstanceGate = Arc<tokio::sync::Mutex<EKInstanceGate>>;
 
 impl EKInstanceGate {
-    pub fn new() -> Self {
+    pub fn new(edb: Arc<RwLock<ExpertDB>>) -> Self {
         EKInstanceGate {
-            experts: RwLock::new(BTreeMap::new()),
+            experts: edb,
             tensor_db: ek_db::safetensor::SafeTensorDB::new(),
             instance: x::EKInstance::default(),
         }
     }
-    pub async fn create_expert(&mut self, meta: ek::object::v1::Metadata) -> EKResult<()> {
-        let safe_tensor = self.tensor_db.load(&meta.id).await?;
-        let backend = ExpertBackend::build(self.instance, &safe_tensor).await?;
-        let mut exps = self.experts.write().await;
-        exps.insert(meta.id, Box::new(backend));
-        Ok(())
-    }
     pub async fn current_experts(&self) -> EKResult<Vec<String>> {
-        let guard = self.experts.read().await;
-        Ok(guard.keys().cloned().collect())
+        self.experts.read().await.keys().await
     }
-
     pub async fn forward(
         &self,
         req: ek::worker::v1::ForwardReq,
     ) -> EKResult<ek::worker::v1::ForwardResp> {
-        let lg = self.experts.read().await;
+        // let lg = self.experts.load().await;
         let dim = 7168;
 
         let input_tensor = req.tensor;
@@ -54,10 +54,7 @@ impl EKInstanceGate {
         for (seq_idx, inp) in req.sequences.iter().enumerate() {
             let seq_input = &input_tensor.as_slice()[seq_idx * dim..(seq_idx + 1) + dim];
             for exp_id in &inp.experts {
-                let exp = lg
-                    .get(exp_id)
-                    .ok_or_else(|| ek_base::error::EKError::ExpertNotFound(exp_id.clone()))?;
-                // TODO: batching here
+                let exp = self.experts.read().await.load(exp_id).await?;
                 let res = exp.forward(seq_input)?;
                 output.push((seq_idx, exp_id, res));
             }
@@ -72,4 +69,3 @@ impl EKInstanceGate {
         Ok(resp)
     }
 }
-
