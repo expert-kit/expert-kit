@@ -369,12 +369,12 @@ class ExpertKitServiceMock(expert_pb2_grpc.ComputationServiceServicer):
             context.set_details(error_msg)
             return expert_pb2.ForwardResp()
 
-def serve(expert_dim: int, hidden_dim: int, latency_ms: int, port: int, weights_path: Optional[str] = None, mode: str = "compute"):
+def serve(hidden_dim: int, expert_dim: int, latency_ms: int, port: int, weights_path: Optional[str] = None, mode: str = "compute"):
     """Start the gRPC server.
     
     Args:
-        expert_dim: Dimension of expert outputs
         hidden_dim: Hidden dimension for FFN
+        expert_dim: Dimension of expert outputs
         latency_ms: Artificial latency in milliseconds
         port: Port to listen on
         weights_path: Optional path to expert weights directory or file
@@ -399,8 +399,8 @@ def serve(expert_dim: int, hidden_dim: int, latency_ms: int, port: int, weights_
     
     # Add servicers
     expert_kit_service = ExpertKitServiceMock(
-        expert_dim=expert_dim,
         hidden_dim=hidden_dim,
+        expert_dim=expert_dim,
         latency_ms=latency_ms,
         weights_path=weights_path,
         mode=mode

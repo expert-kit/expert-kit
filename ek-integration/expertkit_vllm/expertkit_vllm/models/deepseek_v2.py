@@ -222,4 +222,7 @@ class ExpertKitMoE(nn.Module):
             print(f"🚀 {expanded_weights.dtype}, {expert_outputs.dtype}, {hidden_states.dtype} ")
         output = torch.sum(expanded_weights * expert_outputs, dim=1)
 
+        print(f"🚀 output shape: {output.shape}, shared_output shape: {shared_output.shape}")
+
+
         return output.view(batch_size, hidden_dim)
