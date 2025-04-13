@@ -2,7 +2,9 @@ import grpc
 import torch
 import io
 import numpy as np
-import safetensors
+# import safetensors
+import safetensors.torch as st
+
 from expertkit_vllm.pbpy.ek.worker.v1 import expert_pb2_grpc, expert_pb2
 from typing import List
 
@@ -50,7 +52,7 @@ class ExpertKitClient:
         # tensor_data = buf.getvalue()
         origin_device = hidden_state.device
 
-        tensor_data = safetensors.torch.save({"data": hidden_state})
+        tensor_data = st.save({"data": hidden_state})
 
         # Generate expert ids info
         seq_infos = []
@@ -71,7 +73,7 @@ class ExpertKitClient:
                 timeout=self.timeout
             )
             
-            return safetensors.torch.load(
+            return st.load(
                 response.output_tensor,
             )["data"].to(origin_device)
         except grpc.RpcError as e:
