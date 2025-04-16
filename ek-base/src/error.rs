@@ -1,4 +1,6 @@
+use deadpool::PoolError;
 use diesel;
+use diesel_async::pooled_connection::deadpool;
 use opendal;
 use std::string;
 use tonic::Status;
@@ -25,11 +27,17 @@ pub enum EKError {
     #[error("expert weight not found in tensor bundle")]
     ExpertWeightNotFound(string::String),
 
+    #[error("something NotFound")]
+    NotFound(string::String),
+
     #[error("opendal error")]
     OpenDALError(#[from] opendal::Error),
 
     #[error("diesel error")]
     DieselError(#[from] diesel::result::Error),
+
+    #[error("deadpool error")]
+    DeadPoolError(#[from] PoolError),
 
     #[error("db error")]
     DBError(),

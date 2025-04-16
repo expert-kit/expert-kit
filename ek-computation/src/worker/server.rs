@@ -3,7 +3,7 @@ use crate::proto::ek::worker::v1::{
 };
 use tonic::{Request, Response, Status};
 
-use super::gate::GlobalEKInstanceGate;
+use super::core::{GlobalEKInstanceGate, get_instance_gate};
 
 // use ekproto::{FfnRequest, FfnResponse};
 
@@ -13,7 +13,8 @@ pub struct BasicExpertImpl {
 }
 impl BasicExpertImpl {
     pub fn new() -> Self {
-        todo!()
+        let gate = get_instance_gate();
+        Self { gate }
     }
 }
 

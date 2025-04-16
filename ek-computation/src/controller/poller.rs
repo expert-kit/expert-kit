@@ -37,9 +37,15 @@ impl StatePoller for StatePollerImpl {
     }
 }
 
+impl Default for StatePollerImpl {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl StatePollerImpl {
     pub fn new() -> Self {
-        return StatePollerImpl {};
+        StatePollerImpl {}
     }
     async fn poll_state(&mut self) -> EKResult<()> {
         let mut conn = pool::POOL.get().await.map_err(|_| EKError::DBError())?;

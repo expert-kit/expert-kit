@@ -7,7 +7,7 @@ use tokio::sync::{
 };
 use tonic::async_trait;
 
-use crate::state::models::{self, Expert, NodeWithExperts};
+use crate::state::models::{Expert, NodeWithExperts};
 
 #[async_trait]
 pub trait Dispatcher {
@@ -21,8 +21,17 @@ pub struct DispatcherImpl {
 }
 
 pub static DISPATCHER: Lazy<Arc<Mutex<DispatcherImpl>>> = Lazy::new(|| {
-    todo!();
+    let inner = DispatcherImpl::new();
+    Arc::new(Mutex::new(inner))
 });
+
+impl DispatcherImpl {
+    fn new() -> Self {
+        Self {
+            ch_store: BTreeMap::new(),
+        }
+    }
+}
 
 #[async_trait]
 impl Dispatcher for DispatcherImpl {

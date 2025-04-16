@@ -16,6 +16,14 @@ pub struct Node {
     pub config: serde_json::Value,
 }
 
+#[derive(Serialize, Deserialize, Clone, Debug, Insertable)]
+#[diesel(table_name = schema::node)]
+pub struct NewNode {
+    pub hostname: String,
+    pub device: String,
+    pub config: serde_json::Value,
+}
+
 #[derive(
     Serialize,
     Deserialize,
@@ -39,10 +47,30 @@ pub struct Expert {
     pub state: serde_json::Value,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, Queryable, Selectable)]
+#[derive(Serialize, Deserialize, Clone, Debug, Insertable)]
+#[diesel(belongs_to(Node))]
+#[diesel(table_name = schema::expert)]
+#[diesel(check_for_backend(diesel::pg::Pg))]
+pub struct NewExpert {
+    pub instance_id: i32,
+    pub node_id: i32,
+    pub expert_id: String,
+    pub replica: i32,
+    pub state: serde_json::Value,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, Queryable, Selectable, QueryableByName)]
 #[diesel(table_name = schema::instance)]
+#[diesel(check_for_backend(diesel::pg::Pg))]
 pub struct Instance {
     pub id: i32,
+    pub model_id: i32,
+    pub name: String,
+}
+
+#[derive(Insertable)]
+#[diesel(table_name = schema::instance)]
+pub struct NewInstance {
     pub model_id: i32,
     pub name: String,
 }
@@ -51,6 +79,13 @@ pub struct Instance {
 #[diesel(table_name = schema::model)]
 pub struct Model {
     pub id: i32,
+    pub name: String,
+    pub config: serde_json::Value,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, Insertable)]
+#[diesel(table_name = schema::model)]
+pub struct NewModel {
     pub name: String,
     pub config: serde_json::Value,
 }
@@ -78,7 +113,7 @@ impl From<Vec<Expert>> for ExpertSlice {
         };
         ExpertSlice {
             meta: Some(slice_meta),
-            expert_meta: expert_meta,
+            expert_meta,
         }
     }
 }
