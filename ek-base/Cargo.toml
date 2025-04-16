@@ -8,3 +8,6 @@ thiserror = "2.0.12"
 opendal = { workspace = true }
 safetensors = { workspace = true }
 tch = { workspace = true }
+tonic = { workspace = true }
+diesel = { workspace = true }
+serde_json = { workspace = true }

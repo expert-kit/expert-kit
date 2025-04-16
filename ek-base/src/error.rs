@@ -1,5 +1,7 @@
+use diesel;
 use opendal;
 use std::string;
+use tonic::Status;
 
 use thiserror::Error;
 
@@ -8,8 +10,11 @@ pub enum EKError {
     #[error("error related to safe tensor conversion")]
     SafeTensorError(#[from] safetensors::SafeTensorError),
 
-    #[error("error related tch-rs")]
+    #[error("error related to tch-rs")]
     TchError(#[from] tch::TchError),
+
+    #[error("tonic errors")]
+    TonicError(#[from] tonic::Status),
 
     #[error("tensor name not found")]
     SafeTensorNotFound,
@@ -22,6 +27,18 @@ pub enum EKError {
 
     #[error("opendal error")]
     OpenDALError(#[from] opendal::Error),
+
+    #[error("diesel error")]
+    DieselError(#[from] diesel::result::Error),
+
+    #[error("db error")]
+    DBError(),
 }
 
 pub type EKResult<T> = std::result::Result<T, EKError>;
+
+impl From<EKError> for Status {
+    fn from(value: EKError) -> Self {
+        todo!()
+    }
+}
