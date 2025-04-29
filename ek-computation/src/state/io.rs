@@ -1,10 +1,7 @@
 use crate::{proto::ek::object::v1::ExpertSlice, schema, state::pool::POOL};
 
 use super::models::{self, NewExpert, NewInstance, NewModel, NewNode};
-use diesel::{
-    ExpressionMethods, SelectableHelper,
-    query_dsl::methods::{FilterDsl, SelectDsl},
-};
+use diesel::{ExpressionMethods, QueryDsl, SelectableHelper};
 use diesel_async::{AsyncConnection, RunQueryDsl};
 use ek_base::error::{EKError, EKResult};
 use models::{Expert, Instance, Model, Node};
@@ -15,6 +12,7 @@ pub trait StateReader {
     async fn node_by_hostname(&self, hostname: String) -> EKResult<Option<Node>>;
     async fn instance_by_id(&self, id: i32) -> EKResult<Option<Instance>>;
     async fn experts_by_node(&self, node_id: i32) -> EKResult<Vec<Expert>>;
+    async fn node_by_expert(&self, expert_id: &String) -> EKResult<Vec<Node>>;
 }
 
 #[async_trait]
@@ -34,8 +32,26 @@ pub trait StateWriter {
 
 pub struct StateReaderImpl {}
 
+impl StateReaderImpl {
+    async fn _node_by_expert(&self, expert_id: &String) -> EKResult<Vec<Node>> {
+        let mut conn = POOL.get().await?;
+
+        let res = schema::node::table
+            .inner_join(schema::expert::table)
+            .filter(schema::expert::dsl::expert_id.eq(expert_id))
+            .select(Node::as_select())
+            .distinct()
+            .load(&mut conn)
+            .await?;
+        Ok(res)
+    }
+}
+
 #[async_trait]
 impl StateReader for StateReaderImpl {
+    async fn node_by_expert(&self, expert_id: &String) -> EKResult<Vec<Node>> {
+        self._node_by_expert(expert_id).await
+    }
     async fn node_by_hostname(&self, hostname: String) -> EKResult<Option<Node>> {
         let mut conn = POOL.get().await?;
         use schema::node::dsl;

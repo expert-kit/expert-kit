@@ -43,8 +43,14 @@ pub enum EKError {
     #[error("db error")]
     DBError(),
 
-    #[error("join  error")]
+    #[error("join error")]
     TokioJoinError(#[from] JoinError),
+
+    #[error("invalid input")]
+    InvalidInput(string::String),
+
+    #[error("tonic transport error")]
+    TonicTransportError(#[from] tonic::transport::Error),
 }
 
 pub type EKResult<T> = std::result::Result<T, EKError>;
