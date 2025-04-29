@@ -3,6 +3,7 @@ use diesel;
 use diesel_async::pooled_connection::deadpool;
 use opendal;
 use std::string;
+use tokio::task::JoinError;
 use tonic::Status;
 
 use thiserror::Error;
@@ -41,6 +42,9 @@ pub enum EKError {
 
     #[error("db error")]
     DBError(),
+
+    #[error("join  error")]
+    TokioJoinError(#[from] JoinError),
 }
 
 pub type EKResult<T> = std::result::Result<T, EKError>;
