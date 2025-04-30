@@ -162,10 +162,11 @@ if __name__ == "__main__":
   parser.add_argument("--interactive", action="store_true")
   parser.add_argument("--max-new-tokens", type=int, default=200)
   parser.add_argument("--temperature", type=float, default=0.2)
+  parser.add_argument("--mode", type=str, default="local")
   parser.add_argument("--save-dir", type=str, default="")
   args = parser.parse_args()
   if args.save_dir != "":
     random_init_model_save(args.save_dir, args.config)
   else:
     assert args.input_file or args.interactive, "Either input-file or interactive mode must be specified"
-    deepseekv3_test(args.ckpt_path, args.config, args.input_file, args.max_new_tokens, args.temperature)
+    deepseekv3_test(args.ckpt_path, args.config, args.input_file, args.max_new_tokens, args.temperature, mode=args.mode)

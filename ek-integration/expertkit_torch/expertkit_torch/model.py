@@ -108,6 +108,8 @@ class ParallelEmbedding(nn.Module):
         self.vocab_start_idx = rank * self.part_vocab_size
         self.vocab_end_idx = self.vocab_start_idx + self.part_vocab_size
         self.weight = nn.Parameter(torch.empty(self.part_vocab_size, self.dim))
+        nn.init.normal_(self.weight, mean=0.0, std=1.0)
+
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -698,6 +700,7 @@ class MoE(nn.Module):
         """
         if self.mode == "grpc": 
             shape = x.size()
+            # print(f"layer {self.layer_id}, input: {x}")
             if self.debug: print(f"🚀 layer: {self.layer_id} x.shape: {shape}")
             x = x.view(-1, self.dim)
             # if self.debug: print(f"🛳️ layer: {self.layer_id} x.shape: {x.size()}")
@@ -716,10 +719,12 @@ class MoE(nn.Module):
                 hidden_state=x
             )
             outputs = outputs.to(device=x.device, dtype=x.dtype)
+            # print(f"grpc outputs: {outputs}")
             expanded_weights = weights.unsqueeze(-1)
             output = torch.sum(expanded_weights * outputs, dim=1)
             z = self.shared_experts(x) # shared expert is computed locally
-            return (output + z).view(shape)
+            result = (output + z).view(shape)
+            return result
     
         else:
             shape = x.size()
@@ -732,11 +737,15 @@ class MoE(nn.Module):
                     continue
                 expert = self.experts[i]
                 idx, top = torch.where(indices == i)
-                y[idx] += expert(x[idx]) * weights[idx, top, None]
+                expert_outputs = expert(x[idx])
+                expert_weights = weights[idx, top, None]
+                y[idx] += expert_outputs * expert_weights
             z = self.shared_experts(x)
             if world_size > 1:
                 dist.all_reduce(y)
-            return (y + z).view(shape)
+            result = (y + z).view(shape)
+            # print(f"local layer {self.layer_id} result: {result}")
+            return result
 
 
 class Block(nn.Module):
