@@ -141,6 +141,12 @@ impl TorchFFN {
     }
 }
 
+impl TchTensor {
+    pub fn inner(&self) -> Tensor {
+        self.0.shallow_clone()
+    }
+}
+
 impl Expert<TchTensor> for TorchFFN {
     fn forward(&self, x: &TchTensor) -> TchTensor {
         let guard = self.module.lock().unwrap();

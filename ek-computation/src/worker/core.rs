@@ -1,20 +1,16 @@
+use super::manager::{ExpertDB, get_expert_db};
 use crate::{
     ffn::{EkTensor, expert_torch::TchTensor},
     proto::ek,
 };
 use core::fmt;
 use ek_base::error::EKResult;
+use once_cell::sync::OnceCell;
 use std::sync::Arc;
-
-use crate::x;
-use tokio::sync::RwLock;
-
-use super::manager::ExpertDB;
+use tokio::sync::{Mutex, RwLock};
 
 pub struct EKInstanceGate {
-    experts: Arc<RwLock<ExpertDB>>,
-    tensor_db: ek_db::safetensor::SafeTensorDB,
-    instance: x::EKInstance,
+    experts: Arc<RwLock<dyn ExpertDB + Send + Sync>>,
 }
 
 impl fmt::Debug for EKInstanceGate {
@@ -25,19 +21,26 @@ impl fmt::Debug for EKInstanceGate {
 
 impl Default for EKInstanceGate {
     fn default() -> Self {
-        todo!()
+        let edb = get_expert_db();
+        EKInstanceGate { experts: edb }
     }
 }
 
-pub type GlobalEKInstanceGate = Arc<tokio::sync::Mutex<EKInstanceGate>>;
+pub type GlobalEKInstanceGate = Arc<Mutex<EKInstanceGate>>;
+
+pub fn get_instance_gate() -> GlobalEKInstanceGate {
+    static INSTANCE: OnceCell<GlobalEKInstanceGate> = OnceCell::new();
+    let inst = INSTANCE.get_or_init(|| {
+        let inner = EKInstanceGate::new();
+        Arc::new(Mutex::new(inner))
+    });
+    inst.clone()
+}
 
 impl EKInstanceGate {
-    pub fn new(edb: Arc<RwLock<ExpertDB>>) -> Self {
-        EKInstanceGate {
-            experts: edb,
-            tensor_db: ek_db::safetensor::SafeTensorDB::new(),
-            instance: x::EKInstance::default(),
-        }
+    pub fn new() -> Self {
+        let edb = get_expert_db();
+        EKInstanceGate { experts: edb }
     }
     pub async fn current_experts(&self) -> EKResult<Vec<String>> {
         self.experts.read().await.keys().await

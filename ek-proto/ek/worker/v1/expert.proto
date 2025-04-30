@@ -44,6 +44,7 @@ message RetrieveStateResp {
 }
 message UpdateStateReq {
   ek.object.v1.ExpertSlice target = 1;
+  string hostname = 2;
 }
 message UpdateStateResp {}
 
