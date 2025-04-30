@@ -6,16 +6,16 @@ use crate::{
         object::v1::ExpertSlice,
         worker::v1::{self, retrieve_state_resp::ExpertWithState},
     },
-    state::io::StateWriter,
+    state::io::{StateWriter, get_state_writer},
 };
 use ek_base::error::EKError;
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::{RwLock, mpsc};
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Response, Result, Status};
 
 use crate::proto::ek::worker::v1::{RetrieveStateResp, state_service_server::StateService};
 pub struct StateServerImpl {
-    writer: Arc<Mutex<dyn StateWriter + Send + Sync>>,
+    writer: Arc<RwLock<dyn StateWriter + Send + Sync>>,
 }
 
 #[tonic::async_trait]
@@ -51,11 +51,25 @@ impl StateService for StateServerImpl {
         &self,
         request: tonic::Request<v1::UpdateStateReq>,
     ) -> Result<Response<v1::UpdateStateResp>> {
-        let mut lg = self.writer.lock().await;
+        let mut lg = self.writer.write().await;
         let req = request.get_ref();
         let slice = req.target.clone().ok_or(EKError::DBError())?;
         lg.upd_expert_state(&req.hostname, slice).await?;
         let resp = v1::UpdateStateResp {};
         Ok(Response::new(resp))
+    }
+}
+
+impl Default for StateServerImpl {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl StateServerImpl {
+    pub fn new() -> Self {
+        Self {
+            writer: get_state_writer(),
+        }
     }
 }

@@ -57,6 +57,6 @@ pub type EKResult<T> = std::result::Result<T, EKError>;
 
 impl From<EKError> for Status {
     fn from(value: EKError) -> Self {
-        todo!()
+        Status::internal(value.to_string())
     }
 }

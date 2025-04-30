@@ -1,3 +1,5 @@
+use std::{sync::Arc, vec};
+
 use crate::{proto::ek::object::v1::ExpertSlice, schema, state::pool::POOL};
 
 use super::models::{self, NewExpert, NewInstance, NewModel, NewNode};
@@ -5,16 +7,20 @@ use diesel::{ExpressionMethods, QueryDsl, SelectableHelper};
 use diesel_async::{AsyncConnection, RunQueryDsl};
 use ek_base::error::{EKError, EKResult};
 use models::{Expert, Instance, Model, Node};
+use once_cell::sync::OnceCell;
+use tokio::sync::RwLock;
 use tonic::async_trait;
 
+#[allow(dead_code)]
 #[async_trait]
 pub trait StateReader {
-    async fn node_by_hostname(&self, hostname: String) -> EKResult<Option<Node>>;
+    async fn node_by_hostname(&self, hostname: &str) -> EKResult<Option<Node>>;
     async fn instance_by_id(&self, id: i32) -> EKResult<Option<Instance>>;
     async fn experts_by_node(&self, node_id: i32) -> EKResult<Vec<Expert>>;
-    async fn node_by_expert(&self, expert_id: &String) -> EKResult<Vec<Node>>;
+    async fn node_by_expert(&self, expert_id: &str) -> EKResult<Vec<Node>>;
 }
 
+#[allow(dead_code)]
 #[async_trait]
 pub trait StateWriter {
     async fn add_instance(&mut self, instance: &NewInstance) -> EKResult<Instance>;
@@ -27,13 +33,16 @@ pub trait StateWriter {
     async fn del_expert(&mut self, id: i32) -> EKResult<()>;
     async fn del_node(&mut self, id: i32) -> EKResult<()>;
 
-    async fn upd_expert_state(&mut self, hostname: &String, state: ExpertSlice) -> EKResult<()>;
+    async fn upd_expert_state(&mut self, hostname: &str, state: ExpertSlice) -> EKResult<()>;
 }
 
 pub struct StateReaderImpl {}
 
 impl StateReaderImpl {
-    async fn _node_by_expert(&self, expert_id: &String) -> EKResult<Vec<Node>> {
+    pub fn new() -> Self {
+        Self {}
+    }
+    async fn _node_by_expert(&self, expert_id: &str) -> EKResult<Vec<Node>> {
         let mut conn = POOL.get().await?;
 
         let res = schema::node::table
@@ -49,10 +58,10 @@ impl StateReaderImpl {
 
 #[async_trait]
 impl StateReader for StateReaderImpl {
-    async fn node_by_expert(&self, expert_id: &String) -> EKResult<Vec<Node>> {
+    async fn node_by_expert(&self, expert_id: &str) -> EKResult<Vec<Node>> {
         self._node_by_expert(expert_id).await
     }
-    async fn node_by_hostname(&self, hostname: String) -> EKResult<Option<Node>> {
+    async fn node_by_hostname(&self, hostname: &str) -> EKResult<Option<Node>> {
         let mut conn = POOL.get().await?;
         use schema::node::dsl;
         let res = schema::node::table
@@ -160,14 +169,14 @@ impl StateWriter for StateWriterImpl {
             .await?;
         Ok(())
     }
-    async fn upd_expert_state(&mut self, hostname: &String, state: ExpertSlice) -> EKResult<()> {
+    async fn upd_expert_state(&mut self, hostname: &str, state: ExpertSlice) -> EKResult<()> {
         let mut conn = POOL.get().await?;
         let reader = StateReaderImpl {};
         use schema::expert::dsl;
         conn.transaction::<_, EKError, _>(|conn| {
             Box::pin(async move {
                 let node = reader
-                    .node_by_hostname(hostname.clone())
+                    .node_by_hostname(hostname)
                     .await?
                     .ok_or(EKError::NotFound(format!("node {} not found", hostname)))?;
                 let updating_ids = self.expert_slice_to_ids(&state)?;
@@ -192,13 +201,44 @@ impl StateWriter for StateWriterImpl {
 
 impl StateWriterImpl {
     fn expert_slice_to_ids(&self, slice: &ExpertSlice) -> EKResult<Vec<i32>> {
-        Ok(vec![])
+        let mut ids = vec![];
+        for x in slice.expert_meta.iter() {
+            let id = x
+                .tags
+                .get("db_id")
+                .ok_or(EKError::InvalidInput("db_id not found".into()))?
+                .parse::<i32>()
+                .map_err(|_| EKError::InvalidInput("db_id not invalid id".into()))?;
+            ids.push(id);
+        }
+        Ok(ids)
     }
     fn expert_slice_to_new_expert(
         &self,
         node_id: i32,
         slice: &ExpertSlice,
     ) -> EKResult<Vec<NewExpert>> {
-        Ok(vec![])
+        let mut res = vec![];
+        for x in slice.expert_meta.iter() {
+            let new_expert = NewExpert {
+                instance_id: 0,
+                node_id,
+                expert_id: x.id.clone(),
+                replica: 0,
+                state: serde_json::Value::Null,
+            };
+            res.push(new_expert);
+        }
+        Ok(res)
     }
+}
+
+pub fn get_state_writer() -> Arc<RwLock<dyn StateWriter + Send + Sync>> {
+    static INSTANCE: OnceCell<Arc<RwLock<StateWriterImpl>>> = OnceCell::new();
+    let res = INSTANCE.get_or_init(|| {
+        let inner = StateWriterImpl {};
+        Arc::new(RwLock::new(inner))
+    });
+
+    (res.clone()) as _
 }

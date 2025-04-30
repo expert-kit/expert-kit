@@ -10,7 +10,6 @@ use once_cell::sync::OnceCell;
 use tokio::sync::RwLock;
 
 use crate::{ffn::ExpertBackend, proto::ek, x};
-use opendal::Builder;
 
 use super::manager::ExpertDB;
 

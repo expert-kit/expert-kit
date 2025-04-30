@@ -21,7 +21,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let srv = tokio::task::spawn(async move {
         let server = BasicExpertImpl::new();
-        let addr = "[::1]:50051".parse().unwrap();
+        let addr = "[::1]:51234".parse().unwrap();
         let err = tonic::transport::Server::builder()
             .add_service(ComputationServiceServer::new(server))
             .serve(addr)

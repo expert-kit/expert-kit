@@ -1,6 +1,7 @@
 use std::{collections::BTreeMap, sync::Arc};
 
 use ek_base::error::{EKError, EKResult};
+use once_cell::sync::OnceCell;
 use safetensors::SafeTensors;
 use tch::{IndexOp, Tensor};
 use tokio::sync::{Mutex, mpsc};
@@ -10,7 +11,7 @@ use crate::{
     proto::ek::worker::v1,
 };
 
-use super::registry::ExpertRegistry;
+use super::registry::{ExpertRegistry, get_registry};
 
 #[async_trait::async_trait]
 pub trait Executor {
@@ -18,6 +19,8 @@ pub trait Executor {
         &mut self,
         req: &v1::ForwardReq,
     ) -> EKResult<mpsc::Receiver<Arc<v1::ForwardResp>>>;
+
+    async fn exec(&mut self) -> EKResult<()>;
 }
 
 type ReqId = u64;
@@ -32,6 +35,8 @@ struct IngressMeta {
     // tensor shape: [expert,hidden]
     result: Vec<Vec<Option<Tensor>>>,
 }
+
+unsafe impl Sync for IngressMeta {}
 
 struct EgressMeta {
     req_id: ReqId,
@@ -55,12 +60,16 @@ impl Executor for NaiveExecutor {
         &mut self,
         req: &v1::ForwardReq,
     ) -> EKResult<mpsc::Receiver<Arc<v1::ForwardResp>>> {
-        self.submit_inner(req)
+        self.inner_submit(req).await
+    }
+
+    async fn exec(&mut self) -> EKResult<()> {
+        self.inner_execute().await
     }
 }
 
 impl NaiveExecutor {
-    fn submit_inner(
+    async fn inner_submit(
         &mut self,
         req: &v1::ForwardReq,
     ) -> EKResult<mpsc::Receiver<Arc<v1::ForwardResp>>> {
@@ -73,7 +82,7 @@ impl NaiveExecutor {
 
         for i in &req.sequences {
             let mut experts = Vec::new();
-            for j in &i.experts {
+            for _ in &i.experts {
                 experts.push(None);
             }
             result.push(experts);
@@ -81,8 +90,8 @@ impl NaiveExecutor {
 
         let meta = IngressMeta {
             tensor: inp_tensor.inner(),
-            sender: sender,
-            result: result,
+            sender,
+            result,
         };
 
         self.req_id_cursor += 1;
@@ -111,11 +120,11 @@ impl NaiveExecutor {
         Ok(out)
     }
 
-    async fn execute(&mut self) -> EKResult<()> {
+    pub async fn inner_execute(&mut self) -> EKResult<()> {
         let mut handles = vec![];
         let mut chips = vec![];
         for egress_req in self.pending_egress.iter() {
-            chips.push((egress_req.0.clone(), egress_req.1.clone()));
+            chips.push((egress_req.0.clone(), egress_req.1));
             let exp_id = egress_req.0.clone();
             let channel = self.registry.lock().await.select(exp_id).await?;
 
@@ -177,10 +186,12 @@ impl NaiveExecutor {
             }
         }
 
+        self.output().await;
+
         Ok(())
     }
 
-    async fn output(&mut self, req_id: ReqId) {
+    async fn output(&mut self) {
         let mut removed = vec![];
         for (req_id, meta) in self.pending_ingress.iter() {
             let completed = meta.result.iter().all(|x| x.iter().all(|v| v.is_some()));
@@ -236,10 +247,10 @@ impl NaiveExecutor {
             for (idx, expert) in seq.experts.iter().enumerate() {
                 self.pending_egress
                     .entry(expert.clone())
-                    .or_insert_with(Vec::new)
+                    .or_default()
                     .push(EgressMeta {
-                        req_id: req_id,
-                        seq_gid: seq_gid,
+                        req_id,
+                        seq_gid,
                         expert_idx: idx,
                     });
             }
@@ -248,6 +259,34 @@ impl NaiveExecutor {
     fn add_seq(&mut self, rid: ReqId, seq_lid: LocalSeqIdx) -> GlobalSeqId {
         self.seq_gid_cursor += 1;
         self.seq_mapping.insert(self.seq_gid_cursor, (rid, seq_lid));
-        return self.seq_gid_cursor;
+        self.seq_gid_cursor
     }
+}
+
+impl Default for NaiveExecutor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl NaiveExecutor {
+    pub fn new() -> Self {
+        Self {
+            pending_egress: BTreeMap::new(),
+            pending_ingress: BTreeMap::new(),
+            seq_mapping: BTreeMap::new(),
+            seq_gid_cursor: 0,
+            req_id_cursor: 0,
+            registry: get_registry(),
+        }
+    }
+}
+
+pub fn get_executor() -> Arc<Mutex<dyn Executor + Send>> {
+    static INSTANCE: OnceCell<Arc<Mutex<dyn Executor + Send>>> = OnceCell::new();
+    let res = INSTANCE.get_or_init(|| {
+        let inner = NaiveExecutor::new();
+        Arc::new(Mutex::new(inner))
+    });
+    (res.clone()) as _
 }

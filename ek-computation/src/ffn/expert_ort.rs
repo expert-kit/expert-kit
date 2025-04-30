@@ -1,12 +1,19 @@
-use ndarray::ArrayD;
+use std::fmt::Debug;
+
+use ndarray::{Array, ArrayD, IxDyn};
+
 use ndarray_rand::{
     RandomExt,
-    rand_distr::{Distribution, Standard},
+    rand_distr::{
+        Distribution, Standard, Uniform,
+        num_traits::{One, Zero},
+        uniform::SampleUniform,
+    },
 };
 use ort::{
     session::{Session, builder::GraphOptimizationLevel},
     tensor::PrimitiveTensorElementType,
-    value::Value,
+    value::Tensor,
 };
 use safetensors::tensor::TensorView;
 
@@ -17,17 +24,30 @@ pub struct OnnxFFN {
     hidden: usize,
     sess: Session,
 }
-trait OrtDType: PrimitiveTensorElementType {}
+trait OrtDType:
+    PrimitiveTensorElementType + Clone + Zero + One + SampleUniform + Debug + Copy + 'static
+{
+}
 
 #[derive(Clone, Debug)]
-pub struct NDArrayTensor<D: OrtDType>(ArrayD<D>);
+struct NDArrayTensor<D: OrtDType>(ArrayD<D>);
 
 impl<D> From<TensorView<'_>> for NDArrayTensor<D>
 where
     D: OrtDType,
 {
-    fn from(value: TensorView<'_>) -> Self {
-        todo!()
+    fn from(view: TensorView<'_>) -> Self {
+        let raw = view.data();
+        unsafe {
+            let (_, d_slice, _) = raw.align_to::<D>();
+            let copied = d_slice.to_vec();
+
+            let v = Array::from_vec(copied)
+                .into_dimensionality::<IxDyn>()
+                .unwrap();
+
+            NDArrayTensor(v)
+        }
     }
 }
 
@@ -44,33 +64,42 @@ impl<D> EkTensor for NDArrayTensor<D>
 where
     D: OrtDType,
 {
-    fn rand(shape: Vec<usize>, dtype: super::DType, dev: super::Device) -> Self {
-        todo!()
+    fn rand(shape: Vec<usize>, _dtype: super::DType, _dev: super::Device) -> Self {
+        let res = ArrayD::random(shape, Uniform::new(D::zero(), D::one()));
+        Self(res)
     }
 
     fn cat(tensors: &[Self], dim: usize) -> Self {
-        todo!()
+        let views = tensors.iter().map(|x| x.0.view()).collect::<Vec<_>>();
+        let res = ndarray::concatenate(ndarray::Axis(dim), &views)
+            .unwrap()
+            .into_dimensionality::<IxDyn>()
+            .unwrap();
+        NDArrayTensor(res)
     }
 
     fn serialize(&self) -> Vec<u8> {
         todo!()
     }
 
-    fn from_raw(data: &[u8], shape: &[usize], dtype: super::DType) -> Self {
-        todo!()
+    fn from_raw(data: &[u8], shape: &[usize], _dtype: super::DType) -> Self {
+        let raw = data;
+        unsafe {
+            let (_, d_slice, _) = raw.align_to::<D>();
+            let copied = d_slice.to_vec();
+
+            let v = Array::from_vec(copied)
+                .into_dimensionality::<IxDyn>()
+                .unwrap()
+                .into_shape_with_order(shape)
+                .unwrap();
+            NDArrayTensor(v)
+        }
     }
 
     fn from_tensor_view(tv: &TensorView<'_>) -> Self {
-        todo!()
-    }
-}
-
-impl<D> From<NDArrayTensor<D>> for Value
-where
-    D: OrtDType,
-{
-    fn from(val: NDArrayTensor<D>) -> Self {
-        todo!()
+        let raw = tv.data();
+        Self::from_raw(raw, tv.shape(), tv.dtype().into())
     }
 }
 
@@ -102,10 +131,9 @@ where
     }
 
     fn forward(&self, x: &NDArrayTensor<T>) -> NDArrayTensor<T> {
-        let outputs = self
-            .sess
-            .run(ort::inputs!["input"=>x.clone()].unwrap())
-            .unwrap();
+        let v = Tensor::from_array(x.clone().0.view()).unwrap().into_dyn();
+        let outputs = self.sess.run(ort::inputs!["input"=>v].unwrap()).unwrap();
+
         let vals = outputs
             .get("output")
             .unwrap()
@@ -126,9 +154,9 @@ where
     }
 
     fn construct(
-        x: crate::x::EKInstance,
-        weight: super::ExpertWeight<NDArrayTensor<T>>,
+        _x: crate::x::EKInstance,
+        _weight: super::ExpertWeight<NDArrayTensor<T>>,
     ) -> ek_base::error::EKResult<Self> {
-        todo!()
+        unimplemented!()
     }
 }
