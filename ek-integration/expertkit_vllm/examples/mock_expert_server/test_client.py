@@ -6,6 +6,8 @@ from typing import List
 
 from expertkit_vllm.grpc_client import ExpertKitClient
 
+torch.set_default_dtype(torch.bfloat16)
+
 def test_forward(client: ExpertKitClient, batch_size: int = 2, hidden_dim: int = 4096):
     """Test the Forward RPC call.
     
@@ -17,37 +19,33 @@ def test_forward(client: ExpertKitClient, batch_size: int = 2, hidden_dim: int =
     logger = logging.getLogger("TestClient")
     
     # Create random hidden states
-    hidden_states = torch.randn(batch_size, hidden_dim)
+    hidden_states = torch.zeros(batch_size, hidden_dim)
     
     # Create expert IDs (simulating router output)
     expert_ids = []
     for i in range(batch_size):
         # Each sequence gets 2 experts from the same layer (for testing)
-        layer_id = i % 3  # Use layers 0, 1, 2
+        layer_id = i % 3 + 3  # Use layers 0, 1, 2
         expert_ids.append([f"{layer_id}_0", f"{layer_id}_1"])
     
     logger.info(f"Sending request with {batch_size} sequences")
     logger.info(f"Hidden states shape: {hidden_states.shape}")
     logger.info(f"Expert IDs: {expert_ids}")
     
-    try:
-        # Call the client
-        result = client.forward_expert(expert_ids, hidden_states)
+    # Call the client
+    result = client.forward_expert(expert_ids, hidden_states)
+    
+    # Log the result
+    logger.info(f"Received response with shape: {result.shape}")
+    logger.info(f"Output sample (first sequence, first expert): {result[0, 0]}")
+    
+    # Basic validation
+    expected_shape = (batch_size, 2, hidden_dim)  # [batch_size, num_experts_per_seq, hidden_dim]
+    assert result.shape == expected_shape, f"Expected shape {expected_shape}, got {result.shape}"
+    
+    logger.info("Test completed successfully")
+    return True
         
-        # Log the result
-        logger.info(f"Received response with shape: {result.shape}")
-        logger.info(f"Output sample (first sequence, first expert): {result[0, 0, :5]}")
-        
-        # Basic validation
-        expected_shape = (batch_size, 2, hidden_dim)  # [batch_size, num_experts_per_seq, hidden_dim]
-        assert result.shape == expected_shape, f"Expected shape {expected_shape}, got {result.shape}"
-        
-        logger.info("Test completed successfully")
-        return True
-        
-    except Exception as e:
-        logger.error(f"Test failed: {str(e)}")
-        return False
 
 def main():
     parser = argparse.ArgumentParser(description="ExpertKit Mock Client Test")
@@ -72,7 +70,7 @@ def main():
     parser.add_argument(
         "--hidden-dim", 
         type=int, 
-        default=4096,
+        default=32,
         help="Hidden dimension size"
     )
     

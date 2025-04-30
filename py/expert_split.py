@@ -15,6 +15,8 @@ from tqdm import tqdm
 from safetensors import safe_open
 from safetensors.torch import save
 
+MAX_RETRY_CNT = 3
+
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
@@ -34,6 +36,13 @@ def parse_args():
         type=str,
         required=True,
         help="Directory containing the original model files",
+    )
+    parser.add_argument(
+        "--model_idx_file",
+        type=str,
+        required=False,
+        default="",
+        help="name of the model index file (default: xxx.index.json under model_dir)",
     )
     parser.add_argument(
         "--output_dir",
@@ -283,12 +292,18 @@ async def process_split(
     async def worker(q: asyncio.Queue, dq: asyncio.Queue):
         while True:
             claimed = False
+            try_cnt = 0
             try:
                 output_file = await q.get()
                 claimed = True
                 weights = splitting_plan[output_file]
-                fut = process_file(args, output_file, weights, storage)
-                await asyncio.wait_for(fut, 600)
+                while try_cnt < MAX_RETRY_CNT:
+                    fut = process_file(args, output_file, weights, storage)
+                    success = await asyncio.wait_for(fut, 600)
+                    if success:
+                        break
+                    try_cnt += 1
+                    logger.warning(f"retry {try_cnt} for {output_file}")
                 await dq.put(1)
             except Exception:
                 print(traceback.format_exc())
@@ -355,8 +370,16 @@ async def main():
             splitting_plan = json.load(f)
         logger.info(f"Loaded splitting plan from {args.plan_file}")
     else:
+        # find index file
+        if args.model_idx_file == "":
+            for filename in os.listdir(args.model_dir):
+                if filename.endswith("index.json"):
+                    args.model_idx_file = filename
+                    print(f"find index file {args.model_idx_file}")
+                    break
+
         # Load original weight map
-        model_index_path = os.path.join(args.model_dir, "model.safetensors.index.json")
+        model_index_path = os.path.join(args.model_dir, args.model_idx_file)
         if not os.path.isfile(model_index_path):
             logger.error(f"Model index file not found: {model_index_path}")
             sys.exit(1)
@@ -414,7 +437,7 @@ async def main():
         for weight_name in weights.keys():
             new_index["weight_map"][weight_name] = new_file
 
-    await storage.save_json("model.safetensors.index.json", new_index)
+    await storage.save_json(args.model_idx_file, new_index)
 
     # Calculate stats
 

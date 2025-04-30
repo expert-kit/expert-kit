@@ -16,3 +16,6 @@ __pycache__
 
 # Log files
 *.log
+
+# output
+output/
