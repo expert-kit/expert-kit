@@ -10,7 +10,6 @@ message Metadata {
 message ExpertSlice {
   Metadata meta = 1;
   repeated Metadata expert_meta = 2;
-  repeated int64 replication = 3;
 }
 
 message Node {

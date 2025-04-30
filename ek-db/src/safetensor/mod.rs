@@ -1,28 +1,27 @@
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use bytes::Bytes;
 use ek_base::error::EKResult;
 use opendal::Operator;
 use opendal::{self};
 use safetensors::tensor::SafeTensors;
+use tokio::sync::RwLock;
 
 pub struct SafeTensorDB {
     dal: Operator,
     data: BTreeMap<String, Bytes>,
 }
 
-impl Default for SafeTensorDB {
-    fn default() -> Self {
-        Self::new()
-    }
-}
+type SharedSafeTensorDB = Arc<RwLock<SafeTensorDB>>;
 
 impl SafeTensorDB {
-    pub fn new() -> Self {
-        SafeTensorDB {
+    pub fn new_shared(dal: Operator) -> SharedSafeTensorDB {
+        let inner = SafeTensorDB {
             data: BTreeMap::new(),
-            dal: todo!(),
-        }
+            dal,
+        };
+        Arc::new(RwLock::new(inner))
     }
 }
 

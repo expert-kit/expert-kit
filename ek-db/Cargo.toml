@@ -11,3 +11,4 @@ tch = { workspace = true }
 bytes = { workspace = true }
 tokio = { workspace = true }
 ek_base = { path = "../ek-base" }
+once_cell = { workspace = true }

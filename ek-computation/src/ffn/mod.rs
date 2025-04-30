@@ -8,6 +8,7 @@ use crate::{
     x::{self, EKInstance},
 };
 
+#[allow(dead_code)]
 pub mod expert_ort;
 pub mod expert_torch;
 
@@ -41,6 +42,18 @@ impl From<tch::Kind> for DType {
             tch::Kind::Float8e4m3fn => DType::Float8e4m3fn,
             tch::Kind::Float8e4m3fnuz => DType::Float8e4m3fnuz,
             tch::Kind::Float => DType::Float,
+            _ => unimplemented!(),
+        }
+    }
+}
+
+impl From<safetensors::Dtype> for DType {
+    fn from(value: safetensors::Dtype) -> Self {
+        match value {
+            safetensors::Dtype::U16 => DType::Uint8,
+            safetensors::Dtype::U8 => DType::Uint8,
+            safetensors::Dtype::I8 => DType::Int8,
+            safetensors::Dtype::BF16 => DType::BFloat16,
             _ => unimplemented!(),
         }
     }
