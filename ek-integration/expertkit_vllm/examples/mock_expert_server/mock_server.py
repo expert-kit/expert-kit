@@ -32,9 +32,9 @@ class ExpertModule(nn.Module):
             hidden_dim: Hidden dimension for FFN
         """
         super().__init__()
-        self.w1 = nn.Linear(input_dim, expert_dim)
-        self.w2 = nn.Linear(expert_dim, input_dim)
-        self.w3 = nn.Linear(input_dim, expert_dim)
+        self.w1 = nn.Linear(input_dim, expert_dim, bias=False)
+        self.w2 = nn.Linear(expert_dim, input_dim, bias=False)
+        self.w3 = nn.Linear(input_dim, expert_dim, bias=False)
     
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Forward pass implementing w2(silu(w1(x)) * w3(x))
@@ -81,13 +81,17 @@ class ExpertPool(nn.Module):
         Returns:
             Output tensor from the expert
         """
+
         if expert_id in self.experts:
-            return self.experts[expert_id](x)
+            res = self.experts[expert_id](x)
         else:
             # Return random output for missing experts
-            return torch.randn(x.shape[0], self.input_dim, 
+            res = torch.randn(x.shape[0], self.input_dim, 
                             device=x.device, dtype=x.dtype)
-    
+            
+        return res
+
+
     @classmethod
     def from_safetensors(cls, file_path: str, input_dim: int, expert_dim: int, logger=None):
         """Create ExpertPool from a safetensors file.
@@ -153,7 +157,7 @@ class ExpertPool(nn.Module):
         except Exception as e:
             if logger:
                 logger.error(f"Failed to load weights: {str(e)}")
-                
+
         return expert_pool
 
 
@@ -260,6 +264,7 @@ class ExpertKitServiceMock(expert_pb2_grpc.ComputationServiceServicer):
         # Unknown format, return as-is and None
         return expert_id, None
     
+    @torch.inference_mode
     def Forward(self, request: expert_pb2.ForwardReq, context):
         """Handle Forward RPC requests.
         
@@ -353,6 +358,7 @@ class ExpertKitServiceMock(expert_pb2_grpc.ComputationServiceServicer):
                                         dtype=hidden_states.dtype)
             
             self.logger.info(f"Output tensor shape: {all_results.shape}")
+            self.logger.info(f"🚀 Output tensor: {all_results}")
             
             # Serialize output tensor
             output_bytes = safetensors.torch.save({"data": all_results})

@@ -3,14 +3,15 @@ from tqdm import tqdm
 import re
 from typing import Dict
 
-from dal import DALStorage
+from .dal import DALStorage
 
 logger = logging.getLogger("planner")
 
 
 async def check_remote_files(args, splitting_plan, storage: DALStorage):
     """Check if all files defined in splitting_plan exist in remote storage"""
-    logger.info(f"Checking if {len(splitting_plan)} files exist in remote storage...")
+    logger.info(
+        f"Checking if {len(splitting_plan)} files exist in remote storage...")
 
     # Get all planned files
     planned_files = set(splitting_plan.keys())

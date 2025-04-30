@@ -21,6 +21,7 @@ class DALStorage:
         # Create OpenDAL operator based on storage type
         if storage_type == "fs":
             self.operator = opendal.Operator("fs", root=kwargs.get("root", "./"))
+            self.async_operator = opendal.AsyncOperator("fs", root=kwargs.get("root", "./"))
         elif storage_type in ["s3", "oss"]:
             # Handle S3-compatible services
             s3_config = {
