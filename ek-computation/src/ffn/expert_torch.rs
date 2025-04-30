@@ -1,4 +1,4 @@
-use std::borrow::Borrow;
+use std::{borrow::Borrow, sync::Mutex};
 
 use crate::{
     tch_safetensors::{tch_kind_to_dtype, write_safetensors},
@@ -31,7 +31,7 @@ impl Borrow<Tensor> for TchTensor {
 pub struct TorchFFN {
     dim: usize,
     hidden: usize,
-    module: Box<dyn Module>,
+    module: Mutex<nn::Sequential>,
 }
 
 impl From<DType> for tch::Kind {
@@ -143,7 +143,8 @@ impl TorchFFN {
 
 impl Expert<TchTensor> for TorchFFN {
     fn forward(&self, x: &TchTensor) -> TchTensor {
-        let res = self.module.forward(&x.0);
+        let guard = self.module.lock().unwrap();
+        let res = guard.forward(&x.0);
         TchTensor(res)
     }
 
@@ -180,7 +181,7 @@ impl Expert<TchTensor> for TorchFFN {
         Ok(TorchFFN {
             hidden: x.hidden,
             dim: dim as usize,
-            module: Box::new(module),
+            module: Mutex::new(module),
         })
     }
 }
