@@ -14,11 +14,13 @@ dependencies = [
     "onnxscript>=0.2.2",
     "opendal>=0.45.16",
     "polar>=0.0.127",
+    "psycopg[pool]>=3.2.7",
+    "pydantic>=2.11.4",
+    "pyyaml>=6.0.2",
     "ruff>=0.9.10",
     "safetensors>=0.5.3",
     "torch>=2.6.0",
     "uvloop>=0.21.0",
-    "vllm==0.8.0",
 ]
 
 [dependency-groups]

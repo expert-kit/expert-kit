@@ -4,26 +4,19 @@ import time
 import argparse
 import asyncio
 import uvloop
-import json
 import os
-import sys
 from typing import List, Optional
-from splitter.planner import check_remote_files, create_splitting_plan
-from splitter.dal import DALStorage
+from utils.storage import setup_storage, with_storage_args
+from utils.base import getLogger
+from splitter.plan import SplitPlan, check_remote_files
+from utils.storage import DALStorage
 import logging
 from tqdm import tqdm
 from safetensors import safe_open
 from safetensors.torch import save
 
 MAX_RETRY_CNT = 3
-
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    handlers=[logging.StreamHandler()],
-)
-logger = logging.getLogger("model_splitter")
+logger = getLogger("model_splitter")
 
 
 def parse_args():
@@ -58,38 +51,7 @@ def parse_args():
     )
 
     # Storage options
-    parser.add_argument(
-        "--storage_type",
-        type=str,
-        choices=["fs", "s3", "oss"],
-        default="fs",
-        help="Storage type: filesystem (fs) or S3 bucket (s3) (default: fs)",
-    )
-    parser.add_argument(
-        "--s3_bucket",
-        type=str,
-        help="S3 bucket name (required if storage_type is {s3, oss})",
-    )
-    parser.add_argument(
-        "--s3_prefix", type=str, default="", help='Prefix for S3 objects (default: "")'
-    )
-    parser.add_argument(
-        "--access_key", type=str, help="AWS Access Key ID for S3 access"
-    )
-    parser.add_argument(
-        "--access_secret", type=str, help="AWS Secret Access Key for S3 access"
-    )
-    parser.add_argument(
-        "--s3_endpoint_url",
-        type=str,
-        help="Custom S3 endpoint URL for S3-compatible services (e.g., Aliyun OSS, MinIO)",
-    )
-    parser.add_argument(
-        "--s3_region",
-        type=str,
-        default="us-east-1",
-        help="AWS region for S3 (default: us-east-1)",
-    )
+    with_storage_args(parser)
 
     # Operation mode
     parser.add_argument(
@@ -152,24 +114,6 @@ def parse_args():
     os.makedirs(args.work_dir, exist_ok=True)
 
     return args
-
-
-def setup_storage(args) -> DALStorage:
-    """Set up storage handler based on arguments"""
-    if args.storage_type in ["s3", "oss"]:
-        # Create S3 storage
-        return DALStorage(
-            args.storage_type,
-            bucket=args.s3_bucket,
-            prefix=args.s3_prefix,
-            access_key=args.access_key,
-            secret_key=args.access_secret,
-            endpoint=args.s3_endpoint_url,
-            region=args.s3_region,
-        )
-    else:
-        # Create filesystem storage
-        return DALStorage("fs", root=args.output_dir)
 
 
 opened_st = {}
@@ -259,19 +203,22 @@ async def process_file(
 
 
 async def process_split(
-    args, splitting_plan, storage: DALStorage, files_to_process: Optional[list] = None
+    args,
+    splitting_plan: SplitPlan,
+    storage: DALStorage,
+    files_to_process: Optional[list] = None,
 ):
     """Process the actual splitting according to the plan"""
     completed_files = []
 
     if files_to_process is None:
         files_to_process = []
-        for file_name in splitting_plan.keys():
+        for file_name in splitting_plan.output_files():
             if file_name not in completed_files:
                 files_to_process.append(file_name)
 
     logger.info(
-        f"Processing {len(files_to_process)} out of {len(splitting_plan)} files"
+        f"Processing {len(files_to_process)} out of {splitting_plan.output_count()} files"
     )
 
     parallelism = 16
@@ -296,7 +243,7 @@ async def process_split(
             try:
                 output_file = await q.get()
                 claimed = True
-                weights = splitting_plan[output_file]
+                weights = splitting_plan.get_source_file(output_file)
                 while try_cnt < MAX_RETRY_CNT:
                     fut = process_file(args, output_file, weights, storage)
                     success = await asyncio.wait_for(fut, 600)
@@ -312,6 +259,9 @@ async def process_split(
                     q.task_done()
 
     async def feeder(q: asyncio.Queue):
+        logger.info(
+            f"Feeding files to the queue {files_to_process=}",
+        )
         for output_file in files_to_process:
             if q.full():
                 await asyncio.sleep(1)
@@ -332,23 +282,22 @@ async def process_split(
 
 
 # Function to handle clean exit
-def handle_exit(storage=None, args=None, splitting_plan=None):
+def handle_exit(storage=None, args=None, splitting_plan: SplitPlan | None = None):
     """Handle program exit by saving state and plan"""
     logger.info("Program exiting, performing cleanup tasks...")
-
     if splitting_plan is not None:
-        # First save locally if args is available
-        if args is not None:
-            plan_file_local = os.path.join(args.work_dir, "splitting_plan.json")
-            with open(plan_file_local, "w") as f:
-                json.dump(splitting_plan, f, indent=2)
-            logger.info(f"Saved final splitting plan to local file: {plan_file_local}")
+        splitting_plan.save(local_fs=args.work_dir, storage=storage)
 
-        # Then back up to storage
-        if storage is not None:
-            logger.info("Backing up splitting plan to storage...")
-            # Save plan to storage
-            storage.save_json("splitting_plan.json", splitting_plan)
+
+async def read_or_create_plan(args):
+    model_index_path = os.path.join(args.model_dir, args.model_idx_file)
+    plan = None
+    # Load or generate splitting plan
+    if args.plan_file:
+        plan = SplitPlan.load_local(args.plan_file)
+    else:
+        plan = SplitPlan.create_from_index(model_index_path)
+    return plan
 
 
 async def main():
@@ -364,45 +313,7 @@ async def main():
     completed = []
     failed = []
 
-    # Load or generate splitting plan
-    if args.plan_file:
-        with open(args.plan_file, "r") as f:
-            splitting_plan = json.load(f)
-        logger.info(f"Loaded splitting plan from {args.plan_file}")
-    else:
-        # find index file
-        if args.model_idx_file == "":
-            for filename in os.listdir(args.model_dir):
-                if filename.endswith("index.json"):
-                    args.model_idx_file = filename
-                    print(f"find index file {args.model_idx_file}")
-                    break
-
-        # Load original weight map
-        model_index_path = os.path.join(args.model_dir, args.model_idx_file)
-        if not os.path.isfile(model_index_path):
-            logger.error(f"Model index file not found: {model_index_path}")
-            sys.exit(1)
-
-        with open(model_index_path, "r") as f:
-            weight_map = json.load(f)["weight_map"]
-
-        splitting_plan = create_splitting_plan(weight_map)
-        logger.info(
-            f"Generated new splitting plan with {len(splitting_plan)} output files"
-        )
-
-        # Save the plan to both work_dir and storage
-        # 1. Save to work_dir
-        plan_file_local = os.path.join(args.work_dir, "splitting_plan.json")
-        with open(plan_file_local, "w") as f:
-            json.dump(splitting_plan, f, indent=2)
-        logger.info(f"Saved splitting plan to local file: {plan_file_local}")
-
-        # 2. Save to output storage
-        if not args.skip_upload:
-            await storage.save_json("splitting_plan.json", splitting_plan)
-            logger.info("Saved splitting plan to storage")
+    splitting_plan = await read_or_create_plan(args)
 
     # If check_remote option is specified, check remote files
     if args.check_remote or args.upload_missing:
@@ -432,16 +343,12 @@ async def main():
         await process_split(args, splitting_plan, storage)
 
     # Create a new index file
-    new_index = {"weight_map": {}}
-    for new_file, weights in splitting_plan.items():
-        for weight_name in weights.keys():
-            new_index["weight_map"][weight_name] = new_file
 
+    new_index = {"weight_map": splitting_plan.to_plain_weight_map()}
     await storage.save_json(args.model_idx_file, new_index)
 
     # Calculate stats
-
-    logger.info(f"Total files: {len(splitting_plan)}")
+    logger.info(f"Total files: {splitting_plan.output_count()}")
     logger.info(f"Successfully processed: {len(completed)}")
     logger.info(f"Failed: {len(failed)}")
 

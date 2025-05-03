@@ -1,5 +1,4 @@
 from vllm import LLM, SamplingParams
-import torch
 import os
 
 os.environ["EXPERTKIT_ENABLE"] = "1"
