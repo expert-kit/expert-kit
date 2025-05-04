@@ -12,4 +12,7 @@ tonic = { workspace = true }
 diesel = { workspace = true }
 serde_json = { workspace = true }
 diesel-async = { workspace = true }
-tokio = {workspace = true}
+tokio = { workspace = true }
+config = { workspace = true }
+once_cell = { workspace = true }
+log = { workspace = true }

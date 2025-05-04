@@ -10,7 +10,7 @@ use thiserror::Error;
 
 #[derive(Error, Debug)]
 pub enum EKError {
-    #[error("error related to safe tensor conversion")]
+    #[error("error related to safe tensor conversion `{0}`")]
     SafeTensorError(#[from] safetensors::SafeTensorError),
 
     #[error("error related to tch-rs")]
@@ -28,7 +28,7 @@ pub enum EKError {
     #[error("expert weight not found in tensor bundle")]
     ExpertWeightNotFound(string::String),
 
-    #[error("something NotFound")]
+    #[error("NotFound `{0}`")]
     NotFound(string::String),
 
     #[error("opendal error")]
