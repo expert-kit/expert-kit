@@ -16,7 +16,7 @@ from safetensors import safe_open
 from safetensors.torch import save
 
 MAX_RETRY_CNT = 3
-logger = getLogger("model_splitter")
+logger = getLogger(__name__)
 
 
 def parse_args():
@@ -36,12 +36,6 @@ def parse_args():
         required=False,
         default="",
         help="name of the model index file (default: xxx.index.json under model_dir)",
-    )
-    parser.add_argument(
-        "--output_dir",
-        type=str,
-        required=True,
-        help="Directory for saving the split model files or plan",
     )
     parser.add_argument(
         "--work_dir",
@@ -172,7 +166,6 @@ async def process_file(
     weights,
     storage: DALStorage,
 ):
-    logger.info(f"process {output_file} start ")
     start = time.perf_counter()
     try:
         future = asyncio.gather(
@@ -199,7 +192,6 @@ async def process_file(
 
     finally:
         now = time.perf_counter()
-        logger.info(f"process {output_file} done, elapsed = {now-start}")
 
 
 async def process_split(

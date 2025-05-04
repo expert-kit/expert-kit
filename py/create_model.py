@@ -31,8 +31,8 @@ async def main():
         modelQ = ModelDAO(conn)
         res = await modelQ.by_name(args.model_name)
         if len(res) > 0:
-            model = res[0]
-            logger.info(f"Model found: {model}")
+            model = res
+            logger.info(f"model found: {model}")
             return
         logger.info(f"model not found: {args.model_name}, creating a new one")
         plan = SplitPlan.load(storage=storage)

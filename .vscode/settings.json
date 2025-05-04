@@ -5,7 +5,16 @@
         "**/.hg": true,
         "**/.DS_Store": true,
         "**/Thumbs.db": true,
-        "vendor/**/*": true
+        "vendor/**/*": true,
+        "data/**/*": true
+    },
+    "search.exclude": {
+        "**/node_modules": true,
+        "**/bower_components": true,
+        "**/*.code-search": true,
+        "data": true,
+        "vendor/**/*": true,
+        "target":true
     },
     "rust-analyzer.server.extraEnv": {
         "LIBTORCH": "${workspaceFolder}/vendor/libtorch",

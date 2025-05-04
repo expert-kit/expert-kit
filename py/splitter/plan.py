@@ -104,7 +104,7 @@ class SplitPlan:
             weight_map = json.load(f)["weight_map"]
         splitting_plan = create_splitting_plan(weight_map)
         logger.info(
-            f"Generated new splitting plan with {len(splitting_plan)} output files"
+            f"Generated new splitting plan with {splitting_plan.output_count()} output files"
         )
         return splitting_plan
 
@@ -160,7 +160,7 @@ async def check_remote_files(args, plan: SplitPlan, storage: DALStorage):
     return missing_files
 
 
-def create_splitting_plan(weight_map: Dict[str, str]) -> Dict[str, Dict[str, str]]:
+def create_splitting_plan(weight_map: Dict[str, str]) -> SplitPlan:
     """
     Create a splitting plan based on weight names.
 
@@ -212,4 +212,4 @@ def create_splitting_plan(weight_map: Dict[str, str]) -> Dict[str, Dict[str, str
             new_mapping[new_file] = {}
         new_mapping[new_file][weight_name] = original_file
 
-    return new_mapping
+    return SplitPlan(plan=new_mapping)

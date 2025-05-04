@@ -35,7 +35,7 @@ class StaticScheduler:
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Split DeepSeek-R1 model weights")
+    parser = argparse.ArgumentParser()
     parser.add_argument(
         "--instance_name",
         type=str,
@@ -62,14 +62,14 @@ def parse_args():
 async def upsert_nodes(inventory: str, dao: DAO):
     inventory = yaml.safe_load(open(inventory, "r"))
     inv = Inventory(**inventory)
-    logger.info(f"inventory loaded, total  nodes {len(inv.nodes)}")
+    logger.info(f"inventory loaded, total_nodes={len(inv.nodes)}")
     nodes = inv.nodes
     res = {}
     for node in nodes:
         nid = await dao.node.upsert(
             hostname=node.hostname,
-            device=node.address,
-            config={"channel": node.channel},
+            device="cpu",
+            config={"channel": node.channel, "addr": node.address},
         )
         res[node.hostname] = nid
     return res
