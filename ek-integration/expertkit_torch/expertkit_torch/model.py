@@ -7,7 +7,11 @@ from torch import nn
 import torch.nn.functional as F
 import torch.distributed as dist
 
-from .kernel import act_quant, weight_dequant, fp8_gemm
+try:
+    from .kernel import act_quant, weight_dequant, fp8_gemm
+except ModuleNotFoundError:
+    from .dummy_kernel import act_quant, weight_dequant, fp8_gemm
+
 import os
 
 from .grpc_client import ExpertKitClient
@@ -711,7 +715,7 @@ class MoE(nn.Module):
             batch_size, hidden_dim = x.shape
             for seq_idx in range(batch_size):
                 token_expert_indices = indices[seq_idx].tolist()
-                token_expert_ids = [f"{self.layer_id}_{expert_idx}" for expert_idx in token_expert_indices]
+                token_expert_ids = [f"model-layer{self.layer_id}-expert{expert_idx}.safetensors" for expert_idx in token_expert_indices]
                 if self.debug: print(f"ids: {token_expert_ids}")
                 expert_ids.append(token_expert_ids)
             outputs = self.client.forward_expert(

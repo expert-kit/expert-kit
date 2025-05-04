@@ -20,6 +20,7 @@ dependencies = [
     "ruff>=0.9.10",
     "safetensors>=0.5.3",
     "torch>=2.6.0",
+    "transformers>=4.51.3",
     "uvloop>=0.21.0",
 ]
 

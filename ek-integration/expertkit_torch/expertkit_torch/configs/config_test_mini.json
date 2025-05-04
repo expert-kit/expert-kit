@@ -18,6 +18,6 @@
     "qk_rope_head_dim": 4,
     "v_head_dim": 4,
 
-    "expertkit_addr": "localhost:50051",
+    "expertkit_addr": "localhost:5002",
     "expertkit_timeout_sec": 16
 }

@@ -15,6 +15,8 @@ sys.path.append(str(Path(__file__).parent.parent))
 
 from expertkit_torch.model import Transformer, ModelArgs
 
+DEFAULT_DEVICE =torch.device("cuda")
+
 def sample(logits, temperature: float = 1.0):
     """
     Samples a token from the logits using temperature scaling.
@@ -37,7 +39,8 @@ def generate(
     prompt_tokens: List[List[int]],
     max_new_tokens: int,
     eos_id: int,
-    temperature: float = 1.0
+    temperature: float = 1.0,
+    device: str = DEFAULT_DEVICE
 ) -> List[List[int]]:
     """
     Generates new tokens based on the given prompt tokens using the specified model.
@@ -55,11 +58,11 @@ def generate(
     prompt_lens = [len(t) for t in prompt_tokens]
     assert max(prompt_lens) <= model.max_seq_len, f"Prompt length exceeds model maximum sequence length (max_seq_len={model.max_seq_len})"
     total_len = min(model.max_seq_len, max_new_tokens + max(prompt_lens))
-    tokens = torch.full((len(prompt_tokens), total_len), -1, dtype=torch.long, device="cuda")
+    tokens = torch.full((len(prompt_tokens), total_len), -1, dtype=torch.long, device=device)
     for i, t in enumerate(prompt_tokens):
-        tokens[i, :len(t)] = torch.tensor(t, dtype=torch.long, device="cuda")
+        tokens[i, :len(t)] = torch.tensor(t, dtype=torch.long, device=device)
     prev_pos = 0
-    finished = torch.tensor([False] * len(prompt_tokens), device="cuda")
+    finished = torch.tensor([False] * len(prompt_tokens), device=device)
     prompt_mask = tokens != -1
     for cur_pos in range(min(prompt_lens), total_len):
         logits = model.forward(tokens[:, prev_pos:cur_pos], prev_pos)
@@ -86,6 +89,7 @@ def deepseekv3_test(
     ckpt_path: str,
     config: str,
     input_file: str = "",
+
     max_new_tokens: int = 100,
     temperature: float = 1.0,
     random_seed: bool = True,
@@ -94,12 +98,21 @@ def deepseekv3_test(
   world_size = int(os.getenv("WORLD_SIZE", "1"))
   rank = int(os.getenv("RANK", "0"))
   local_rank = int(os.getenv("LOCAL_RANK", "0"))
+  if torch.cuda.is_available():
+    device = torch.device("cuda")
+  elif torch.mps.is_available():
+    device = torch.device("mps")
+  else:
+    device = torch.device("cpu")
+  print("Using device:", device)
+ 
   if world_size > 1:
       dist.init_process_group("nccl")
   global print
   if rank != 0:
       print = lambda *_, **__: None
-  torch.cuda.set_device(local_rank)
+  if device == torch.device("cuda"):
+    torch.cuda.set_device(local_rank)
   torch.set_default_dtype(torch.bfloat16)
   torch.set_num_threads(8)
   if random_seed:
@@ -111,18 +124,20 @@ def deepseekv3_test(
       args = ModelArgs(**json.load(f))
   args.expertkit_mode = mode
   print(args)
-  with torch.device("cuda"):
+  with device:
       model = Transformer(args)
   tokenizer = AutoTokenizer.from_pretrained(ckpt_path)
-  tokenizer.decode(generate(model, [tokenizer.encode("DeepSeek")], 2, -1, 1.)[0])
+  tokenizer.decode(generate(model, [tokenizer.encode("DeepSeek")], 2, -1, 1.,device=device)[0])
   
+  print("Loading model from", os.path.join(ckpt_path, f"model.safetensors"))
   load_model(model, os.path.join(ckpt_path, f"model.safetensors"))
+  print("model loaded")
   
   with open(input_file) as f:
       prompts = [line.strip() for line in f.readlines()]
   assert len(prompts) <= args.max_batch_size, f"Number of prompts exceeds maximum batch size ({args.max_batch_size})"
   prompt_tokens = [tokenizer.apply_chat_template([{"role": "user", "content": prompt}], add_generation_prompt=True) for prompt in prompts]
-  completion_tokens = generate(model, prompt_tokens, max_new_tokens, tokenizer.eos_token_id, temperature)
+  completion_tokens = generate(model, prompt_tokens, max_new_tokens, tokenizer.eos_token_id, temperature,device=device)
   completions = tokenizer.batch_decode(completion_tokens, skip_special_tokens=True)
   for prompt, completion in zip(prompts, completions):
       print("Prompt:", prompt)
@@ -138,9 +153,11 @@ def deepseekv3_test(
 def random_init_model_save(
     dir: str,
     config: str,
+    device =DEFAULT_DEVICE
 ) -> None:
   local_rank = int(os.getenv("LOCAL_RANK", "0"))
-  torch.cuda.set_device(local_rank)
+  if device==torch.device("cuda"):
+    torch.cuda.set_device(local_rank)
   torch.set_default_dtype(torch.bfloat16)
   torch.set_num_threads(8)
   seed = int(time.time()) % (2**32)
@@ -149,7 +166,7 @@ def random_init_model_save(
       args = ModelArgs(**json.load(f))
   args.save_model = True
   print(args)
-  with torch.device("cuda"):
+  with torch.device(device):
       model = Transformer(args)
   save_file(model.state_dict(), f"{dir}/model.safetensors")
 

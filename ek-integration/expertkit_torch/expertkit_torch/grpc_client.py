@@ -75,6 +75,6 @@ class ExpertKitClient:
                 response.output_tensor,
             )["data"].to(origin_device)
         except grpc.RpcError as e:
-            raise RuntimeError(f"gRPC failed: {e.code().name}") from e
+            raise RuntimeError(f"gRPC failed: {e.code().name} {str(e)}") from e
         except (IOError, RuntimeError) as e:
             raise RuntimeError(f"Tensor serialization failed: {str(e)}") from e
