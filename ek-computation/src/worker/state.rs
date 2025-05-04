@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{sync::Arc, time};
 
 use ek_base::error::EKResult;
 use ek_db::safetensor::SafeTensorDB;
@@ -74,7 +74,20 @@ impl StateClient {
         }
         let slice = state.target.unwrap();
         let incoming_experts = slice.expert_meta.clone();
-        for expert in slice.expert_meta {
+
+        let mut diff = vec![];
+
+        {
+            let edb = self.expert_db.clone();
+            let rg = edb.read().await;
+            for expert in slice.expert_meta {
+                if !rg.has(&expert.id) {
+                    diff.push(expert.clone());
+                }
+            }
+        }
+
+        for expert in diff {
             if current_experts.contains(&expert.id) {
                 // update
                 // TODO: change replication?
@@ -84,9 +97,22 @@ impl StateClient {
                 let expert = expert.clone();
                 let instance = self.instance;
                 tokio::spawn(async move {
-                    if let Err(e) = x::load_expert_task(tdb, edb, instance, expert).await {
+                    let now = time::Instant::now();
+                    let id = expert.id.clone();
+                    log::info!("load expert {}", &id);
+                    if let Err(e) = x::load_expert_task(tdb, edb.clone(), instance, expert).await {
                         log::error!("error in load expert {}", e)
                     }
+                    let rg = edb.read().await;
+                    let loaded = rg.loaded();
+                    let loading = rg.loading();
+                    log::info!(
+                        "load expert {} done, currently loaded={} loading={}, elapsed_ms={},",
+                        &id,
+                        loaded,
+                        loading,
+                        now.elapsed().as_millis()
+                    );
                 });
             }
         }

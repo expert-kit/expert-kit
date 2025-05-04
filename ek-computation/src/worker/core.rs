@@ -49,23 +49,25 @@ impl EKInstanceGate {
         &self,
         req: ek::worker::v1::ForwardReq,
     ) -> EKResult<ek::worker::v1::ForwardResp> {
-        // let lg = self.experts.load().await;
-        let dim = 7168;
-
         let input_tensor = req.tensor;
-        let mut output = vec![];
-        for (seq_idx, inp) in req.sequences.iter().enumerate() {
-            let seq_input = &input_tensor.as_slice()[seq_idx * dim..(seq_idx + 1) + dim];
-            for exp_id in &inp.experts {
-                let exp = self.experts.read().await.load(exp_id).await?;
-                let res = exp.forward(seq_input)?;
-                output.push((seq_idx, exp_id, res));
-            }
-        }
-        output.sort_by(|a, b| a.0.cmp(&b.0));
-        let tensors = output.into_iter().map(|x| x.2).collect::<Vec<TchTensor>>();
-        let output_tensor = tch::Tensor::cat(&tensors, 0);
+        let st = safetensors::SafeTensors::deserialize(&input_tensor).unwrap();
+        let tv = st.tensor("data")?;
+        log::debug!("receive forward request, seq_len={}", req.sequences.len());
+        assert!(!req.sequences.is_empty());
+        assert!(req.sequences[0].experts.len() == 1);
+        let exp_id = &req.sequences[0].experts[0];
+        let exp = self.experts.read().await.load(exp_id).await?;
+        let res = exp.forward(&tv)?;
+        let output_tensor = res.inner();
+        let size = output_tensor.size();
+        let kind = output_tensor.kind();
         let output_bytes = TchTensor::from(output_tensor).serialize();
+        log::debug!(
+            "output shape={:?} dtype={:?} bytes_len={}",
+            size,
+            kind,
+            output_bytes.len()
+        );
         let resp = ek::worker::v1::ForwardResp {
             output_tensor: output_bytes,
         };

@@ -23,13 +23,11 @@ impl ComputationService for BasicExpertImpl {
     async fn forward(&self, request: Request<ForwardReq>) -> Result<Response<ForwardResp>, Status> {
         let guard = self.gate.lock().await;
 
-        guard.forward(request.into_inner()).await.map_err(|e| {
+        let res = guard.forward(request.into_inner()).await.map_err(|e| {
             log::error!("forward error {:?}", e);
             Status::internal("forward error")
         })?;
 
-        Ok(Response::new(ForwardResp {
-            output_tensor: vec![1, 2],
-        }))
+        Ok(Response::new(res))
     }
 }

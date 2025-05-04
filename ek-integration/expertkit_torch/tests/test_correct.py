@@ -25,7 +25,7 @@ class TestDeepseekMini(unittest.TestCase):
             input_file,
             max_new_tokens=1,
             temperature=temperature,
-            random_seed= False,
+            random_seed=False,
             mode="local",
         )
 

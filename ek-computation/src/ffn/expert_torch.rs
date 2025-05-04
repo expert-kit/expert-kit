@@ -1,11 +1,15 @@
-use std::{borrow::Borrow, sync::Mutex};
+use std::{
+    borrow::Borrow,
+    sync::{Arc, Mutex},
+};
 
 use crate::{
-    tch_safetensors::{tch_kind_to_dtype, write_safetensors},
+    tch_safetensors::{dtype_to_tch_kind, tch_kind_to_dtype, write_safetensors},
     x,
 };
 
 use ek_base::error::EKResult;
+use once_cell::sync::OnceCell;
 use safetensors::tensor::TensorView;
 use tch::{
     self, Tensor,
@@ -26,12 +30,6 @@ impl Borrow<Tensor> for TchTensor {
     fn borrow(&self) -> &Tensor {
         &self.0
     }
-}
-
-pub struct TorchFFN {
-    dim: usize,
-    hidden: usize,
-    module: Mutex<nn::Sequential>,
 }
 
 impl From<DType> for tch::Kind {
@@ -103,12 +101,16 @@ impl EkTensor for TchTensor {
         TchTensor(rand)
     }
 
-    fn cat(tensors: &[Self], dim: usize) -> Self {
-        TchTensor(tch::Tensor::cat(tensors, dim as i64))
+    fn stack(tensors: &[Self], dim: usize) -> Self {
+        TchTensor(tch::Tensor::stack(tensors, dim as i64))
+    }
+
+    fn shape(&self) -> Vec<usize> {
+        self.0.size().iter().map(|&x| x as usize).collect()
     }
 
     fn serialize(&self) -> Vec<u8> {
-        write_safetensors(&[("output", &self.0)]).unwrap()
+        write_safetensors(&[("data", &self.0)]).unwrap()
     }
 
     fn from_raw(data: &[u8], shape: &[usize], dtype: DType) -> Self {
@@ -121,23 +123,19 @@ impl EkTensor for TchTensor {
         .into()
     }
 
-    fn from_tensor_view(_tv: &TensorView<'_>) -> Self {
-        todo!()
+    fn from_tensor_view(tv: &TensorView<'_>) -> Self {
+        tv.into()
     }
 }
 
 impl FromSafeTensor for TchTensor {}
 
 impl From<&TensorView<'_>> for TchTensor {
-    fn from(_value: &TensorView<'_>) -> Self {
-        todo!()
-    }
-}
-
-impl TorchFFN {
-    pub fn new(inst: x::EKInstance) -> Self {
-        let weight = ExpertWeight::rand(inst.dim, inst.hidden, DType::Float, Device::CPU);
-        Self::construct(inst, weight).unwrap()
+    fn from(value: &TensorView<'_>) -> Self {
+        let size: Vec<i64> = value.shape().iter().map(|&x| x as i64).collect();
+        let kind: tch::Kind = dtype_to_tch_kind(value.dtype()).unwrap();
+        let t = Tensor::f_from_data_size(value.data(), &size, kind).unwrap();
+        TchTensor(t)
     }
 }
 
@@ -147,9 +145,53 @@ impl TchTensor {
     }
 }
 
+pub struct TorchFFN {
+    dim: usize,
+    hidden: usize,
+    module: OnceCell<Arc<Mutex<nn::Sequential>>>,
+    weight: ExpertWeight<TchTensor>,
+}
+
+unsafe impl Sync for TorchFFN {}
+
+impl TorchFFN {
+    pub fn new(inst: x::EKInstance) -> Self {
+        let weight = ExpertWeight::rand(inst.dim, inst.hidden, DType::Float, Device::CPU);
+        Self::construct(inst, weight).unwrap()
+    }
+
+    pub fn load_module(&self) -> Arc<Mutex<nn::Sequential>> {
+        let m = self.module.get_or_init(|| {
+            tch::no_grad(|| {
+                let dim = self.dim as i64;
+                let hidden_dim = self.hidden as i64;
+                let vs = nn::VarStore::new(tch::Device::Cpu);
+                let path = vs.root();
+                let mut w1 = nn::linear(&path / "up", dim, hidden_dim, Default::default());
+                let mut w2 = nn::linear(&path / "down", hidden_dim, dim, Default::default());
+                let mut w3 = nn::linear(&path / "gate", dim, hidden_dim, Default::default());
+                w1.ws = self.weight.up_w.0.shallow_clone();
+                w2.ws = self.weight.down_w.0.shallow_clone();
+                w3.ws = self.weight.gate_w.0.shallow_clone();
+                w1.bs = None;
+                w2.bs = None;
+                w3.bs = None;
+                let module =
+                    nn::seq().add_fn(move |x| (x.apply(&w1).silu() * x.apply(&w3)).apply(&w2));
+                Arc::new(Mutex::new(module))
+            })
+        });
+        m.clone()
+    }
+}
+
 impl Expert<TchTensor> for TorchFFN {
     fn forward(&self, x: &TchTensor) -> TchTensor {
-        let guard = self.module.lock().unwrap();
+        let module = self.load_module();
+        let guard = module.lock().unwrap();
+
+        log::debug!("input shape={:?} dtype={:?}", x.0.size(), x.0.kind());
+        log::debug!("weight {}", self.weight);
         let res = guard.forward(&x.0);
         TchTensor(res)
     }
@@ -157,7 +199,6 @@ impl Expert<TchTensor> for TorchFFN {
     fn rand_input(&self, batch: usize) -> TchTensor {
         TchTensor::rand(vec![batch, self.dim], DType::Float, Device::CPU)
     }
-
     fn shape(&self) -> ExpertShape {
         ExpertShape {
             dim: self.dim,
@@ -170,24 +211,12 @@ impl Expert<TchTensor> for TorchFFN {
     }
 
     fn construct(x: crate::x::EKInstance, weight: ExpertWeight<TchTensor>) -> EKResult<Self> {
-        let vs = nn::VarStore::new(tch::Device::Cpu);
-        let path = vs.root();
-        let dim = x.dim as i64;
-        let hidden_dim = x.hidden as i64;
-        let mut w1 = nn::linear(&path / "up", dim, hidden_dim, Default::default());
-        let mut w2 = nn::linear(&path / "down", hidden_dim, dim, Default::default());
-        let mut w3 = nn::linear(&path / "gate", dim, hidden_dim, Default::default());
-        w1.ws = weight.up_w.0;
-        w1.bs = weight.up_b.map(|x| x.0);
-        w2.ws = weight.down_w.0;
-        w2.bs = weight.down_b.map(|x| x.0);
-        w3.ws = weight.gate_w.0;
-        w3.bs = weight.gate_b.map(|x| x.0);
-        let module = nn::seq().add_fn(move |x| (x.apply(&w1).silu() * x.apply(&w3)).apply(&w2));
+        let cell: OnceCell<Arc<Mutex<nn::Sequential>>> = OnceCell::new();
         Ok(TorchFFN {
             hidden: x.hidden,
-            dim: dim as usize,
-            module: Mutex::new(module),
+            dim: x.dim,
+            module: cell,
+            weight,
         })
     }
 }

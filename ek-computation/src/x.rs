@@ -26,8 +26,8 @@ pub struct EKInstance {
 impl Default for EKInstance {
     fn default() -> Self {
         Self {
-            dim: 2048,
-            hidden: 7168,
+            dim: 256,
+            hidden: 128,
             backend: ExpertBackendType::Torch,
         }
     }

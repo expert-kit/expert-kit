@@ -30,7 +30,6 @@ impl StateService for StateServerImpl {
         let mut lg = DISPATCHER.lock().await;
         let req = request.get_ref();
         let (stream_tx, stream_rx) = mpsc::channel(4);
-
         let mut rx = lg.subscribe(&req.hostname).await;
         tokio::spawn(async move {
             while let Some(t) = rx.recv().await {

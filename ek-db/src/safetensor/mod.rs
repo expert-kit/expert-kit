@@ -2,9 +2,9 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use bytes::Bytes;
-use ek_base::error::EKResult;
-use opendal::Operator;
+use ek_base::error::{EKError, EKResult};
 use opendal::{self};
+use opendal::{Buffer, Operator};
 use safetensors::tensor::SafeTensors;
 use tokio::sync::RwLock;
 
@@ -27,11 +27,20 @@ impl SafeTensorDB {
 
 // TODO: abstract to trait
 impl SafeTensorDB {
-    pub async fn load<'a>(&'a mut self, key: &str) -> EKResult<SafeTensors<'a>> {
+    pub async fn load(&self, key: &str) -> EKResult<Buffer> {
         let raw = self.dal.read(key).await?;
-        self.data.insert(key.into(), raw.to_bytes());
-        let buf = self.data.get(key).unwrap();
-        let st = safetensors::SafeTensors::deserialize(buf)?;
+        Ok(raw)
+    }
+    pub fn save(&mut self, key: &str, buf: Buffer) -> EKResult<()> {
+        self.data.insert(key.into(), buf.to_bytes());
+        Ok(())
+    }
+    pub fn as_safetensor<'a>(&'a self, key: &str) -> EKResult<SafeTensors<'a>> {
+        let d = self
+            .data
+            .get(key)
+            .ok_or(EKError::NotFound("tensor not found".into()))?;
+        let st = safetensors::SafeTensors::deserialize(d)?;
         Ok(st)
     }
 }

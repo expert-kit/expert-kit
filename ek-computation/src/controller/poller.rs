@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use diesel::{BelongingToDsl, GroupedBy, SelectableHelper, query_dsl::methods::SelectDsl};
 use diesel_async::RunQueryDsl;
-use ek_base::error::{EKError, EKResult};
+use ek_base::error::EKResult;
 use tokio::time::{self};
 use tonic::async_trait;
 
@@ -26,11 +26,13 @@ pub struct StatePollerImpl {}
 #[async_trait]
 impl StatePoller for StatePollerImpl {
     async fn run(&mut self) -> EKResult<()> {
+        log::info!("state poller started");
         let mut interval = time::interval(Duration::from_secs(5));
         loop {
+            log::info!("state poller tick");
             let r = self.poll_state().await;
             if let Err(e) = r {
-                log::error!("state poller error {}", e);
+                log::error!("state poller error: {}", e);
             }
             interval.tick().await;
         }
@@ -48,7 +50,7 @@ impl StatePollerImpl {
         StatePollerImpl {}
     }
     async fn poll_state(&mut self) -> EKResult<()> {
-        let mut conn = pool::POOL.get().await.map_err(|_| EKError::DBError())?;
+        let mut conn = pool::POOL.get().await?;
         let nodes = schema::node::table
             .select(models::Node::as_select())
             .load(&mut conn)
@@ -67,8 +69,18 @@ impl StatePollerImpl {
             })
             .collect::<Vec<NodeWithExperts>>();
         let mut lg = DISPATCHER.lock().await;
+        log::info!("state poller got {} nodes", node_with_expert.len());
         lg.update(node_with_expert).await;
 
         Ok(())
     }
+}
+
+pub fn start_poll() {
+    let mut poller = StatePollerImpl::new();
+    tokio::spawn(async move {
+        if let Err(e) = poller.run().await {
+            log::error!("state poller error {}", e);
+        }
+    });
 }

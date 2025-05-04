@@ -60,22 +60,20 @@ impl ExpertRegistryImpl {
     async fn create_then_select_channel(&mut self, eid: String) -> EKResult<Channel> {
         let nodes = self.reader.node_by_expert(&eid).await?;
         for node in nodes {
-            let hostname = node.hostname.clone();
-            // TODO: hard code port
-            let port = 51234;
-            let end = Channel::from_shared(format!("http://{}:{}", hostname, port))
+            let addr = node.config["addr"].as_str().unwrap().to_owned();
+            let end = Channel::from_shared(addr)
                 .map_err(|e| EKError::InvalidInput(format!("invalid url for gRPC: {}", e)))?;
             let ch = end.connect().await?;
             let meta = ChannelMeta { ch };
             self.channels.insert(eid.clone(), vec![meta]);
         }
         let res = self.channels.get(&eid).ok_or(EKError::NotFound(format!(
-            "No channel found for expert {}",
+            "no channel found for expert {}",
             eid
         )))?;
         if res.is_empty() {
             return Err(EKError::NotFound(format!(
-                "No channel found for expert {}",
+                "no channel found for expert {}",
                 eid
             )));
         }

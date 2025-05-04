@@ -1,6 +1,9 @@
 use std::{collections::BTreeMap, sync::Arc};
 
-use ek_base::error::{EKError, EKResult};
+use ek_base::{
+    error::{EKError, EKResult},
+    utils::PerfTimer,
+};
 use once_cell::sync::OnceCell;
 use safetensors::SafeTensors;
 use tch::{IndexOp, Tensor};
@@ -38,6 +41,7 @@ struct IngressMeta {
 
 unsafe impl Sync for IngressMeta {}
 
+#[derive(Clone, Copy)]
 struct EgressMeta {
     req_id: ReqId,
     seq_gid: GlobalSeqId,
@@ -74,6 +78,7 @@ impl NaiveExecutor {
         req: &v1::ForwardReq,
     ) -> EKResult<mpsc::Receiver<Arc<v1::ForwardResp>>> {
         let (sender, receiver) = mpsc::channel(1);
+        log::debug!("submit request, seq_len {:?}", req.sequences.len());
 
         let inp_safetensor = SafeTensors::deserialize(&req.tensor)?;
         let inp_view = inp_safetensor.tensor("data")?;
@@ -116,64 +121,81 @@ impl NaiveExecutor {
             let hidden = ingress_meta.tensor.i(*lid as i64);
             tensors.push(hidden);
         }
-        let out = Tensor::cat(&tensors, 0);
+        let out = Tensor::stack(&tensors, 0);
+        log::debug!(
+            "assemble seq tensor, vec_len={} shape={:?}",
+            tensors.len(),
+            out.size()
+        );
         Ok(out)
     }
 
     pub async fn inner_execute(&mut self) -> EKResult<()> {
+        let mut tit = PerfTimer::new("inner_execute");
         let mut handles = vec![];
         let mut chips = vec![];
-        for egress_req in self.pending_egress.iter() {
-            chips.push((egress_req.0.clone(), egress_req.1));
-            let exp_id = egress_req.0.clone();
-            let channel = self.registry.lock().await.select(exp_id).await?;
+        {
+            for egress_req in self.pending_egress.iter() {
+                chips.push((egress_req.0.clone(), (egress_req.1.to_owned())));
+                let exp_id = egress_req.0.clone();
+                let channel = self.registry.lock().await.select(exp_id).await?;
 
-            let mut cli = v1::computation_service_client::ComputationServiceClient::new(channel);
+                let mut cli =
+                    v1::computation_service_client::ComputationServiceClient::new(channel);
 
-            let seq_gids = egress_req
-                .1
-                .iter()
-                .map(|e| e.seq_gid)
-                .collect::<Vec<GlobalSeqId>>();
+                let seq_gids = egress_req
+                    .1
+                    .iter()
+                    .map(|e| e.seq_gid)
+                    .collect::<Vec<GlobalSeqId>>();
 
-            let egress_tensor = self.assemble_seq_tensors(seq_gids)?;
-            let serialized_tensor = TchTensor::from(egress_tensor).serialize();
-            let seqs = egress_req
-                .1
-                .iter()
-                .map(|_e| v1::forward_req::SequenceInfo {
-                    experts: vec![egress_req.0.clone()],
-                })
-                .collect::<Vec<_>>();
-
-            let f = tokio::spawn(async move {
-                let req = v1::ForwardReq {
-                    instance_id: "0".into(),
-                    tensor: serialized_tensor,
-                    sequences: seqs,
-                };
-                cli.forward(req)
-                    .await
-                    .map(|resp| resp.into_inner())
-                    .map_err(|e| {
-                        log::error!("forward error: {}", e);
-                        e
+                let egress_tensor = self.assemble_seq_tensors(seq_gids)?;
+                log::debug!("egress tensor shape={:?}", egress_tensor.size());
+                let serialized_tensor = TchTensor::from(egress_tensor).serialize();
+                let seqs = egress_req
+                    .1
+                    .iter()
+                    .map(|_e| v1::forward_req::SequenceInfo {
+                        experts: vec![egress_req.0.clone()],
                     })
-            });
-            handles.push(f);
+                    .collect::<Vec<_>>();
+
+                let f = tokio::spawn(async move {
+                    let req = v1::ForwardReq {
+                        instance_id: "0".into(),
+                        tensor: serialized_tensor,
+                        sequences: seqs,
+                    };
+                    cli.forward(req)
+                        .await
+                        .map(|resp| resp.into_inner())
+                        .map_err(|e| {
+                            log::error!("forward error: {}", e);
+                            e
+                        })
+                });
+                handles.push(f);
+            }
         }
+
+        for (egress_idx, _) in &chips {
+            self.pending_egress.remove(egress_idx);
+        }
+        tit.stop("egress_req_sent");
 
         for (egress_idx, handle) in handles.into_iter().enumerate() {
             let egress = &chips[egress_idx];
             let res = handle.await??;
             let res_safetensor = SafeTensors::deserialize(&res.output_tensor)?;
             // TODO: hardcode safe tensor name
-            let view = res_safetensor.tensor("output")?;
+            let view = res_safetensor.tensor("data")?;
             let res_tensor = TchTensor::from(&view).inner();
+
+            log::debug!("received tensor shape={:?}", res_tensor.size());
             for (seq_idx, egress_meta) in egress.1.iter().enumerate() {
                 let id_mapping = self
                     .seq_mapping
-                    .get(&egress_meta.req_id)
+                    .get(&egress_meta.seq_gid)
                     .ok_or(EKError::NotFound("no seq mapping".into()))?;
                 assert!(id_mapping.0 == egress_meta.req_id);
                 let lid = id_mapping.1;
@@ -186,7 +208,9 @@ impl NaiveExecutor {
             }
         }
 
+        tit.stop("remote resp joined");
         self.output().await;
+        tit.stop("output generated");
 
         Ok(())
     }
@@ -198,17 +222,17 @@ impl NaiveExecutor {
             if !completed {
                 continue;
             }
-
             let res_tensors = meta
                 .result
                 .iter()
                 .map(|x| {
                     let must_tensor = x.iter().map(|x| x.as_ref().unwrap()).collect::<Vec<_>>();
-                    Tensor::cat(&must_tensor, 0)
+                    Tensor::stack(&must_tensor, 0)
                 })
                 .collect::<Vec<_>>();
 
-            let output_tensor = Tensor::cat(&res_tensors, 0);
+            let output_tensor = Tensor::stack(&res_tensors, 0);
+            log::debug!("output tensor shape: {:?}", output_tensor.size());
             let serialized_tensor = TchTensor::from(output_tensor).serialize();
 
             let resp = v1::ForwardResp {
@@ -231,7 +255,7 @@ impl NaiveExecutor {
                 .seq_mapping
                 .iter()
                 .filter(|x| x.1.0 == rid)
-                .map(|x| x.1.0)
+                .map(|x| *x.0)
                 .collect::<Vec<_>>();
             for key in gids_to_remove {
                 self.seq_mapping.remove(&key);
