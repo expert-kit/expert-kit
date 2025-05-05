@@ -9,7 +9,10 @@
 
 **Expert Kit** is a high-performance framework for scalable MoE (Mixture of Experts) LLM inference. It enables efficient deployment of Expert Parallelism (EP) clusters backed by heterogeneous hardware to tackle the unique challenges of serving MoE models.
 
-![](./doc/assets/arch-illustration.svg)
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="./doc/assets/arch-illustration-dark.svg">
+  <img alt="arch-illustration-light" src="./doc/assets/arch-illustration.svg">
+</picture>
 
 ## Why Expert Kit
 
