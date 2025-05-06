@@ -25,7 +25,6 @@ pub struct StateClient {
     expert_db: Arc<RwLock<dyn ExpertDB + Sync + Send + 'static>>,
     cli: StateServiceClient<Channel>,
     hostname: String,
-    instance: EKInstance,
     gate: GlobalEKInstanceGate,
 }
 
@@ -41,7 +40,6 @@ impl StateClient {
             expert_db: edb,
             cli,
             hostname: hostname.to_owned(),
-            instance: EKInstance::default(),
             gate,
         }
     }
@@ -95,7 +93,8 @@ impl StateClient {
                 let tdb = self.tensor_db.clone();
                 let edb = self.expert_db.clone();
                 let expert = expert.clone();
-                let instance = self.instance;
+                // TODO: read instance here
+                let instance = EKInstance::default();
                 tokio::spawn(async move {
                     let now = time::Instant::now();
                     let id = expert.id.clone();

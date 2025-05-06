@@ -42,3 +42,4 @@ impl Drop for PerfTimer {
         }
     }
 }
+

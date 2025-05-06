@@ -14,7 +14,7 @@ except ModuleNotFoundError:
 
 import os
 
-from .grpc_client import ExpertKitClient
+from ...grpc_client import ExpertKitClient
 
 world_size = 1
 rank = 0

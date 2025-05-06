@@ -1,4 +1,7 @@
+use std::path::{Path, PathBuf};
+
 use clap::ValueEnum;
+use ek_base::config::get_config_key;
 
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, ValueEnum, Debug)]
 pub enum ExpertBackendType {
@@ -26,9 +29,14 @@ pub struct EKInstance {
 impl Default for EKInstance {
     fn default() -> Self {
         Self {
-            dim: 256,
-            hidden: 128,
+            dim: get_config_key("hidden_dim").parse().unwrap(),
+            hidden: get_config_key("intermediate_dim").parse().unwrap(),
             backend: ExpertBackendType::Torch,
         }
     }
+}
+
+pub fn test_root() -> PathBuf {
+    let root = env!("CARGO_MANIFEST_DIR");
+    PathBuf::from(root.to_owned())
 }

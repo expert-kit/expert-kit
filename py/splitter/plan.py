@@ -75,10 +75,10 @@ class SplitPlan:
             plan = json.load(f)
             return cls(plan=plan)
 
-    async def save(self, *, local_fs: str | None, storage: DALStorage | None):
+    async def save(self, *, storage: DALStorage | None):
         """Save the splitting plan to local file or remote storage"""
-        if local_fs:
-            await self._save_local(local_fs)
+        # if local_fs:
+        #     await self._save_local(local_fs)
         if storage:
             await self._save_to_storage(storage)
 
@@ -160,7 +160,7 @@ async def check_remote_files(args, plan: SplitPlan, storage: DALStorage):
     return missing_files
 
 
-def create_splitting_plan(weight_map: Dict[str, str]) -> SplitPlan:
+def create_splitting_plan(weight_map: Dict[str, str], skip_layer=0) -> SplitPlan:
     """
     Create a splitting plan based on weight names.
 
@@ -185,7 +185,7 @@ def create_splitting_plan(weight_map: Dict[str, str]) -> SplitPlan:
             layer_idx = int(layer_match.group(1)) if layer_match else None
         # Determine which file this weight should go into
         # TODO: hard code for DeepSeek-R1. As the first 3 layers of R1 is dense layer, merge in model-share ckpt.
-        if layer_idx is not None and layer_idx < 3:
+        if layer_idx is not None and layer_idx < skip_layer:
             new_file = "model-share.safetensors"
         elif "ffn.experts" in weight_name:
             expert_match = re.search(r"ffn\.experts\.(\d+)", weight_name)

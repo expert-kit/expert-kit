@@ -30,7 +30,7 @@ async def main():
     async with pool.connection() as conn:
         modelQ = ModelDAO(conn)
         res = await modelQ.by_name(args.model_name)
-        if len(res) > 0:
+        if res is not None and len(res) > 0:
             model = res
             logger.info(f"model found: {model}")
             return
@@ -39,7 +39,7 @@ async def main():
         logger.info(f"plan loaded, total chunk {plan.output_count()}")
         model_config = {"storage": {"type": storage.type(), "config": storage.config()}}
         model_name = args.model_name
-        await modelQ.create(name=model_name, config=model_config)
+        await modelQ.upsert(name=model_name, config=model_config)
 
 
 if __name__ == "__main__":

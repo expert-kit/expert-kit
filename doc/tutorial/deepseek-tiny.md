@@ -37,16 +37,19 @@ cat > /etc/expert-kit/config.yaml <<EOF
 storage_provider: fs
 storage_fs_path: $CONVERTED_ROOT
 db_dsn: postgres://dev:dev@localhost:5432/dev
+hidden_dim: 256
+intermediate_dim: 128
+instance_name: local_test
 EOF
 
 ```
 
-3. convert the model weights to the format used by expert-kit and prepare the cluster meta.
+3. convert the model weights to expert-kit format and prepare the cluster meta.
 
 ```bash
 
 # split the model weights in order to make expert-kit load weight in expert granularity.
-# This will cost a while, please be patient. 
+# This will cost a while, please be patient.
 # If the process is interrupted, you can resume it by running the same command again.
 python py/expert_split.py \
     --model_dir ./data/ds-tiny \
@@ -71,6 +74,11 @@ python py/schedule_static.py \
 4. run the frontend controller and backend worker
 
 ```bash
+# lib torch will be dynamically loaded by the expert-kit, so you need to set the environment variable to point to the libtorch.so
+# for mac
+export DYLD_FALLBACK_LIBRARY_PATH=<LIB_TORCH_PATH>
+# for linux: TODO
+
 # run the frontend controller
 cargo run  --release --bin controller
 
@@ -80,13 +88,7 @@ EK_HOSTNAME=local-dev cargo run  --release --bin worker
 
 5. run a simple test
 
-
 ```bash
-
-# lib torch will be dynamically loaded by the expert-kit, so you need to set the environment variable to point to the libtorch.so
-# for mac 
-export DYLD_FALLBACK_LIBRARY_PATH=<LIB_TORCH_PATH>
-# for linux: TODO
 
 cd ek-integration/expertkit_torch/tests
 # compare the result between the vanilla pytorch and expert-kit offloaded
