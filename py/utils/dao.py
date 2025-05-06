@@ -16,11 +16,12 @@ class ModelDAO:
             """INSERT INTO model (name, config) VALUES (%s,%s )
             ON CONFLICT (name) DO UPDATE SET
                 config = EXCLUDED.config
+            RETURNINg id
             """,
             (name, json.dumps(config)),
         )
-        id = await res.fetchone()["id"]
-        return id
+        id = await res.fetchone()
+        return id['id']
 
 
 class InstanceDAO:

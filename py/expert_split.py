@@ -286,10 +286,9 @@ async def read_or_create_plan(args, storage):
     if args.plan_file:
         plan = SplitPlan.load_local(args.plan_file)
     else:
-        logger.info("Creating new splitting plan from index file")
+        logger.info("creating new plan")
         plan = SplitPlan.create_from_index(model_index_path)
-        await plan.save(local_fs=args.work_dir, storage=storage)
-
+        await plan.save(storage=storage)
     return plan
 
 

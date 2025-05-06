@@ -1,8 +1,11 @@
 use std::time::Duration;
 
-use diesel::{BelongingToDsl, GroupedBy, SelectableHelper, query_dsl::methods::SelectDsl};
+use diesel::{
+    BelongingToDsl, ExpressionMethods, GroupedBy, SelectableHelper,
+    query_dsl::methods::{FilterDsl, SelectDsl},
+};
 use diesel_async::RunQueryDsl;
-use ek_base::error::EKResult;
+use ek_base::{config::get_config_key, error::EKResult};
 use tokio::time::{self};
 use tonic::async_trait;
 
@@ -51,12 +54,19 @@ impl StatePollerImpl {
     }
     async fn poll_state(&mut self) -> EKResult<()> {
         let mut conn = pool::POOL.get().await?;
+
+        let instance = schema::instance::table
+            .filter(schema::instance::name.eq(get_config_key("instance_name")))
+            .first::<models::Instance>(&mut conn)
+            .await?;
+
         let nodes = schema::node::table
             .select(models::Node::as_select())
             .load(&mut conn)
             .await?;
         let experts = models::Expert::belonging_to(&nodes)
             .select(models::Expert::as_select())
+            .filter(schema::expert::instance_id.eq(instance.id))
             .load(&mut conn)
             .await?;
         let node_with_expert = experts

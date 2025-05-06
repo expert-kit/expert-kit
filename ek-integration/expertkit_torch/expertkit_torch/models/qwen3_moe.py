@@ -1,5 +1,5 @@
 import argparse
-import logging
+import time
 from transformers import (
     AutoTokenizer,
     AutoModelForCausalLM,
@@ -7,7 +7,7 @@ from transformers import (
 from transformers.utils.logging import set_verbosity_error
 from transformers.models.qwen3_moe import modeling_qwen3_moe as qwen3_moe
 import torch
-from torch import nn, Tensor
+from torch import nn
 import torch.nn.functional as F
 from expertkit_torch.grpc_client import ExpertKitClient
 
@@ -16,13 +16,15 @@ set_verbosity_error()
 layer_idx = 0
 
 
-def intercept_moe():
+def intercept_moe(with_ek: bool):
     class Intercepted(nn.Module):
         client: ExpertKitClient = None
 
         def __init__(self, config):
             super().__init__()
             global layer_idx
+            if with_ek and Intercepted.client is None:
+                Intercepted.client = ExpertKitClient(config.ek_addr, 10)
             self.layer_id = layer_idx
             layer_idx += 1
             self.num_experts = config.num_experts
@@ -30,13 +32,89 @@ def intercept_moe():
             self.norm_topk_prob = config.norm_topk_prob
 
             self.gate = nn.Linear(config.hidden_size, config.num_experts, bias=False)
+            if not with_ek:
+                self.experts = nn.ModuleList(
+                    [
+                        qwen3_moe.Qwen3MoeMLP(
+                            config, intermediate_size=config.moe_intermediate_size
+                        )
+                        for _ in range(self.num_experts)
+                    ]
+                )
+
             # self.experts = ([idx for idx in range(self.num_experts)])
+
+        def ek_forward(
+            self,
+            *,
+            hidden_states: torch.Tensor,
+            routing_weights: torch.Tensor,
+            selected_experts: torch.Tensor,
+            batch_size: int,
+            sequence_length: int,
+            hidden_dim: int,
+        ):
+            expert_ids = []
+            total_seq_len, _ = hidden_states.shape
+            for seq_idx in range(total_seq_len):
+                eids = selected_experts[seq_idx].tolist()
+                ids = [
+                    f"model-layer{self.layer_id}-expert{expert_idx}.safetensors"
+                    for expert_idx in eids
+                ]
+                expert_ids.append(ids)
+
+            for seq_idx in range(total_seq_len):
+                eids = selected_experts[seq_idx].tolist()
+
+            # TODO
+            outputs = self.client.forward_expert(
+                expert_ids=expert_ids, hidden_state=hidden_states
+            )
+            outputs = outputs.to(device=hidden_states.device, dtype=hidden_states.dtype)
+            expanded_weights = routing_weights.unsqueeze(-1)
+            output = torch.sum(expanded_weights * outputs, dim=1)
+
+            final_hidden_states = output.reshape(
+                batch_size, sequence_length, hidden_dim
+            )
+            return final_hidden_states
+
+        def normal_forward(
+            self,
+            *,
+            hidden_states: torch.Tensor,
+            routing_weights: torch.Tensor,
+            selected_experts: torch.Tensor,
+            expert_mask: torch.Tensor,
+            batch_size: int,
+            sequence_length: int,
+            hidden_dim: int,
+        ):
+            final_hidden_states = torch.zeros(
+                (batch_size * sequence_length, hidden_dim),
+                dtype=hidden_states.dtype,
+                device=hidden_states.device,
+            )
+            for expert_idx in range(self.num_experts):
+                expert_layer = self.experts[expert_idx]
+                idx, top_x = torch.where(expert_mask[expert_idx])
+                current_state = hidden_states[None, top_x].reshape(-1, hidden_dim)
+                current_hidden_states = (
+                    expert_layer(current_state) * routing_weights[top_x, idx, None]
+                )
+                final_hidden_states.index_add_(
+                    0, top_x, current_hidden_states.to(hidden_states.dtype)
+                )
+            final_hidden_states = final_hidden_states.reshape(
+                batch_size, sequence_length, hidden_dim
+            )
+            return final_hidden_states
 
         def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
             """ """
             batch_size, sequence_length, hidden_dim = hidden_states.shape
             hidden_states = hidden_states.view(-1, hidden_dim)
-            # router_logits: (batch * sequence_length, n_experts)
             router_logits = self.gate(hidden_states)
 
             routing_weights = F.softmax(router_logits, dim=1, dtype=torch.float)
@@ -60,40 +138,34 @@ def intercept_moe():
                 selected_experts, num_classes=self.num_experts
             ).permute(2, 1, 0)
 
-            # Loop over all available experts in the model and perform the computation on each expert
-            # dim = (seq,selected idx)
-            expert_ids = []
-            total_seq_len, _ = hidden_states.shape
-            for seq_idx in range(total_seq_len):
-                eids = selected_experts[seq_idx].tolist()
-                ids = [
-                    f"model-layer{self.layer_id}-expert{expert_idx}.safetensors"
-                    for expert_idx in eids
-                ]
-                expert_ids.append(ids)
-            # TODO
-            # outputs = self.client.forward_expert(
-            #     expert_ids=expert_ids, hidden_state=hidden_states
-            # )
-            outputs = torch.randn(total_seq_len, self.top_k, hidden_dim)
-            outputs = outputs.to(device=hidden_states.device, dtype=hidden_states.dtype)
-            # rw(dim=seq*n_active)
-            # outputs(dim=seq*n_active*hidden)
-            expanded_weights = routing_weights.unsqueeze(-1)
-            output = torch.sum(expanded_weights * outputs, dim=1)
+            if with_ek:
+                final = self.ek_forward(
+                    hidden_states=hidden_states,
+                    routing_weights=routing_weights,
+                    selected_experts=selected_experts,
+                    batch_size=batch_size,
+                    sequence_length=sequence_length,
+                    hidden_dim=hidden_dim,
+                )
+            else:
+                final = self.normal_forward(
+                    hidden_states=hidden_states,
+                    routing_weights=routing_weights,
+                    selected_experts=selected_experts,
+                    expert_mask=expert_mask,
+                    batch_size=batch_size,
+                    sequence_length=sequence_length,
+                    hidden_dim=hidden_dim,
+                )
 
-            final_hidden_states = output.reshape(
-                batch_size, sequence_length, hidden_dim
-            )
-            return final_hidden_states, router_logits
+            return final, router_logits
 
     delattr(qwen3_moe, "Qwen3MoeSparseMoeBlock")
     setattr(qwen3_moe, "Qwen3MoeSparseMoeBlock", Intercepted)
 
 
-def evaluate(*, model_path="./", prompt="What is MoE Model?", ek_enable=True):
-    if ek_enable:
-        intercept_moe()
+def evaluate(*, model_path="./", prompt="What is MoE Model?", enable_ek=True):
+    intercept_moe(enable_ek)
     # load the tokenizer and the model
     tokenizer = AutoTokenizer.from_pretrained(
         pretrained_model_name_or_path=model_path,
@@ -114,7 +186,10 @@ def evaluate(*, model_path="./", prompt="What is MoE Model?", ek_enable=True):
     model_inputs = tokenizer([text], return_tensors="pt").to(model.device)
 
     # conduct text completion
-    generated_ids = model.generate(**model_inputs, max_new_tokens=20)
+    now = time.time()
+    generated_ids = model.generate(**model_inputs, max_new_tokens=50)
+    end = time.time()
+    print("elapsed time:", end - now)
     output_ids = generated_ids[0][len(model_inputs.input_ids[0]) :].tolist()
 
     # parsing thinking content
@@ -146,5 +221,11 @@ if __name__ == "__main__":
         required=True,
         help="Path to the model directory.",
     )
+    parser.add_argument(
+        "--enable_ek",
+        type=bool,
+        action=argparse.BooleanOptionalAction,
+        help="Enable ExpertKit.",
+    )
     args = parser.parse_args()
-    evaluate(model_path=args.model_path)
+    evaluate(model_path=args.model_path, enable_ek=args.enable_ek)

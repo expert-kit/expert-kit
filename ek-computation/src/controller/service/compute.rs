@@ -19,7 +19,6 @@ impl ComputationService for ComputationProxyServiceImpl {
     ) -> Result<tonic::Response<v1::ForwardResp>, tonic::Status> {
         let mut rx = {
             let mut lg = self.executor.lock().await;
-            
             lg.submit(request.get_ref()).await?
         };
         let exec_bg = self.executor.clone();

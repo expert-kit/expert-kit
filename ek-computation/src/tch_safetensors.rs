@@ -115,6 +115,25 @@ pub fn write_safetensors<S: AsRef<str>, T: AsRef<Tensor>>(
             Ok::<(&str, SafeView), TchError>((name.as_ref(), tensor.as_ref().try_into()?))
         })
         .collect::<Result<Vec<_>, _>>()?;
-
     safetensors::tensor::serialize(views, &None).map_err(|_e| _e.into())
+}
+
+#[cfg(test)]
+mod test {
+    use tch::Tensor;
+
+    use super::{read_safetensors, write_safetensors};
+
+    #[test]
+    fn test_io() {
+        let origin_t = Tensor::rand(&[128, 128], (tch::Kind::Float, tch::Device::Cpu));
+        let t_copy = origin_t.copy();
+        let serialized = write_safetensors(&[("test", origin_t)]).unwrap();
+        let tensors = read_safetensors(&serialized).unwrap();
+        let (name, processed_t) = &tensors[0];
+
+        assert_eq!(tensors.len(), 1);
+        assert!(*name == "test");
+        assert!(t_copy.sum(tch::Kind::Float) == processed_t.sum(tch::Kind::Float));
+    }
 }

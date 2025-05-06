@@ -74,8 +74,11 @@ pub trait FromSafeTensor
 where
     Self: Sized + EkTensor,
 {
-    fn lookup_suffix(st: &safetensors::SafeTensors, name: &str) -> Option<Self> {
-        let idx = st.names().iter().position(|x| x.ends_with(name));
+    fn lookup_suffix(st: &safetensors::SafeTensors, name: &[&str]) -> Option<Self> {
+        let idx = st
+            .names()
+            .iter()
+            .position(|x| name.iter().any(|v| x.ends_with(v)));
         let tensors = st.tensors();
         if let Some(x) = idx {
             let (_name, view) = tensors.get(x).unwrap();
@@ -117,11 +120,11 @@ where
 
 impl<T: EkTensor + FromSafeTensor> ExpertWeight<T> {
     pub fn from_safetensor(st: &safetensors::SafeTensors) -> EKResult<Self> {
-        let up_w = T::lookup_suffix(st, "w1.weight")
+        let up_w = T::lookup_suffix(st, &["w1.weight","up_proj.weight"])
             .ok_or(EKError::ExpertWeightNotFound("w1/up_w".to_owned()))?;
-        let down_w = T::lookup_suffix(st, "w2.weight")
+        let down_w = T::lookup_suffix(st, &["w2.weight","down_proj.weight"])
             .ok_or(EKError::ExpertWeightNotFound("w2/down_w".to_owned()))?;
-        let gate_w = T::lookup_suffix(st, "w3.weight")
+        let gate_w = T::lookup_suffix(st, &["w3.weight","gate_proj.weight"])
             .ok_or(EKError::ExpertWeightNotFound("w3/gate_w".to_owned()))?;
         Ok(Self {
             up_w,
