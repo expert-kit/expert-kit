@@ -277,18 +277,19 @@ async def process_split(
 def handle_exit(storage=None, args=None, splitting_plan: SplitPlan | None = None):
     """Handle program exit by saving state and plan"""
     logger.info("Program exiting, performing cleanup tasks...")
-    if splitting_plan is not None:
-        splitting_plan.save(local_fs=args.work_dir, storage=storage)
 
 
-async def read_or_create_plan(args):
+async def read_or_create_plan(args, storage):
     model_index_path = os.path.join(args.model_dir, args.model_idx_file)
     plan = None
     # Load or generate splitting plan
     if args.plan_file:
         plan = SplitPlan.load_local(args.plan_file)
     else:
+        logger.info("Creating new splitting plan from index file")
         plan = SplitPlan.create_from_index(model_index_path)
+        await plan.save(local_fs=args.work_dir, storage=storage)
+
     return plan
 
 
@@ -305,7 +306,7 @@ async def main():
     completed = []
     failed = []
 
-    splitting_plan = await read_or_create_plan(args)
+    splitting_plan = await read_or_create_plan(args, storage=storage)
 
     # If check_remote option is specified, check remote files
     if args.check_remote or args.upload_missing:
