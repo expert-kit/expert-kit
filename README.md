@@ -31,6 +31,13 @@ Our Solution: **Expert Kit** decouples attention computation from expert computa
 - Zero-downtime cluster expansion as needs grow
 - Running massive MoE models on every day hardware
 
+## Quick Start
+
+Here exists some tutorials to help you quickly start with Expert Kit.
+
+1. [DeepSeek-tiny](./doc/tutorial/deepseek-tiny.md): A tailored MoE model with DeepSeek-V3 architecture and small parameter count, designed for quick evaluation and testing of the Expert Kit framework.
+2. [Qwen3-30B-A3B](./doc//tutorial/qwen3-moe-a3b-demo.md): A demo for running the Qwen3-30B-A3B model with Expert Kit, showcasing the framework's capabilities in handling real-world MoE models.
+
 ## Key Features
 
 Expert-Level Parallelism
