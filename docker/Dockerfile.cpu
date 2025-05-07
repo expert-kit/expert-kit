@@ -19,8 +19,8 @@ RUN apt-get update && apt-get install -y \
     libssl-dev \
     unzip \
     protobuf-compiler \
-    libpq-dev \
-    && rm -rf /var/lib/apt/lists/*
+    libpq-dev && \
+    rm -rf /var/lib/apt/lists/*
 
 # Install rustup and nightly Rust
 # TODO: don't hardcode the version
@@ -51,9 +51,30 @@ ENV RUSTFLAGS="-C link-args=-Wl,-rpath,$LIBTORCH/lib"
 
 # Clone and build the expert-kit
 WORKDIR /app
-COPY . .
+# COPY . .
+COPY LICENSE /app/
+COPY pyproject.toml /app/
+COPY py/ /app/py/
+COPY .python-version /app/
+COPY uv.lock /app/
 RUN uv sync
-RUN cargo build --release
+
+COPY ek-base/ /app/ek-base/
+COPY ek-benchmark/ /app/ek-benchmark/
+COPY ek-computation/ /app/ek-computation/
+COPY ek-db/ /app/ek-db/
+COPY ek-integration/ /app/ek-integration/
+COPY ek-proto/ /app/ek-proto/
+
+COPY Cargo.toml Cargo.lock /app/
+COPY buf.yaml /app/
+COPY ruff.toml /app/
+COPY .gitignore /app/
+
+RUN ls /app/ek-base
+
+RUN cargo build --release && \
+    cargo install diesel_cli --no-default-features --features 'postgres'
 
 ####################################
 # TEST STAGE
@@ -122,6 +143,8 @@ RUN mkdir -p /app/data
 # Copy built binaries from build stage
 COPY --from=build /app/target/release/controller /usr/local/bin/
 COPY --from=build /app/target/release/worker /usr/local/bin/
+
+COPY --from=build /root/.cargo/bin/diesel /usr/local/bin
 
 # Copy python scripts
 COPY py /app/py/

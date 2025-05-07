@@ -17,7 +17,10 @@ services:
     volumes:
       - ../data/pg:/var/lib/postgresql/data
   ek-migrations:
-    image: ek-controller:latest
+    build:
+      context: ../
+      dockerfile: ../docker/Dockerfile.cpu
+      target: controller
     depends_on:
       - ek-postgres
     environment:
@@ -27,7 +30,10 @@ services:
     working_dir: /app/ek-migrations
     command: diesel migration run 
   ek-controller:
-    image: ek-controller:latest
+    build:
+      context: ../
+      dockerfile: ../docker/Dockerfile.cpu
+      target: controller
     container_name: ek-controller
     restart: unless-stopped 
     depends_on:
@@ -36,14 +42,17 @@ services:
     ports:
       - "8080:8080"
     volumes:
-      - ../data/ds-tiny:/app/data
+      - ../data/:/app/data
       - ../config:/etc/expert-kit:ro
     environment:
       - RUST_LOG=info
     networks:
       - expert-kit-network
   worker:
-    image: ek-worker:latest
+    build:
+      context: ../
+      dockerfile: ../docker/Dockerfile.cpu
+      target: worker
     container_name: ek-worker
     restart: unless-stopped
     depends_on:
