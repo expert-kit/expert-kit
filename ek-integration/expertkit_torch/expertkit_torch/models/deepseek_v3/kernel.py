@@ -1,3 +1,9 @@
+# This file is based on code from the DeepSeek project (https://github.com/deepseek-ai/DeepSeek-V3)
+# Original Copyright (c) 2023 DeepSeek
+# Original code licensed under the DEEPSEEK LICENSE AGREEMENT Version 1.0 and the MIT License.
+# The full text of the original licenses can be found in this directory:
+# /ek-integration/expertkit_torch/expertkit_torch/models/deepseek-v3/
+
 from typing import Tuple
 
 import sys

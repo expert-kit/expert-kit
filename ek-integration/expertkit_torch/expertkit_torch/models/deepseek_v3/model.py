@@ -1,3 +1,11 @@
+# This file is based on code from the DeepSeek project (https://github.com/deepseek-ai/DeepSeek-V3)
+# Original Copyright (c) 2023 DeepSeek
+# Original code licensed under the DEEPSEEK LICENSE AGREEMENT Version 1.0 and the MIT License.
+# This file has been modified by expert-kit.
+# Modifications Copyright (c) 2025 expert-kit
+# The full text of the original licenses can be found in this directory:
+# /ek-integration/expertkit_torch/expertkit_torch/models/deepseek-v3/
+
 import math
 from dataclasses import dataclass
 from typing import Tuple, Optional, Literal
