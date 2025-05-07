@@ -42,8 +42,6 @@ gethostname = "1.0.1"
 [build-dependencies]
 tonic-build = "*"
 
-[[example]]
-name = "simple_client"
 
 [lib]
 crate-type = ["cdylib", "staticlib", "rlib"]

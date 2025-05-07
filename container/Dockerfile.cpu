@@ -1,0 +1,60 @@
+FROM ubuntu:24.04 AS build
+ARG TORCH_VERSION
+ARG PROXY
+
+ENV OPT_PROXY=${PROXY}
+ENV TORCH_VERSION=${TORCH_VERSION:-2.7.0}
+ENV LIBTORCH=/opt/torch/libtorch
+ENV LD_LIBRARY_PATH=$LIBTORCH/lib
+ENV PATH="/root/.cargo/bin:/root/.local/bin:${PATH}"
+
+COPY ./vendor/libtorch-cxx11-abi-shared-with-deps-2.7.0+cpu.zip /
+RUN apt-get update && apt-get install -y \
+    build-essential pkg-config  unzip  tar \
+    git wget curl \
+    libssl-dev libpq-dev\
+    protobuf-compiler 
+RUN apt-get install -y rustup 
+RUN HTTP_PROXY=${OPT_PROXY} HTTPS_PROXY=${OPT_PROXY} rustup default nightly-2025-01-01
+
+RUN mkdir -p /opt/torch && \
+    unzip /libtorch-cxx11-abi-shared-with-deps-2.7.0+cpu.zip -d /opt/torch && \
+    rm /libtorch-cxx11-abi-shared-with-deps-2.7.0+cpu.zip
+
+WORKDIR /app
+RUN  cargo new --lib ek-base
+RUN  cargo new --lib ek-benchmark
+RUN  cargo new --lib ek-computation
+RUN  cargo new --lib ek-db
+COPY ./ek-base/Cargo.toml ./ek-base/
+COPY ./ek-benchmark/Cargo.toml ./ek-benchmark/
+COPY ./ek-computation/Cargo.toml ./ek-computation/
+COPY ./ek-db/Cargo.toml ./ek-db/
+COPY ./Cargo.toml ./Cargo.lock ./
+RUN --mount=type=cache,target=/usr/local/cargo/registry  HTTP_PROXY=${OPT_PROXY} HTTPS_PROXY=${OPT_PROXY} cargo build --release --lib
+
+
+COPY . .
+RUN cat ./ek-computation/src/lib.rs 
+RUN cat ./ek-base/src/lib.rs
+RUN --mount=type=cache,target=/usr/local/cargo/registry  <<EOF
+    touch ./ek-base/src/lib.rs
+    touch ./ek-computation/src/lib.rs
+    touch ./ek-benchmark/src/lib.rs
+    touch ./ek-db/src/lib.rs
+    HTTP_PROXY=${OPT_PROXY} HTTPS_PROXY=${OPT_PROXY} cargo build --release
+EOF
+
+
+
+FROM ubuntu:24.04 AS runtime
+
+WORKDIR /ek
+ENV LIBTORCH=/opt/torch/libtorch
+ENV LD_LIBRARY_PATH=$LIBTORCH/lib
+COPY --from=build /opt/torch/libtorch /opt/torch/libtorch
+
+COPY --from=build /app/target/release/controller /usr/local/bin/
+COPY --from=build /app/target/release/worker /usr/local/bin/
+
+ENTRYPOINT [ "" ]

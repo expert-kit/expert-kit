@@ -6,10 +6,12 @@ use polars::prelude::*;
 
 use ek_computation::ffn::{Expert, ExpertBackend, ExpertShape};
 
+#[allow(dead_code)]
 pub struct BenchmarkerImpl {
     iterations: usize,
     experts: Vec<BenchmarkExpert>,
 }
+#[allow(dead_code)]
 pub struct BenchmarkExpert(pub ExpertBackend);
 
 impl BenchmarkExpert {
@@ -38,6 +40,7 @@ impl BenchmarkExpert {
     }
 }
 
+#[allow(dead_code)]
 impl BenchmarkerImpl {
     pub fn new(experts: Vec<BenchmarkExpert>) -> Self {
         BenchmarkerImpl {

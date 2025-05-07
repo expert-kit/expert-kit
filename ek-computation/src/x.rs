@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use clap::ValueEnum;
 use ek_base::config::get_config_key;
