@@ -3,7 +3,7 @@
 > [!CAUTION]
 > Early Work-in-Progress. This project is currently a proof-of-concept demo and is under active development. It is not intended for production use and may contain significant bugs, security vulnerabilities, and unexpected behavior. We appreciate community feedback and contributions as we continue to build and refine this project.
 
-<!--[![project chat](https://img.shields.io/badge/zulip-join_chat-brightgreen.svg)](https://expert-kit.zulipchat.com/) -->
+[![project chat](https://img.shields.io/badge/zulip-join_chat-brightgreen.svg)](https://expert-kit.zulipchat.com/)
 
 ## About 
 ![](./doc/assets/logo-lr-bg.svg) 
@@ -19,25 +19,6 @@ By decoupling expert modules and deploying them across distributed GPUs and CPUs
   <img alt="arch-illustration-light" src="./doc/assets/arch-illustration.svg">
 </picture>
 
-<!--
-## Why Expert Kit
-
-The Challenge: Modern MoE models like DeepSeek-V3 contain up to 671B parameters, with nearly 98% dedicated to experts. Traditional inference approaches face:
-
-- Extreme memory pressure on single devices
-- Inefficient resource allocation with fixed model deployment
-- Limited scaling options that require replicating entire models
-- Poor utilization of heterogeneous hardware capabilities
-
-Our Solution: **Expert Kit** decouples attention computation from expert computation, creating a distributed architecture that enables:
-
-- Fine-grained resource management at individual expert level
-- Dynamic scaling based on actual expert usage patterns
-- Seamless integration of heterogeneous hardware
-- Zero-downtime cluster expansion as needs grow
-- Running massive MoE models on every day hardware
--->
-
 ## Quick Start
 
 Here are some tutorials to help you quickly start with Expert Kit.
@@ -47,33 +28,7 @@ Here are some tutorials to help you quickly start with Expert Kit.
 
 ## Key Features
 - **Low-Cost Deployment**: supports distributed GPU and CPUs, a single GPU is all you need
-- **Fine-Grained Expert-Level Scalability**: provides independent scaling of attentioin and experts, with dynamic scaling of hot experts on demand 
-
-<!--
-Expert-Level Parallelism
-
-- Fine-Grained Scaling: Schedule and allocate resources at individual expert level
-- Dynamic Expert Management: Load experts based on usage patterns and demand
-- Seamless Expansion: Add new compute nodes with automatic workload redistribution
-
-Heterogeneous Hardware Support
-
-- Mixed Hardware Pipelines: Combine different GPU generations, CPUs, and accelerators
-- Intelligent Placement: Assign experts to the most appropriate compute resources
-- Optimized Communication: Efficient cross-device tensor transfer with minimal overhead
-
-Memory & Framework Optimization
-
-- Dramatic Memory Reduction: Offload up to 98% of parameters through expert disaggregation
-- Ecosystem Integration: Works with vLLM and Transformers, leveraging PagedAttention and optimized kernels
-- Simple Adoption: Drop-in replacement for standard MoE layers with minimal code changes
-
-Universal Accessibility
-
-- Consumer Hardware: Run 600B+ parameter models across everyday devices
-- Enterprise Efficiency: Maximize resource utilization in production environments
-- Flexible Deployment: Scale from personal setups to data centers with the same architecture
--->
+- **Fine-Grained Expert-Level Scalability**: provides independent scaling of attention and experts, with dynamic scaling of hot experts on demand 
 
 ## Repository Map
 
@@ -104,7 +59,7 @@ Universal Accessibility
   - [ ] DSM
 
 ## Contact Us
-If you have any questions, please join in our discussion at https://expert-kit.zulipchat.com/
+If you have any questions, please join our discussion at https://expert-kit.zulipchat.com/
 
 ## License Agreement
 - **Primary License**: This project as a whole is licensed under the [GNU GPL 3.0](LICENSE).
