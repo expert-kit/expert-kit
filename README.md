@@ -1,19 +1,25 @@
-# Expert Kit
+# Expert Kit: A Distributed, Expert-Centric Framework for MoE LLM Inference
 
 > [!CAUTION]
 > Early Work-in-Progress. This project is currently a proof-of-concept demo and is under active development. It is not intended for production use and may contain significant bugs, security vulnerabilities, and unexpected behavior. We appreciate community feedback and contributions as we continue to build and refine this project.
 
-[![project chat](https://img.shields.io/badge/zulip-join_chat-brightgreen.svg)](https://expert-kit.zulipchat.com/)
+<!--[![project chat](https://img.shields.io/badge/zulip-join_chat-brightgreen.svg)](https://expert-kit.zulipchat.com/) -->
 
-![](./doc/assets/logo-lr-bg.svg)
+## About 
+![](./doc/assets/logo-lr-bg.svg) 
 
-**Expert Kit** is a high-performance framework for scalable MoE (Mixture of Experts) LLM inference. It enables efficient deployment of Expert Parallelism (EP) clusters backed by heterogeneous hardware to tackle the unique challenges of serving MoE models.
+**Expert Kit (EK)** is a high-performance framework for scalable MoE (Mixture of Experts) LLM inference. The vision of EK is to provide an efficient foundation of Expert Parallelism (EP) on heterogeneous hardware (e.g., CPU and GPU) over commodity networks (e.g. PCIe, TCP, RDMA), thereby enabling easy deployment and fine-grained expert-level scaling. 
+
+EK features Expert-Attention (E/A) separation architecture, enabling MoE LLMs to be deployed efficiently in a distributed environment composed of *x* CPUs and *y* GPUs.
+The motivation behind the E/A separation lies in our observation that, in modern MoE LLMs, expert parameters account for the vast majority of the model size (e.g., over 90% in DeepSeek-V3). 
+By decoupling expert modules and deploying them across distributed GPUs and CPUs, EK leverages the high bandwidth and large capacity of distributed memory and storage systems.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="./doc/assets/arch-illustration-dark.svg">
   <img alt="arch-illustration-light" src="./doc/assets/arch-illustration.svg">
 </picture>
 
+<!--
 ## Why Expert Kit
 
 The Challenge: Modern MoE models like DeepSeek-V3 contain up to 671B parameters, with nearly 98% dedicated to experts. Traditional inference approaches face:
@@ -30,16 +36,20 @@ Our Solution: **Expert Kit** decouples attention computation from expert computa
 - Seamless integration of heterogeneous hardware
 - Zero-downtime cluster expansion as needs grow
 - Running massive MoE models on every day hardware
+-->
 
 ## Quick Start
 
-Here exists some tutorials to help you quickly start with Expert Kit.
+Here are some tutorials to help you quickly start with Expert Kit.
 
 1. [DeepSeek-tiny](./doc/tutorial/deepseek-tiny.md): A tailored MoE model with DeepSeek-V3 architecture and small parameter count, designed for quick evaluation and testing of the Expert Kit framework.
 2. [Qwen3-30B-A3B](./doc//tutorial/qwen3-moe-a3b-demo.md): A demo for running the Qwen3-30B-A3B model with Expert Kit, showcasing the framework's capabilities in handling real-world MoE models.
 
 ## Key Features
+- **Low-Cost Deployment**: supports distributed GPU and CPUs, a single GPU is all you need
+- **Fine-Grained Expert-Level Scalability**: provides independent scaling of attentioin and experts, with dynamic scaling of hot experts on demand 
 
+<!--
 Expert-Level Parallelism
 
 - Fine-Grained Scaling: Schedule and allocate resources at individual expert level
@@ -63,6 +73,7 @@ Universal Accessibility
 - Consumer Hardware: Run 600B+ parameter models across everyday devices
 - Enterprise Efficiency: Maximize resource utilization in production environments
 - Flexible Deployment: Scale from personal setups to data centers with the same architecture
+-->
 
 ## Repository Map
 
@@ -70,6 +81,7 @@ Universal Accessibility
 - [ek-db](./ek-edb): supports registering and loading experts' weight in fine-grained granularity.
 - [ek-benchmark](./ek-benchmark): contains several micro-benchmarks help you know the performance.
 - [ek-solution](./ek-solution): contains several recipes to quickly setup a running cluster.
+
 
 ## Roadmap
 
@@ -90,3 +102,6 @@ Universal Accessibility
   - [x] gRPC
   - [ ] RDMA
   - [ ] DSM
+
+## Contact Us
+If you have any questions, please contact us at liuhancheng@buaa.edu.cn or liaoxj@buaa.edu.cn, or join in our discussion at https://expert-kit.zulipchat.com/
