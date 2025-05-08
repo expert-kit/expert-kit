@@ -177,7 +177,7 @@ impl TorchFFN {
                 w2.bs = None;
                 w3.bs = None;
                 let module =
-                    nn::seq().add_fn(move |x| (x.apply(&w1).silu() * x.apply(&w3)).apply(&w2));
+                    nn::seq().add_fn(move |x| (x.apply(&w1) * x.apply(&w3).silu()).apply(&w2));
                 Arc::new(Mutex::new(module))
             })
         });
@@ -218,5 +218,63 @@ impl Expert<TchTensor> for TorchFFN {
             module: cell,
             weight,
         })
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use std::fs;
+
+    use safetensors::SafeTensors;
+    use tch::{IndexOp, Tensor};
+
+    use crate::{
+        ffn::{EkTensor, Expert, ExpertWeight, expert_torch::TorchFFN},
+        x::{self, test_root},
+    };
+
+    use super::TchTensor;
+
+    #[test]
+    fn test_io() {
+        let rand_t = tch::Tensor::randn(vec![128, 128], (tch::Kind::Float, tch::Device::Cpu));
+        let target = TchTensor::from(rand_t.copy());
+        let bytes = target.serialize();
+        let st = SafeTensors::deserialize(&bytes).unwrap();
+        let tv = st.tensor("data").unwrap();
+        let processed = TchTensor::from_tensor_view(&tv);
+        assert!(processed.inner().sum(tch::Kind::Float) == rand_t.sum(tch::Kind::Float))
+    }
+
+    #[test]
+    fn test_correctness() {
+        let st_fp = test_root()
+            .join("resources")
+            .join("qwen3-l0e1.weight.safetensors");
+        let st_bytes = fs::read(st_fp).unwrap();
+        let st = SafeTensors::deserialize(&st_bytes).unwrap();
+        let weight = ExpertWeight::from_safetensor(&st).unwrap();
+        let inst = x::EKInstance {
+            dim: 2048,
+            hidden: 768,
+            backend: x::ExpertBackendType::Torch,
+        };
+        let ffn = TorchFFN::construct(inst, weight).unwrap();
+
+        let ground_truth_fp = test_root()
+            .join("resources")
+            .join("qwen3-l0e1.result.safetensors");
+        let ground_truth_bytes = fs::read(ground_truth_fp).unwrap();
+        let gt_st = SafeTensors::deserialize(&ground_truth_bytes).unwrap();
+
+        let tv = gt_st.tensor("1-input").unwrap();
+        let inp = TchTensor::from_tensor_view(&tv);
+
+        let res = ffn.forward(&inp).inner();
+        let truth = TchTensor::from_tensor_view(&gt_st.tensor("1-output").unwrap()).inner();
+
+        let vec1 = Vec::<f32>::try_from(res.i((0, 0..100))).unwrap();
+        let vec2 = Vec::<f32>::try_from(truth.i((0, 0..100))).unwrap();
+        (res - truth).sum(tch::Kind::BFloat16).print();
     }
 }
