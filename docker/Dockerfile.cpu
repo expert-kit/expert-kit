@@ -22,42 +22,36 @@ RUN apt-get update && apt-get install -y \
     libpq-dev && \
     rm -rf /var/lib/apt/lists/*
 
+WORKDIR /app
 # Install rustup and nightly Rust
-# TODO: don't hardcode the version
-RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain nightly-2024-12-31
+# RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain none
 ENV PATH="/root/.cargo/bin:/root/.local/bin:${PATH}"
+COPY rust-toolchain.toml /app/
+RUN rustup show
 
 # Install uv using the official installer
 RUN curl -LsSf https://astral.sh/uv/install.sh | sh
 
 # Setup libtorch
-# ENV TORCH_VERSION=2.6.0
+# TODO: don't hardcode the version
+# ENV TORCH_VERSION=2.7.0
 ENV LIBTORCH=/opt/torch/libtorch
 ENV LIBTORCH_INCLUDE=$LIBTORCH
 ENV LIBTORCH_LIB=$LIBTORCH
-ENV CXXFLAGS="-D_GLIBCXX_USE_CXX11_ABI=0"
-ENV TORCH_CXX_FLAGS="-D_GLIBCXX_USE_CXX11_ABI=0"
+ENV CXXFLAGS="-D_GLIBCXX_USE_CXX11_ABI=1"
+ENV TORCH_CXX_FLAGS="-D_GLIBCXX_USE_CXX11_ABI=1"
 ENV LD_LIBRARY_PATH=$LIBTORCH/lib
 
-# Download and extract libtorch
-# TODO: don't hardcode the version
 RUN mkdir -p /opt/torch && \
-    cd /opt/torch && \
-    wget -q https://download.pytorch.org/libtorch/cpu/libtorch-shared-with-deps-2.6.0%2Bcpu.zip && \
-    unzip libtorch-shared-with-deps-2.6.0+cpu.zip && \
-    rm libtorch-shared-with-deps-2.6.0+cpu.zip
-
+cd /opt/torch && \
+wget -q https://download.pytorch.org/libtorch/cpu/libtorch-cxx11-abi-shared-with-deps-2.7.0%2Bcpu.zip && \
+unzip libtorch-cxx11-abi-shared-with-deps-2.7.0+cpu.zip && \
+rm libtorch-cxx11-abi-shared-with-deps-2.7.0+cpu.zip
+    
 ENV RUSTFLAGS="-C link-args=-Wl,-rpath,$LIBTORCH/lib"
 
 # Clone and build the expert-kit
-WORKDIR /app
-# COPY . .
-COPY LICENSE /app/
-COPY pyproject.toml /app/
-COPY py/ /app/py/
-COPY .python-version /app/
-COPY uv.lock /app/
-RUN uv sync
 
 COPY ek-base/ /app/ek-base/
 COPY ek-benchmark/ /app/ek-benchmark/
@@ -71,36 +65,8 @@ COPY buf.yaml /app/
 COPY ruff.toml /app/
 COPY .gitignore /app/
 
-RUN ls /app/ek-base
-
 RUN cargo build --release && \
     cargo install diesel_cli --no-default-features --features 'postgres'
-
-####################################
-# TEST STAGE
-####################################
-FROM build AS test
-
-# Run tests
-# TODO: add unit test
-# RUN cargo test --release
-
-####################################
-# DEV STAGE
-####################################
-FROM build AS dev
-
-# Setup config directory
-RUN mkdir -p /etc/expert-kit
-
-# Create directories for model storage
-RUN mkdir -p /app/data
-
-# Copy development scripts
-COPY py /app/py/
-
-# Default command runs the development environment
-CMD ["bash"]
 
 ####################################
 # COMMON BASE FOR CONTROLLER & WORKER
@@ -124,8 +90,16 @@ RUN apt-get update && apt-get install -y \
 RUN curl -LsSf https://astral.sh/uv/install.sh | sh
 ENV PATH="/root/.cargo/bin:/root/.local/bin:${PATH}"
 
+WORKDIR /app
+# COPY . .
+COPY LICENSE /app/
+COPY pyproject.toml /app/
+COPY py/ /app/py/
+COPY .python-version /app/
+COPY uv.lock /app/
+RUN uv sync
+
 # Setup libtorch
-ENV TORCH_VERSION=2.6.0
 ENV LIBTORCH=/opt/torch/libtorch
 ENV LIBTORCH_INCLUDE=$LIBTORCH
 ENV LIBTORCH_LIB=$LIBTORCH
@@ -146,6 +120,9 @@ COPY --from=build /app/target/release/worker /usr/local/bin/
 
 COPY --from=build /root/.cargo/bin/diesel /usr/local/bin
 
+# Copy migration files
+COPY --from=build /app/ek-computation/migrations /app/ek-computation/migrations
+
 # Copy python scripts
 COPY py /app/py/
 
@@ -162,6 +139,9 @@ RUN cat > /etc/expert-kit/config.yaml <<EOF
 storage_provider: fs
 storage_fs_path: /app/data/converted
 db_dsn: postgres://dev:dev@postgres:5432/dev
+hidden_dim: 256
+intermediate_dim: 128
+instance_name: local_test
 EOF
 
 # Expose controller port

@@ -16,16 +16,20 @@ services:
       - "5430:5432"
     volumes:
       - ../data/pg:/var/lib/postgresql/data
+    networks:
+      - expert-kit-network
   ek-migrations:
     image: ek-controller:latest
     depends_on:
       - ek-postgres
     environment:
-      DATABASE_URL: postgres://dev:dev@postgres:5432/dev
+      DATABASE_URL: postgres://dev:dev@ek-postgres:5432/dev
     volumes:
       - ../ek-computation/migrations:/app/ek-migrations
     working_dir: /app/ek-migrations
     command: diesel migration run 
+    networks:
+      - expert-kit-network
   ek-controller:
     image: ek-controller:latest
     container_name: ek-controller
@@ -34,25 +38,28 @@ services:
       ek-postgres:
         condition: service_healthy
     ports:
-      - "8080:8080"
+      - 5001:5001
+      - 5002:5002
     volumes:
+      - ../dev:/app/dev
       - ../data/ds-tiny:/app/data
       - ../config:/etc/expert-kit:ro
     environment:
       - RUST_LOG=info
     networks:
       - expert-kit-network
-  worker:
+  ek-worker:
     image: ek-worker:latest
     container_name: ek-worker
     restart: unless-stopped
     depends_on:
       - ek-controller
     volumes:
-      - model_data:/app/data
-      - ./config:/etc/expert-kit:ro
+      - ../data/ds-tiny:/app/data
+      - ../config:/etc/expert-kit:ro
     environment:
-      - EK_HOSTNAME=ek-controller
+      - EK_HOSTNAME=local-dev
+      - EK_CONTROL_PLAN_ADDR=http://ek-controller:5001
       - RUST_LOG=info
       - LD_LIBRARY_PATH=/opt/torch/libtorch/lib:$LD_LIBRARY_PATH
     networks:

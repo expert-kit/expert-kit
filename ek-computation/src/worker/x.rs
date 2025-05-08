@@ -5,7 +5,7 @@ use opendal::{
 };
 use tonic::transport::Endpoint;
 
-use std::sync::Arc;
+use std::{str::FromStr, sync::Arc};
 
 use ek_base::{config::get_config_key, error::EKResult};
 use ek_db::safetensor::SafeTensorDB;
@@ -97,6 +97,12 @@ pub fn get_hostname() -> String {
 }
 
 pub fn get_control_plan_addr() -> Endpoint {
+    let ek_control_plan_addr = std::env::var("EK_CONTROL_PLAN_ADDR").ok();
+    if let Some(e) = ek_control_plan_addr {
+        let static_addr = Box::leak(e.into_boxed_str());
+        return Endpoint::from_static(static_addr);
+    }
+    // Default to localhost
     let addr = "http://[::1]:5001";
     Endpoint::from_static(addr)
 }

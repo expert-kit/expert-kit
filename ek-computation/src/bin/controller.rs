@@ -12,7 +12,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let state_srv = tokio::task::spawn(async {
         let srv = controller::service::state::StateServerImpl::new();
-        let addr = "[::1]:5001".parse().unwrap();
+        let addr = "0.0.0.0:5001".parse().unwrap();
         log::info!("state server listening on {}", addr);
         let err = tonic::transport::Server::builder()
             .add_service(StateServiceServer::new(srv))
@@ -25,7 +25,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let computation_srv = tokio::task::spawn(async {
         let srv = controller::service::compute::ComputationProxyServiceImpl::new();
-        let addr = "[::1]:5002".parse().unwrap();
+        let addr = "0.0.0.0:5002".parse().unwrap();
         log::info!("computation server listening on {}", addr);
         let err = tonic::transport::Server::builder()
             .add_service(ComputationServiceServer::new(srv))
