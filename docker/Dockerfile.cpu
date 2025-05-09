@@ -97,7 +97,7 @@ COPY pyproject.toml /app/
 COPY py/ /app/py/
 COPY .python-version /app/
 COPY uv.lock /app/
-RUN uv sync
+RUN uv sync && echo 'source /app/.venv/bin/activate' >> ~/.bashrc
 
 # Setup libtorch
 ENV LIBTORCH=/opt/torch/libtorch
@@ -121,7 +121,8 @@ COPY --from=build /app/target/release/worker /usr/local/bin/
 COPY --from=build /root/.cargo/bin/diesel /usr/local/bin
 
 # Copy migration files
-COPY --from=build /app/ek-computation/migrations /app/ek-computation/migrations
+COPY ./ek-computation/migrations /app/ek-computation/migrations
+COPY ./ek-integration /app/ek-integration
 
 # Copy python scripts
 COPY py /app/py/

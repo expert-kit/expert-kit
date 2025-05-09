@@ -16,19 +16,24 @@ services:
       - "5430:5432"
     volumes:
       - ../data/pg:/var/lib/postgresql/data
+    networks:
+      - expert-kit-network
   ek-migrations:
     build:
       context: ../
       dockerfile: ../docker/Dockerfile.cpu
       target: controller
     depends_on:
-      - ek-postgres
+      ek-postgres:
+        condition: service_healthy
     environment:
-      DATABASE_URL: postgres://dev:dev@postgres:5432/dev
+      DATABASE_URL: postgres://dev:dev@ek-postgres:5432/dev
     volumes:
       - ../ek-computation/migrations:/app/ek-migrations
     working_dir: /app/ek-migrations
-    command: diesel migration run 
+    command: diesel migration run --migration-dir /app/ek-migrations
+    networks:
+      - expert-kit-network
   ek-controller:
     build:
       context: ../
@@ -40,15 +45,17 @@ services:
       ek-postgres:
         condition: service_healthy
     ports:
-      - "8080:8080"
+      - 5001:5001
+      - 5002:5002
     volumes:
-      - ../data/:/app/data
-      - ../config:/etc/expert-kit:ro
+      - ../dev:/app/dev
+      - ../data:/app/data
+      - ./config:/etc/expert-kit:ro
     environment:
       - RUST_LOG=info
     networks:
       - expert-kit-network
-  worker:
+  ek-worker:
     build:
       context: ../
       dockerfile: ../docker/Dockerfile.cpu
@@ -58,10 +65,11 @@ services:
     depends_on:
       - ek-controller
     volumes:
-      - model_data:/app/data
+      - ../data:/app/data
       - ./config:/etc/expert-kit:ro
     environment:
-      - EK_HOSTNAME=ek-controller
+      - EK_HOSTNAME=local-dev
+      - EK_CONTROL_PLAN_ADDR=http://ek-controller:5001
       - RUST_LOG=info
       - LD_LIBRARY_PATH=/opt/torch/libtorch/lib:$LD_LIBRARY_PATH
     networks:
@@ -70,9 +78,3 @@ services:
 networks:
   expert-kit-network:
     driver: bridge
-
-volumes:
-  postgres_data:
-    driver: local
-  model_data:
-    driver: local

@@ -28,7 +28,7 @@ services:
     volumes:
       - ../ek-computation/migrations:/app/ek-migrations
     working_dir: /app/ek-migrations
-    command: diesel migration run --migration-dir /app/ek-migrations
+    command: diesel migration run --migration-dir /app/ek-migrations 
     networks:
       - expert-kit-network
   ek-controller:

@@ -1,0 +1,6 @@
+storage_provider: fs
+storage_fs_path: /app/data/qwen3/ek-qwen3
+db_dsn: postgres://dev:dev@ek-postgres:5432/dev
+hidden_dim:  2048
+intermediate_dim: 768
+instance_name: qwen3_moe_30b_local_test

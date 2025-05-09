@@ -1,0 +1,6 @@
+storage_provider: fs
+storage_fs_path: /app/data/ds-tiny/ek-ds-tiny
+db_dsn: postgres://dev:dev@ek-postgres:5432/dev
+hidden_dim: 256
+intermediate_dim: 128
+instance_name: local_test

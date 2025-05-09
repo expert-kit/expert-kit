@@ -88,9 +88,9 @@ pub fn get_s3_dal_operator() -> opendal::Operator {
 }
 
 pub fn get_hostname() -> String {
-    let ek_hostname = std::option_env!("EK_HOSTNAME");
-    if let Some(e) = ek_hostname {
-        return e.to_owned();
+    let ek_hostname = get_config_key("hostname");
+    if !ek_hostname.is_empty() {
+        return ek_hostname.to_string();
     }
     let hn = gethostname();
     hn.into_string().unwrap()
@@ -98,9 +98,9 @@ pub fn get_hostname() -> String {
 
 pub fn get_control_plan_addr() -> Endpoint {
     let ek_control_plan_addr = std::env::var("EK_CONTROL_PLAN_ADDR").ok();
-    if let Some(e) = ek_control_plan_addr {
-        let static_addr = Box::leak(e.into_boxed_str());
-        return Endpoint::from_static(static_addr);
+    let ek_control_plan_addr = get_config_key("control_plan_addr");
+    if !ek_control_plan_addr.is_empty() {
+        return Endpoint::from_static(ek_control_plan_addr);
     }
     // Default to localhost
     let addr = "http://[::1]:5001";

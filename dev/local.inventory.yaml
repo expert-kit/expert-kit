@@ -1,4 +1,4 @@
 nodes:
   - hostname: local-dev
-    address: http://localhost:51234
+    address: http://ek-worker:51234
     channel: grpc
