@@ -1,0 +1,13 @@
+[package]
+name = "ek-cli"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+
+clap = { workspace = true }
+ek_db = { path = "../ek-db" }
+tokio = { workspace = true }
+pretty_env_logger = { workspace = true }
+log = { workspace = true }
+env_logger = { workspace = true }
