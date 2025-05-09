@@ -51,6 +51,9 @@ pub enum EKError {
 
     #[error("tonic transport error")]
     TonicTransportError(#[from] tonic::transport::Error),
+
+    #[error("io error")]
+    IoError(#[from] std::io::Error),
 }
 
 pub type EKResult<T> = std::result::Result<T, EKError>;

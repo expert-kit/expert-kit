@@ -1013,9 +1013,12 @@ version = "0.1.0"
 dependencies = [
  "bytes",
  "ek_base",
+ "memmap2",
  "once_cell",
  "opendal 0.52.0",
  "safetensors 0.5.3",
+ "serde",
+ "serde_json",
  "tch",
  "tokio",
 ]

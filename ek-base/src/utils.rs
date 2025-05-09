@@ -1,4 +1,4 @@
-use std::{collections::HashMap, time};
+use std::{collections::HashMap, path::PathBuf, time};
 
 pub struct PerfTimer {
     start: time::Instant,
@@ -43,3 +43,7 @@ impl Drop for PerfTimer {
     }
 }
 
+pub fn workspace_root() -> PathBuf {
+    let root = env!("CARGO_MANIFEST_DIR");
+    PathBuf::from(root.to_owned()).parent().unwrap().to_path_buf()
+}

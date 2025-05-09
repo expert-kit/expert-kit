@@ -36,9 +36,12 @@
         "dtype",
         "ekproto",
         "expertkit",
+        "mmap",
         "ndarray",
         "Onnx",
         "onnxruntime",
+        "Pretrain",
+        "Pretrained",
         "safetensor",
         "safetensors",
         "serde"
