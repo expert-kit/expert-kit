@@ -1,10 +1,12 @@
-use std::{collections::HashMap, path::PathBuf};
+use std::{collections::HashMap, path::PathBuf, sync::Arc};
 
 use ek_base::error::{EKError, EKResult};
 use memmap2::{Mmap, MmapOptions};
+use once_cell::sync::OnceCell;
 use safetensors::{SafeTensors, tensor::TensorView};
-use tokio::fs::File;
+use tokio::{fs::File, sync::RwLock};
 
+#[derive(Debug, Clone)]
 struct WeightMap {
     map: std::collections::HashMap<String, String>,
 }
@@ -48,11 +50,44 @@ impl Default for TransformerModelDesc {
     }
 }
 
+struct SafeTensorWithData<'a> {
+    st: OnceCell<SafeTensors<'a>>,
+    mmap: Mmap,
+}
+
+impl<'a> SafeTensorWithData<'a> {
+    fn new(mmap: Mmap) -> Self {
+        Self {
+            st: OnceCell::new(),
+            mmap: mmap,
+        }
+    }
+    fn safetensors(&'a self) -> &'a SafeTensors<'a> {
+        let st = self.st.get_or_init(|| {
+            let st = safetensors::SafeTensors::deserialize(&self.mmap).unwrap();
+            st
+        });
+        st
+    }
+}
+
+pub struct WrappedTensorView<'a, 'b> {
+    data: Arc<SafeTensorWithData<'a>>,
+    key: &'b str,
+}
+
+impl<'a, 'b> WrappedTensorView<'a, 'b> {
+    fn inner(&'a self) -> EKResult<TensorView<'a>> {
+        let st = self.data.safetensors();
+        let tv = st.tensor(self.key)?;
+        Ok(tv)
+    }
+}
+
 pub struct TransformerPretrained<'a> {
     desc: TransformerModelDesc,
     weight_map: WeightMap,
-    safetensors: HashMap<PathBuf, SafeTensors<'a>>,
-    mmap: HashMap<PathBuf, Mmap>,
+    safetensors_cache: RwLock<HashMap<PathBuf, Arc<SafeTensorWithData<'a>>>>,
 }
 
 impl<'a> TransformerPretrained<'a> {
@@ -62,23 +97,37 @@ impl<'a> TransformerPretrained<'a> {
         Ok(Self {
             desc: desc.clone(),
             weight_map,
-            mmap: HashMap::new(),
-            safetensors: HashMap::new(),
+            safetensors_cache: RwLock::new(HashMap::new()),
         })
     }
 
-    pub async fn get(&'a mut self, key: &str) -> EKResult<TensorView<'a>> {
+    async fn cache(&self, fp: PathBuf) -> EKResult<()> {
+        // let mut wg = self.state.write().await;
+        let file = File::open(fp.clone()).await?;
+        let buffer = unsafe { MmapOptions::new().map(&file).unwrap() };
+        let st = SafeTensorWithData::new(buffer);
+        let st = Arc::new(st);
+        let mut lg = self.safetensors_cache.write().await;
+        lg.insert(fp.clone(), st.clone());
+        Ok(())
+    }
+
+    pub async fn get<'b>(&self, key: &'b str) -> EKResult<WrappedTensorView<'a, 'b>> {
         let fp = self.weight_map.map_layer(&key.to_string());
         let fp = self.desc.root.join(fp);
-        if let std::collections::hash_map::Entry::Vacant(e) = self.safetensors.entry(fp.clone()) {
-            let file = File::open(fp.clone()).await?;
-            let buffer = unsafe { MmapOptions::new().map(&file).unwrap() };
-            let buffer = self.mmap.entry(fp.clone()).or_insert(buffer);
-            let st = safetensors::SafeTensors::deserialize(buffer).unwrap();
-            e.insert(st);
+        let hit = {
+            let lg = self.safetensors_cache.read().await;
+            lg.contains_key(&fp.clone())
+        };
+        if !hit {
+            self.cache(fp.clone()).await?;
         }
-        let st = self.safetensors.get(&fp.clone()).unwrap();
-        let tv = st.tensor(key)?;
+        let lg = self.safetensors_cache.read().await;
+        let state = lg.get(&fp).unwrap();
+        let tv = WrappedTensorView {
+            data: state.clone(),
+            key: key,
+        };
         Ok(tv)
     }
 }
@@ -97,11 +146,11 @@ mod test {
             root: test_model.clone(),
             ..TransformerModelDesc::default()
         };
-        let mut pretrained = TransformerPretrained::try_from_desc(&desc).unwrap();
+        let pretrained = TransformerPretrained::try_from_desc(&desc).unwrap();
         let tensor = pretrained
             .get("model.layers.21.mlp.experts.94.down_proj.weight")
             .await
             .unwrap();
-        assert_eq!(tensor.shape(), &[16, 8]);
+        assert_eq!(tensor.inner().unwrap().shape(), &[16, 8]);
     }
 }
