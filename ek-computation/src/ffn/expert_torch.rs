@@ -226,7 +226,7 @@ mod test {
     use std::fs;
 
     use safetensors::SafeTensors;
-    use tch::{IndexOp, Tensor};
+    use tch::IndexOp;
 
     use crate::{
         ffn::{EkTensor, Expert, ExpertWeight, expert_torch::TorchFFN},
@@ -273,8 +273,8 @@ mod test {
         let res = ffn.forward(&inp).inner();
         let truth = TchTensor::from_tensor_view(&gt_st.tensor("1-output").unwrap()).inner();
 
-        let vec1 = Vec::<f32>::try_from(res.i((0, 0..100))).unwrap();
-        let vec2 = Vec::<f32>::try_from(truth.i((0, 0..100))).unwrap();
+        let _vec1 = Vec::<f32>::try_from(res.i((0, 0..100))).unwrap();
+        let _vec2 = Vec::<f32>::try_from(truth.i((0, 0..100))).unwrap();
         (res - truth).sum(tch::Kind::BFloat16).print();
     }
 }

@@ -16,3 +16,4 @@ tokio = { workspace = true }
 config = { workspace = true }
 once_cell = { workspace = true }
 log = { workspace = true }
+actix-web = { workspace = true }
