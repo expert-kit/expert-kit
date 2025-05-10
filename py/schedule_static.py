@@ -5,10 +5,10 @@ import random
 
 from pydantic import BaseModel
 import yaml
-from utils.dao import DAO
+from utils.dao import DAO, WeightServerClient
 from utils.storage import setup_storage, with_storage_args
-from splitter.plan import SplitPlan, with_split_plan_name_arg
 from utils.base import get_db_pool, getLogger
+from utils.dao import ModelVital
 
 logger = getLogger(__name__)
 
@@ -25,7 +25,7 @@ class Inventory(BaseModel):
 
 
 class StaticScheduler:
-    def __init__(self, inventory: Inventory, split_plan: SplitPlan):
+    def __init__(self, inventory: Inventory, split_plan: ModelVital):
         self.inventory = inventory
         self.plan = split_plan
 
@@ -35,14 +35,14 @@ class StaticScheduler:
 
 
 def parse_args():
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(description="create model")
     parser.add_argument(
-        "--instance_name",
+        "--model_name",
         type=str,
         required=True,
     )
     parser.add_argument(
-        "--model_name",
+        "--instance_name",
         type=str,
         required=True,
     )
@@ -50,11 +50,7 @@ def parse_args():
         "--inventory",
         type=str,
         required=True,
-        help="Path to the inventory JSON file",
     )
-    with_split_plan_name_arg(parser)
-    with_storage_args(parser)
-
     args = parser.parse_args()
     return args
 
@@ -78,11 +74,23 @@ async def upsert_nodes(inventory: str, dao: DAO):
 async def main():
     args = parse_args()
     p = await get_db_pool()
-
-    storage = setup_storage(args)
-    plan = SplitPlan.load(storage=storage, name=args.split_plan)
-    experts = plan.expert_files()
-    logger.info(f"plan loaded, total experts {len(experts)}")
+    ws = ""
+    async with p.connection() as conn:
+        q = DAO(conn)
+        model = await q.model.by_name(args.model_name)
+        if model is None:
+            raise ValueError(f"model {args.model_name} not found")
+        if model["config"] is None or model["config"]["weight_server"] is None:
+            raise ValueError(f"model {args.model_name} is not proper configured")
+        ws = model["config"]["weight_server"]
+    wscli = WeightServerClient(ws)
+    model_name = args.model_name
+    vital = wscli.vital(model_name=args.model_name)
+    experts = []
+    for layer in range(vital.moe_layers[0], vital.moe_layers[1]):
+        for idx in range(vital.routed_experts):
+            experts.append(f"{model_name}/l{layer}-e{idx}")
+    logger.info(f"total experts {len(experts)}")
     async with p.connection() as conn:
         q = DAO(conn)
         nodes = await upsert_nodes(args.inventory, q)
@@ -102,6 +110,7 @@ async def main():
                     expert_id=expert,
                     replica=1,
                 )
+    return ws
 
 
 if __name__ == "__main__":

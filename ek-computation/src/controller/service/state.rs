@@ -1,12 +1,12 @@
 use std::sync::Arc;
 
 use crate::{
-    controller::dispatcher::{DISPATCHER, Dispatcher},
+    controller::dispatcher::{Dispatcher, DISPATCHER},
     proto::ek::{
         object::v1::ExpertSlice,
         worker::v1::{self, retrieve_state_resp::ExpertWithState},
     },
-    state::io::{StateWriter, get_state_writer},
+    state::{io::StateWriter, writer::get_state_writer},
 };
 use ek_base::error::EKError;
 use tokio::sync::{RwLock, mpsc};

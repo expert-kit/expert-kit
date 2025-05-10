@@ -56,41 +56,16 @@ pub struct ExpertKey {
 
 impl ExpertKey {
     pub fn from_expert_id(model: &str, id: &str) -> EKResult<Self> {
-        let inner = id
-            .strip_prefix("model-layer")
-            .ok_or(EKError::InvalidInput(format!(
-                "no prefix 'model-layer' found in: {}",
-                id
-            )))?
-            .strip_suffix(".safetensors")
-            .ok_or(EKError::InvalidInput(format!(
-                "no suffix '.safetensors' found in: {}",
-                id
-            )))?;
-
-        let (layer_str, expert_part) =
-            inner
-                .split_once("-expert")
-                .ok_or(EKError::InvalidInput(format!(
-                    "no '-expert' found in two ids: {}",
-                    id
-                )))?;
-
-        if layer_str.is_empty() || !layer_str.chars().all(char::is_numeric) {
-            return Err(EKError::InvalidInput(format!(
-                "layer part is empty or not numeric: {}",
-                layer_str
-            )));
+        let inner = id.split("/l").collect::<Vec<_>>();
+        if inner.len() != 2 {
+            return Err(EKError::InvalidInput(format!("invalid expert id: {}", id)));
         }
-        if expert_part.is_empty() || !expert_part.chars().all(char::is_numeric) {
-            return Err(EKError::InvalidInput(format!(
-                "expert part is empty or not numeric: {}",
-                expert_part
-            )));
+        let inner = inner[1].split("-e").collect::<Vec<_>>();
+        if inner.len() != 2 {
+            return Err(EKError::InvalidInput(format!("invalid expert id: {}", id)));
         }
-
-        let layer = layer_str.parse::<usize>()?;
-        let expert = expert_part.parse::<usize>()?;
+        let layer = inner[0].parse::<usize>()?;
+        let expert = inner[1].parse::<usize>()?;
         Ok(Self {
             model: model.to_owned(),
             layer,
@@ -112,10 +87,7 @@ impl ExpertKey {
         self.idx
     }
     pub fn as_object_key(&self) -> String {
-        format!(
-            "{}/model-layer{}-expert{}.safetensors",
-            self.model, self.layer, self.idx
-        )
+        format!("{}/l{}-e{}", self.model, self.layer, self.idx)
     }
 }
 
