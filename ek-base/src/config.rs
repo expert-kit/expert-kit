@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::{net::SocketAddr, path::Path};
 
 use config::{Config, Environment};
 use once_cell::sync::OnceCell;
@@ -11,16 +11,24 @@ pub struct Addr {
     pub port: u16,
 }
 
+impl Addr {
+    pub fn to_socket_addr(&self) -> SocketAddr {
+        format!("{}:{}", self.host, self.port).parse().unwrap()
+    }
+}
+
 #[derive(Debug, Deserialize, Clone)]
 #[allow(unused)]
 pub struct ControllerSettings {
+    pub inter_listen: Addr,
+    pub intra_listen: Addr,
     pub broadcast: Addr,
-    pub listen: Addr,
 }
 
 #[derive(Debug, Deserialize, Clone)]
 #[allow(unused)]
 pub struct WorkerSettings {
+    pub worker_id: Option<String>,
     pub listen: Addr,
     pub broadcast: Addr,
 }
