@@ -17,13 +17,13 @@ enum Command {
     #[command(about = "check the environment")]
     Doctor {},
 
-    #[command()]
+    #[command(about = "run expert-kit worker")]
     Worker {},
 
-    #[command()]
+    #[command(about = "run expert-kit controller")]
     Controller {},
 
-    #[command()]
+    #[command(about = "run expert-kit weight server")]
     WeightServer {
         #[arg(long, default_value_t = ("0.0.0.0").to_string())]
         host: String,
@@ -52,7 +52,7 @@ enum Command {
     },
 }
 
-/// Simple program to greet a person
+/// Expert Kit is an efficient foundation of Expert Parallelism (EP) for MoE model Inference on heterogenous hardware
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
 struct RootCli {
