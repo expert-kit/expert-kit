@@ -30,7 +30,7 @@ safetensors = "0.5.3"
 bytes = "1.10.1"
 async-trait = "0.1.88"
 sysinfo = "0.33.1"
-
+serde_derive = "1.0.219"
 diesel = { version = "2.2.9", features = [
     "postgres",
     "serde_json",
@@ -47,6 +47,7 @@ once_cell = "1.21.3"
 config = "0.15.11"
 memmap2 = "0.9.5"
 actix-web = "4.10.2"
+reqwest = "0.12.15"
 
 [workspace]
 resolver = "2"

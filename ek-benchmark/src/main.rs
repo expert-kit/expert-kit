@@ -9,11 +9,8 @@ use std::{
 
 use bench::{BenchmarkExpert, BenchmarkerImpl};
 use clap::{Parser, ValueEnum};
+use ek_computation::{ffn::ExpertBackend, x};
 use ek_computation::{ffn::expert_torch::TorchFFN, x::ExpertBackendType};
-use ek_computation::{
-    ffn::ExpertBackend,
-    x,
-};
 use polars::prelude::{IntoLazy, ParquetWriter, col};
 extern crate pretty_env_logger;
 #[macro_use]

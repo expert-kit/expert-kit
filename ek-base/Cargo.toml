@@ -17,4 +17,6 @@ config = { workspace = true }
 once_cell = { workspace = true }
 log = { workspace = true }
 actix-web = { workspace = true }
+reqwest = { workspace = true }
+serde_derive = { workspace = true }
 serde = { workspace = true }

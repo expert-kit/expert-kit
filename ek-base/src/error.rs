@@ -61,6 +61,9 @@ pub enum EKError {
 
     #[error("parse int error")]
     ParseIntError(#[from] std::num::ParseIntError),
+
+    #[error("reqwest error {0}")]
+    ReqwestError(#[from] reqwest::Error),
 }
 
 pub type EKResult<T> = std::result::Result<T, EKError>;

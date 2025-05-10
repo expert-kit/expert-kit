@@ -17,6 +17,7 @@ serde = { workspace = true }
 memmap2 = { workspace = true }
 moka = { version = "0.12.10", features = ["future"] }
 actix-web = { workspace = true }
+reqwest = { workspace = true }
 actix-http = "3.10.0"
 pretty_env_logger = { workspace = true }
 log = { workspace = true }
