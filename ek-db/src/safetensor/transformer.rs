@@ -3,6 +3,7 @@ use std::{collections::HashMap, mem::transmute, path::PathBuf, sync::Arc};
 use actix_web::{HttpResponse, Responder, body::BoxBody, http::header::ContentType};
 use ek_base::error::{EKError, EKResult};
 use memmap2::{Mmap, MmapOptions};
+use moka::future::Cache;
 use once_cell::sync::OnceCell;
 use safetensors::{SafeTensors, tensor::TensorView};
 use tokio::fs::File;
@@ -141,7 +142,41 @@ impl TransformerPretrained<'_> {
             let tv = &st_data.safetensors().tensor(key.as_str()).unwrap();
             safetensors::tensor::serialize([("data", tv)].to_vec(), &None)?
         };
+        Ok(serialized)
+    }
 
+    async fn construct_expert_key(
+        &self,
+        layer_id: usize,
+        expert_id: usize,
+    ) -> EKResult<Vec<String>> {
+        let key_up = format!(
+            "model.layers.{}.mlp.experts.{}.up_proj.weight",
+            layer_id, expert_id
+        );
+        let key_gate = format!(
+            "model.layers.{}.mlp.experts.{}.down_proj.weight",
+            layer_id, expert_id
+        );
+        let key_down = format!(
+            "model.layers.{}.mlp.experts.{}.gate_proj.weight",
+            layer_id, expert_id
+        );
+
+        Ok(vec![key_down, key_gate, key_up])
+    }
+
+    pub async fn get_expert(&self, layer_id: usize, eid: usize) -> EKResult<Vec<u8>> {
+        let keys = self.construct_expert_key(layer_id, eid).await?;
+        let mut tensors = vec![];
+
+        for key in keys.iter() {
+            let st = self.get_safetensor(key.clone()).await?;
+            let st: &SafeTensorWithData = unsafe { transmute(st.as_ref()) };
+            let tensor = st.safetensors().tensor(key)?;
+            tensors.push((key.clone(), tensor));
+        }
+        let serialized = safetensors::tensor::serialize(tensors, &None)?;
         Ok(serialized)
     }
 }
@@ -172,5 +207,34 @@ mod test {
             .unwrap();
 
         assert_eq!(tv.shape(), &[16, 8]);
+    }
+
+    #[tokio::test]
+    async fn test_get_expert() {
+        let root = workspace_root();
+        let test_model = root.join("ek-db").join("resources").join("ds-tiny");
+        let desc = TransformerModelDesc {
+            root: test_model.clone(),
+            ..TransformerModelDesc::default()
+        };
+        let pretrained: TransformerPretrained =
+            TransformerPretrained::try_from_desc(&desc).unwrap();
+        let tensor = pretrained.get_expert(21, 97).await.unwrap();
+        let st = safetensors::SafeTensors::deserialize(&tensor).unwrap();
+        let names = st.names();
+        assert_eq!(names.len(), 3);
+        let expected = vec![
+            "model.layers.21.mlp.experts.97.gate_proj.weight",
+            "model.layers.21.mlp.experts.97.down_proj.weight",
+            "model.layers.21.mlp.experts.97.up_proj.weight",
+        ];
+
+        for name in expected {
+            assert!(names.contains(&&name.to_string()));
+        }
+        let tensor = st
+            .tensor("model.layers.21.mlp.experts.97.down_proj.weight")
+            .unwrap();
+        assert_eq!(tensor.shape(), &[16, 8]);
     }
 }
