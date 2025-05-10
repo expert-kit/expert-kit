@@ -35,6 +35,22 @@ class StaticScheduler:
 
 
 def parse_args():
+    parser = argparse.ArgumentParser(description="create model")
+    parser.add_argument(
+        "--model_name",
+        type=str,
+        required=True,
+    )
+    parser.add_argument(
+        "--weight_server",
+        type=str,
+        default="http://localhost:6543",
+    )
+    args = parser.parse_args()
+    return args
+
+
+def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--instance_name",

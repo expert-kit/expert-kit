@@ -1,6 +1,7 @@
 use std::{mem::transmute, path::PathBuf};
 mod db;
 mod doctor;
+mod model;
 
 use db::execute_db_command;
 use doctor::doctor_main;
@@ -8,6 +9,7 @@ use ek_computation::{controller::controller_main, worker::worker_main};
 use ek_db::weight_srv;
 
 use clap::{Parser, Subcommand};
+use model::execute_model;
 extern crate pretty_env_logger;
 
 #[derive(Subcommand, Debug)]
@@ -35,11 +37,18 @@ enum Command {
     DB {
         #[arg(
             long,
+            global = true,
             help = "Database connection string (postgres://user:password@host:port/dbname)"
         )]
         dsn: String,
         #[command(subcommand)]
         command: db::DBCommand,
+    },
+
+    #[command(about = "model operations")]
+    Model {
+        #[command(subcommand)]
+        command: model::ModelCommand,
     },
 }
 
@@ -69,6 +78,7 @@ async fn main() {
             weight_srv::server::listen(model, (host, port)).await
         }
         Command::DB { dsn, command } => execute_db_command(command, dsn.as_str()).await,
+        Command::Model { command } => execute_model(command).await,
     };
     if let Err(e) = res {
         eprintln!("Error: {}", e);
