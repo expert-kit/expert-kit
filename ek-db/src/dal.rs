@@ -15,7 +15,7 @@ pub fn op_from_settings(config: &OpenDALStorage) -> opendal::Operator {
                 .region(s3_cfg.region.as_str());
             Operator::new(builder).unwrap().finish()
         }
-        OpenDALStorage::FS(fs_cfg) => {
+        OpenDALStorage::Fs(fs_cfg) => {
             log::info!("using local file system as weight store");
             let builder = Fs::default().root(&fs_cfg.path);
             Operator::new(builder).unwrap().finish()

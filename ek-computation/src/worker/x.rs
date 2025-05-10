@@ -55,7 +55,7 @@ pub async fn load_expert_task(
 
 pub fn get_hostname() -> String {
     let settings = get_ek_settings();
-    let ek_worker_id = settings.worker.worker_id.clone();
+    let ek_worker_id = settings.worker.id.clone();
     if let Some(wid) = ek_worker_id {
         return wid;
     }
