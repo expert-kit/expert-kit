@@ -22,7 +22,7 @@ class WeightServerClient:
         res = requests.get(url)
         if res.status_code != 200:
             raise Exception(f"failed to get vital from {url}")
-        return res.json()
+        return ModelVital(**res.json())
 
 
 class ModelDAO:
