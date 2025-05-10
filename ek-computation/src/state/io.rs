@@ -48,6 +48,40 @@ impl StateReaderImpl {
     pub fn new() -> Self {
         Self {}
     }
+
+    pub async fn active_nodes(&self) -> EKResult<Vec<Node>> {
+        let mut conn = POOL.get().await?;
+        use schema::node::dsl;
+        let th = std::time::SystemTime::now() - std::time::Duration::from_secs(60);
+        let res = schema::node::table
+            .filter(dsl::last_seen_at.gt(th))
+            .select(models::Node::as_select())
+            .load(&mut conn)
+            .await?;
+        Ok(res)
+    }
+
+    pub async fn model_by_name(&self, name: &str) -> EKResult<Option<Model>> {
+        let mut conn = POOL.get().await?;
+        use schema::model::dsl;
+        let res = schema::model::table
+            .filter(dsl::name.eq(name))
+            .select(models::Model::as_select())
+            .first(&mut conn)
+            .await?;
+        Ok(Some(res))
+    }
+
+    pub async fn instance_by_name(&self, name: &str) -> EKResult<Option<Instance>> {
+        let mut conn = POOL.get().await?;
+        use schema::instance::dsl;
+        let res = schema::instance::table
+            .filter(dsl::name.eq(name))
+            .select(models::Instance::as_select())
+            .first(&mut conn)
+            .await?;
+        Ok(Some(res))
+    }
     async fn _node_by_expert(&self, expert_id: &str) -> EKResult<Vec<Node>> {
         let mut conn = POOL.get().await?;
 

@@ -4,7 +4,7 @@ use ek_base::{
     config::get_ek_settings,
     error::{EKError, EKResult},
 };
-use ek_computation::state::pool::POOL;
+use ek_computation::state::{io::StateReaderImpl, pool::POOL};
 use tokio::task::JoinHandle;
 
 struct Checker {
@@ -19,7 +19,7 @@ pub struct Doctor {
 
 impl Doctor {
     pub fn new() -> Self {
-        let checkers = vec![
+        let checkers = [
             Checker {
                 success: "settings can be loaded",
                 failed: "please check the config file and env variables",
@@ -37,7 +37,37 @@ impl Doctor {
                     Ok(None)
                 }),
             },
-        ];
+            Checker {
+                success: "instance and model exist",
+                failed: "please create instance before running model.",
+                handle: tokio::spawn(async move {
+                    let settings = get_ek_settings();
+                    let rcli = StateReaderImpl::default();
+                    let res = rcli.instance_by_name(&settings.instance_name).await?;
+                    if res.is_none() {
+                        return Err(EKError::NotFound(format!(
+                            "instance {} not found",
+                            settings.instance_name
+                        )));
+                    }
+                    Ok(None)
+                }),
+            },
+            Checker {
+                success: "Worker nodes registered to meta-db.",
+                failed: "please run at least one worker node",
+                handle: tokio::spawn(async move {
+                    let rcli = StateReaderImpl::default();
+                    let res = rcli.active_nodes().await?;
+                    if res.len() == 0 {
+                        return Err(EKError::NotFound(format!("no active worker.",)));
+                    }
+                    Ok(None)
+                }),
+            },
+        ]
+        .into_iter()
+        .collect::<Vec<_>>();
         Self {
             queue: Some(checkers),
         }
@@ -49,15 +79,15 @@ impl Doctor {
             let res = checker.handle.await;
             match res {
                 Ok(Ok(None)) => {
-                    log::info!("✅ Success: {}", checker.success);
+                    log::info!("✅ \tSuccess: {}", checker.success);
                 }
 
                 Ok(Ok(Some(w))) => {
-                    log::error!("⚠️ Warn: {}\n\thint:{}", checker.success, w,);
+                    log::error!("⚠️ \t   Warn: {}\n\thint:{}", checker.success, w,);
                 }
                 Ok(Err(e)) => {
                     log::error!(
-                        "❌ Failed: {}\n\tpossible reason:{}\n\tsuggestion:{}",
+                        "❌ \t Failed: {}\n\terror: {}\n\tsuggestion: {}",
                         checker.success,
                         e,
                         checker.failed,
@@ -65,7 +95,7 @@ impl Doctor {
                 }
                 Err(e) => {
                     log::error!(
-                        "❌ Panic: {}\n\tpossible reason:{}\n\tsuggestion:{}",
+                        "❌ \t Panic: {}\n\terror: {}\n\tsuggestion: {}",
                         checker.success,
                         e,
                         checker.failed,
