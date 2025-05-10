@@ -38,6 +38,12 @@ pub trait StateWriter {
 
 pub struct StateReaderImpl {}
 
+impl Default for StateReaderImpl {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl StateReaderImpl {
     pub fn new() -> Self {
         Self {}

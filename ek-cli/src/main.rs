@@ -1,5 +1,8 @@
 use std::{mem::transmute, path::PathBuf};
+mod db;
 
+use db::execute_db_command;
+use ek_computation::{controller::controller_main, worker::worker_main};
 use ek_db::weight_srv;
 
 use clap::{Parser, Subcommand};
@@ -7,6 +10,12 @@ extern crate pretty_env_logger;
 
 #[derive(Subcommand, Debug)]
 enum Command {
+    #[command()]
+    Worker {},
+
+    #[command()]
+    Controller {},
+
     #[command()]
     WeightServer {
         #[arg(long, default_value_t = ("0.0.0.0").to_string())]
@@ -16,7 +25,19 @@ enum Command {
         #[arg(long)]
         model: Vec<PathBuf>,
     },
+
+    #[command(about = "low-level db operations")]
+    DB {
+        #[arg(
+            long,
+            help = "Database connection string (postgres://user:password@host:port/dbname)"
+        )]
+        dsn: String,
+        #[command(subcommand)]
+        command: db::DBCommand,
+    },
 }
+
 /// Simple program to greet a person
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
@@ -25,16 +46,19 @@ struct RootCli {
     command: Command,
 }
 
-#[tokio::main]
+#[tokio::main(flavor = "multi_thread", worker_threads = 48)]
 async fn main() {
     env_logger::init_from_env(env_logger::Env::default().default_filter_or("debug"));
     let cli = RootCli::parse();
 
     let res = match cli.command {
+        Command::Worker {} => worker_main().await,
+        Command::Controller {} => controller_main().await,
         Command::WeightServer { host, port, model } => {
             let model: &[PathBuf] = unsafe { transmute(model.as_slice()) };
             weight_srv::server::listen(model, (host, port)).await
         }
+        Command::DB { dsn, command } => execute_db_command(command, dsn.as_str()).await,
     };
     if let Err(e) = res {
         eprintln!("Error: {}", e);

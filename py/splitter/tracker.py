@@ -213,9 +213,7 @@ class FileProcessTracker:
             with self.lock:
                 # Make sure the file exists in local storage first
                 if not os.path.exists(self.local_path):
-                    logger.warning(
-                        "Local status file doesn't exist, creating it first"
-                    )
+                    logger.warning("Local status file doesn't exist, creating it first")
                     with open(self.local_path, "w") as f:
                         json.dump(self.status, f, indent=2)
 

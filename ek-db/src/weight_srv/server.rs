@@ -2,7 +2,7 @@ use std::{net::ToSocketAddrs, path::PathBuf};
 
 use super::manager::WeightManager;
 use actix_web::{App, HttpRequest, HttpServer, get, web};
-use ek_base::error::EKResult;
+use ek_base::error::{EKError, EKResult};
 use tokio::sync::OnceCell;
 
 #[get("/expert/{model}/{layer}/{expert}")]
@@ -38,7 +38,7 @@ async fn load_manager(roots: &'static [PathBuf]) -> &'static WeightManager<'stat
         .await) as _
 }
 
-pub async fn listen<A: ToSocketAddrs>(roots: &'static [PathBuf], addr: A) -> std::io::Result<()> {
+pub async fn listen<A: ToSocketAddrs>(roots: &'static [PathBuf], addr: A) -> EKResult<()> {
     let wm = load_manager(roots).await;
     let addr = addr.to_socket_addrs().unwrap().collect::<Vec<_>>();
     log::info!("starting weight server.");
@@ -54,6 +54,7 @@ pub async fn listen<A: ToSocketAddrs>(roots: &'static [PathBuf], addr: A) -> std
     .bind(addr.as_slice())?
     .run()
     .await
+    .map_err(EKError::from)
 }
 
 #[cfg(test)]
