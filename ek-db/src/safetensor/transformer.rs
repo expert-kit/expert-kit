@@ -6,9 +6,86 @@ use memmap2::{Mmap, MmapOptions};
 use moka::future::Cache;
 use once_cell::sync::OnceCell;
 use safetensors::{SafeTensors, tensor::TensorView};
+use serde::{Deserialize, Serialize};
 use tokio::fs::File;
-
 #[derive(Debug, Clone)]
+pub struct ModelConfig {
+    map: std::collections::HashMap<String, serde_json::Value>,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct VitalMeta {
+    pub moe_layers: (usize, usize),
+    pub routed_experts: usize,
+    pub hidden_dim: usize,
+    pub inter_dim: usize,
+}
+
+impl ModelConfig {
+    fn try_from_desc(desc: &TransformerModelDesc) -> EKResult<Self> {
+        let path = desc.root.join(&desc.config_name);
+        let file = std::fs::File::open(path.clone()).map_err(move |e| {
+            log::error!("can not found model_config at {}", &path.to_string_lossy());
+            EKError::IoError(e)
+        })?;
+        let map: HashMap<_, _> = serde_json::from_reader(file)?;
+        Ok(Self { map })
+    }
+    pub fn model_type(&self) -> &str {
+        self.map.get("model_type").unwrap().as_str().unwrap()
+    }
+
+    pub fn moe_layers(&self) -> Option<(usize, usize)> {
+        match self.model_type() {
+            "deepseek_v3" => {
+                let start = self
+                    .map
+                    .get("first_k_dense_replace")
+                    .unwrap()
+                    .as_u64()
+                    .unwrap() as usize;
+                let end = self.map.get("num_hidden_layers")?.as_u64()? as usize;
+                Some((start, end))
+            }
+            _ => {
+                let end = self.map.get("num_hidden_layers")?.as_u64()? as usize;
+                Some((0, end))
+            }
+        }
+    }
+
+    pub fn routed_experts(&self) -> Option<usize> {
+        match self.model_type() {
+            "deepseek_v3" => Some(self.map.get("n_routed_experts")?.as_u64()? as usize),
+            "qwen3_moe" => Some(self.map.get("num_experts")?.as_u64()? as usize),
+            _ => {
+                unimplemented!()
+            }
+        }
+    }
+
+    pub fn dim(&self) -> Option<(usize, usize)> {
+        let hidden = self.map.get("hidden_size")?.as_u64()? as usize;
+        let intermediate = self.map.get("moe_intermediate_size")?.as_u64()? as usize;
+        Some((hidden, intermediate))
+    }
+    pub fn normalized_vital(&self) -> EKResult<VitalMeta> {
+        let dim = self.dim().ok_or(EKError::InvalidInput(
+            "can not determine hidden_dim and inter_dim".to_string(),
+        ))?;
+        Ok(VitalMeta {
+            moe_layers: self.moe_layers().ok_or(EKError::InvalidInput(
+                "can not determine moe layers".to_string(),
+            ))?,
+            routed_experts: self.routed_experts().ok_or(EKError::InvalidInput(
+                "can not determine routed_experts".to_string(),
+            ))?,
+            hidden_dim: dim.0,
+            inter_dim: dim.1,
+        })
+    }
+}
+
 struct WeightMap {
     map: std::collections::HashMap<String, String>,
 }
@@ -47,6 +124,7 @@ impl WeightMap {
 pub struct TransformerModelDesc {
     pub root: PathBuf,
     pub weight_map_name: String,
+    pub config_name: String,
 }
 
 impl Default for TransformerModelDesc {
@@ -54,6 +132,7 @@ impl Default for TransformerModelDesc {
         Self {
             root: PathBuf::new(),
             weight_map_name: "model.safetensors.index.json".to_string(),
+            config_name: "config.json".to_string(),
         }
     }
 }
@@ -108,7 +187,7 @@ impl<'a> WrappedTensorView<'a> {
 pub struct TransformerPretrained<'data> {
     desc: TransformerModelDesc,
     weight_map: WeightMap,
-
+    model_config: ModelConfig,
     safetensors_cache: Cache<PathBuf, Arc<SafeTensorWithData<'data>>>,
 }
 
@@ -119,11 +198,17 @@ where
     pub fn try_from_desc(desc: &TransformerModelDesc) -> EKResult<Self> {
         // return Sel
         let weight_map = WeightMap::try_from_desc(desc)?;
+        let model_config = ModelConfig::try_from_desc(desc)?;
         Ok(Self {
             desc: desc.clone(),
             weight_map,
+            model_config,
             safetensors_cache: Cache::new(100000),
         })
+    }
+
+    pub fn config(&self) -> &ModelConfig {
+        &self.model_config
     }
 
     async fn get_safetensor(&self, key: String) -> EKResult<Arc<SafeTensorWithData<'data>>> {

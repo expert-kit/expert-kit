@@ -59,8 +59,8 @@ impl Doctor {
                 handle: tokio::spawn(async move {
                     let rcli = StateReaderImpl::default();
                     let res = rcli.active_nodes().await?;
-                    if res.len() == 0 {
-                        return Err(EKError::NotFound(format!("no active worker.",)));
+                    if res.is_empty() {
+                        return Err(EKError::NotFound("no active worker.".to_string()));
                     }
                     Ok(None)
                 }),
