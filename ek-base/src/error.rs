@@ -58,6 +58,9 @@ pub enum EKError {
 
     #[error("json error")]
     JsonError(#[from] serde_json::Error),
+
+    #[error("parse int error")]
+    ParseIntError(#[from] std::num::ParseIntError),
 }
 
 pub type EKResult<T> = std::result::Result<T, EKError>;
