@@ -109,37 +109,48 @@ pub struct TransformerPretrained<'data> {
     desc: TransformerModelDesc,
     weight_map: WeightMap,
 
-    safetensors_cache: HashMap<PathBuf, SafeTensorWithData<'data>>,
+    safetensors_cache: Cache<PathBuf, Arc<SafeTensorWithData<'data>>>,
 }
 
-impl TransformerPretrained<'_> {
+impl<'data> TransformerPretrained<'data>
+where
+    'data: 'static,
+{
     pub fn try_from_desc(desc: &TransformerModelDesc) -> EKResult<Self> {
         // return Sel
         let weight_map = WeightMap::try_from_desc(desc)?;
         Ok(Self {
             desc: desc.clone(),
             weight_map,
-            safetensors_cache: HashMap::new(),
+            safetensors_cache: Cache::new(100000),
         })
     }
 
-    pub async fn get_raw(&mut self, key: String) -> EKResult<Vec<u8>> {
+    async fn get_safetensor(&self, key: String) -> EKResult<Arc<SafeTensorWithData<'data>>> {
         let fp = self.weight_map.map_layer(&key.to_string());
         let fp = self.desc.root.join(fp);
         let hit = self.safetensors_cache.contains_key(&fp.clone());
         if !hit {
             let file = File::open(fp.clone()).await.unwrap();
             let buffer = unsafe { MmapOptions::new().map(&file).unwrap() };
-            // self.mmap_cache.insert(fp.clone(), buffer);
-            // let mmap = self.mmap_cache.get(&fp).unwrap();
             let st = SafeTensorWithData::new(buffer);
-            self.safetensors_cache.insert(fp.clone(), st);
+            let st = Arc::new(st);
+            self.safetensors_cache.insert(fp.clone(), st.clone()).await;
         }
+        let res = self
+            .safetensors_cache
+            .get(&fp)
+            .await
+            .ok_or(EKError::NotFound("safetensor not found".to_string()))?;
 
+        Ok(res)
+    }
+
+    pub async fn get_layer(&self, key: String) -> EKResult<Vec<u8>> {
+        let st = self.get_safetensor(key.clone()).await?;
         let serialized = {
-            let st_data = self.safetensors_cache.get(&fp).unwrap();
-            let st_data: &SafeTensorWithData = unsafe { transmute(st_data) };
-            let tv = &st_data.safetensors().tensor(key.as_str()).unwrap();
+            let st: &SafeTensorWithData = unsafe { transmute(st.as_ref()) };
+            let tv = &st.safetensors().tensor(key.as_str()).unwrap();
             safetensors::tensor::serialize([("data", tv)].to_vec(), &None)?
         };
         Ok(serialized)
@@ -188,17 +199,17 @@ mod test {
     use crate::safetensor::transformer::{TransformerModelDesc, TransformerPretrained};
 
     #[tokio::test]
-    async fn test_basic() {
+    async fn test_get_layer() {
         let root = workspace_root();
         let test_model = root.join("ek-db").join("resources").join("ds-tiny");
         let desc = TransformerModelDesc {
             root: test_model.clone(),
             ..TransformerModelDesc::default()
         };
-        let mut pretrained: TransformerPretrained =
+        let pretrained: TransformerPretrained =
             TransformerPretrained::try_from_desc(&desc).unwrap();
         let tensor = pretrained
-            .get_raw("model.layers.21.mlp.experts.94.down_proj.weight".to_owned())
+            .get_layer("model.layers.21.mlp.experts.94.down_proj.weight".to_owned())
             .await
             .unwrap();
         let tv = safetensors::SafeTensors::deserialize(&tensor)

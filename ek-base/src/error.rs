@@ -3,7 +3,7 @@ use deadpool::PoolError;
 use diesel;
 use diesel_async::pooled_connection::deadpool;
 use opendal;
-use std::{error, fmt::Write, string};
+use std::{fmt::Write, string};
 use tokio::task::JoinError;
 use tonic::Status;
 
