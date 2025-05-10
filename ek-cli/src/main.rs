@@ -33,7 +33,7 @@ async fn main() {
     let res = match cli.command {
         Command::WeightServer { host, port, model } => {
             let model: &[PathBuf] = unsafe { transmute(model.as_slice()) };
-            weight_srv::listen(model, (host, port)).await
+            weight_srv::server::listen(model, (host, port)).await
         }
     };
     if let Err(e) = res {

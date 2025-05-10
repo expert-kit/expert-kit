@@ -12,12 +12,12 @@ use ek_computation::{
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     env_logger::init_from_env(env_logger::Env::default().default_filter_or("debug"));
     let cli = tokio::task::spawn(async move {
-        let hn = x::get_hostname();
-        log::info!("ek hostname: {:}", hn);
+        let worker_id = x::get_worker_id();
+        log::info!("ek hostname: {:}", worker_id);
         let control_endpoint = x::get_controller_addr();
         log::info!("control endpoint {:}", control_endpoint.uri());
         let cli = StateServiceClient::connect(control_endpoint).await.unwrap();
-        let mut state_client = StateClient::new(cli, &hn);
+        let mut state_client = StateClient::new(cli, &worker_id);
         if let Err(e) = state_client.run().await {
             log::error!("state client error {:}", e);
         }

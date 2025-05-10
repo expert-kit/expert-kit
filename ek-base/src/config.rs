@@ -36,7 +36,7 @@ pub struct WorkerSettings {
 #[derive(Debug, Deserialize, Clone)]
 #[allow(unused)]
 pub struct WeightSettings {
-    pub server: WeightServerSettings,
+    pub server: Option<WeightServerSettings>,
     pub cache: OpenDALStorage,
 }
 
@@ -75,6 +75,7 @@ pub struct Settings {
     pub hidden_dim: usize,
     pub intermediate_dim: usize,
     pub instance_name: String,
+    pub model_name: String,
     pub weight: WeightSettings,
     pub controller: ControllerSettings,
     pub worker: WorkerSettings,
