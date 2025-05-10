@@ -1,7 +1,9 @@
 use std::{mem::transmute, path::PathBuf};
 mod db;
+mod doctor;
 
 use db::execute_db_command;
+use doctor::doctor_main;
 use ek_computation::{controller::controller_main, worker::worker_main};
 use ek_db::weight_srv;
 
@@ -10,6 +12,9 @@ extern crate pretty_env_logger;
 
 #[derive(Subcommand, Debug)]
 enum Command {
+    #[command(about = "check the environment")]
+    Doctor {},
+
     #[command()]
     Worker {},
 
@@ -42,18 +47,23 @@ enum Command {
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
 struct RootCli {
+    #[arg(long, default_value_t = false)]
+    debug: bool,
     #[command(subcommand)]
     command: Command,
 }
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 48)]
 async fn main() {
-    env_logger::init_from_env(env_logger::Env::default().default_filter_or("debug"));
     let cli = RootCli::parse();
-
+    if cli.debug {
+        unsafe { std::env::set_var("RUST_LOG", "debug") };
+    }
+    env_logger::init_from_env(env_logger::Env::default().default_filter_or("info"));
     let res = match cli.command {
         Command::Worker {} => worker_main().await,
         Command::Controller {} => controller_main().await,
+        Command::Doctor {} => doctor_main().await,
         Command::WeightServer { host, port, model } => {
             let model: &[PathBuf] = unsafe { transmute(model.as_slice()) };
             weight_srv::server::listen(model, (host, port)).await
