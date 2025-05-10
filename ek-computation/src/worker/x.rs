@@ -1,15 +1,11 @@
 use gethostname::gethostname;
-use opendal::{
-    Buffer, Operator,
-    services::{Fs, S3},
-};
+use opendal::Buffer;
 use tonic::transport::Endpoint;
 
 use std::sync::Arc;
 
-use ek_base::{config::get_config_key, error::EKResult};
+use ek_base::error::EKResult;
 use ek_db::safetensor::SafeTensorDB;
-use once_cell::sync::OnceCell;
 use tokio::sync::RwLock;
 
 use crate::{ffn::ExpertBackend, proto::ek, x};
@@ -55,36 +51,6 @@ pub async fn load_expert_task(
     }
 
     Ok(())
-}
-
-pub fn get_s3_dal_operator() -> opendal::Operator {
-    static INSTANCE: OnceCell<opendal::Operator> = OnceCell::new();
-
-    let res = INSTANCE.get_or_init(|| {
-        let provider = get_config_key("storage_provider");
-
-        match provider {
-            "s3" => {
-                log::info!("using s3 as weight store");
-                let builder = S3::default()
-                    .access_key_id(get_config_key("storage_s3_access_key_id"))
-                    .secret_access_key(get_config_key("storage_s3_access_key_secret"))
-                    .endpoint(get_config_key("storage_s3_endpoint"))
-                    .region(get_config_key("storage_s3_region"));
-                Operator::new(builder).unwrap().finish()
-            }
-            "fs" => {
-                log::info!("using local file system as weight store");
-                let path = get_config_key("storage_fs_path");
-                let builder = Fs::default().root(path);
-                Operator::new(builder).unwrap().finish()
-            }
-            _ => {
-                panic!("unsupported storage provider");
-            }
-        }
-    });
-    res.clone()
 }
 
 pub fn get_hostname() -> String {

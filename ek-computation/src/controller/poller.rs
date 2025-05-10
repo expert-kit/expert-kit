@@ -5,7 +5,7 @@ use diesel::{
     query_dsl::methods::{FilterDsl, SelectDsl},
 };
 use diesel_async::RunQueryDsl;
-use ek_base::{config::get_config_key, error::EKResult};
+use ek_base::{config::get_ek_settings, error::EKResult};
 use tokio::time::{self};
 use tonic::async_trait;
 
@@ -54,9 +54,10 @@ impl StatePollerImpl {
     }
     async fn poll_state(&mut self) -> EKResult<()> {
         let mut conn = pool::POOL.get().await?;
+        let settings = get_ek_settings();
 
         let instance = schema::instance::table
-            .filter(schema::instance::name.eq(get_config_key("instance_name")))
+            .filter(schema::instance::name.eq(settings.instance_name.clone()))
             .first::<models::Instance>(&mut conn)
             .await?;
 
