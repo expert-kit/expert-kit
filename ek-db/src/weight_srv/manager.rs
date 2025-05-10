@@ -1,4 +1,4 @@
-use std::{collections::HashMap, path::PathBuf, sync::Arc};
+use std::{collections::HashMap, mem::transmute, path::PathBuf, sync::Arc};
 
 use ek_base::error::{EKError, EKResult};
 use tokio::sync::RwLock;
@@ -10,7 +10,7 @@ pub struct WeightManager<'a> {
 }
 
 impl WeightManager<'_> {
-    pub async fn new(roots: &[PathBuf]) -> EKResult<Self> {
+    pub async fn new(roots: &'static [PathBuf]) -> EKResult<Self> {
         let mut wm = WeightManager {
             weights: HashMap::new(),
         };
@@ -24,15 +24,19 @@ impl WeightManager<'_> {
             wm.weights
                 .insert(root.file_name().unwrap().to_str().unwrap().to_owned(), tp);
         }
-        Ok(wm)
+        Ok(unsafe { transmute::<WeightManager<'_>, WeightManager<'_>>(wm) })
     }
-    pub async fn load(&self, model: String, key: String) -> EKResult<Vec<u8>> {
+    pub async fn load_pretrained<'b>(
+        &'b self,
+        model: String,
+    ) -> EKResult<Arc<RwLock<TransformerPretrained<'static>>>>
+    where
+        'b: 'static,
+    {
         let pretrained = self
             .weights
             .get(&model)
             .ok_or(EKError::NotFound(model.clone()))?;
-        let mut lg = pretrained.write().await;
-        let v = lg.get_raw(key).await?;
-        Ok(v)
+        Ok(pretrained.clone())
     }
 }

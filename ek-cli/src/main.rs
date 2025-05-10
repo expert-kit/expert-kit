@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::{mem::transmute, path::PathBuf};
 
 use ek_db::weight_srv;
 
@@ -32,7 +32,8 @@ async fn main() {
 
     let res = match cli.command {
         Command::WeightServer { host, port, model } => {
-            weight_srv::listen(&model, (host, port)).await
+            let model: &[PathBuf] = unsafe { transmute(model.as_slice()) };
+            weight_srv::listen(model, (host, port)).await
         }
     };
     if let Err(e) = res {
