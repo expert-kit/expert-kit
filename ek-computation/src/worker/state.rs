@@ -1,7 +1,7 @@
 use std::{sync::Arc, time};
 
 use ek_base::error::EKResult;
-use ek_db::safetensor::SafeTensorDB;
+use ek_db::{dal::op_from_settings, safetensor::SafeTensorDB};
 use log::info;
 use tokio::sync::RwLock;
 use tonic::transport::Channel;
@@ -18,7 +18,7 @@ use tokio_stream::StreamExt;
 use super::{
     core::{GlobalEKInstanceGate, get_instance_gate},
     manager::{ExpertDB, get_expert_db},
-    x::{self, get_s3_dal_operator},
+    x::{self},
 };
 pub struct StateClient {
     tensor_db: Arc<RwLock<SafeTensorDB>>,
@@ -30,9 +30,10 @@ pub struct StateClient {
 
 impl StateClient {
     pub fn new(cli: StateServiceClient<Channel>, hostname: &str) -> Self {
+        let settings = ek_base::config::get_ek_settings();
         let edb = get_expert_db();
         let gate = get_instance_gate();
-        let op = get_s3_dal_operator();
+        let op = op_from_settings(&settings.weight.cache);
         let tdb = SafeTensorDB::new_shared(op);
 
         Self {

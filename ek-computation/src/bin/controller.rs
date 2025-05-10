@@ -9,14 +9,15 @@ use ek_computation::{
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     env_logger::init_from_env(env_logger::Env::default().default_filter_or("debug"));
+    let settings = ek_base::config::get_ek_settings();
 
     let state_srv = tokio::task::spawn(async {
         let srv = controller::service::state::StateServerImpl::new();
-        let addr = "[::1]:5001".parse().unwrap();
-        log::info!("state server listening on {}", addr);
+        let intra_addr = settings.controller.intra_listen.to_socket_addr();
+        log::info!("state server listening on {}", intra_addr);
         let err = tonic::transport::Server::builder()
             .add_service(StateServiceServer::new(srv))
-            .serve(addr)
+            .serve(intra_addr)
             .await;
         if let Err(e) = err {
             log::error!("state server error {:?}", e);
@@ -25,11 +26,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let computation_srv = tokio::task::spawn(async {
         let srv = controller::service::compute::ComputationProxyServiceImpl::new();
-        let addr = "[::1]:5002".parse().unwrap();
-        log::info!("computation server listening on {}", addr);
+        let inter_addr = settings.controller.inter_listen.to_socket_addr();
+        log::info!("computation server listening on {}", inter_addr);
         let err = tonic::transport::Server::builder()
             .add_service(ComputationServiceServer::new(srv))
-            .serve(addr)
+            .serve(inter_addr)
             .await;
         if let Err(e) = err {
             log::error!("state server error {:?}", e);

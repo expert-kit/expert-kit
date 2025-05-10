@@ -1209,6 +1209,7 @@ dependencies = [
  "once_cell",
  "opendal 0.52.0",
  "safetensors 0.5.3",
+ "serde",
  "serde_json",
  "tch",
  "thiserror 2.0.12",

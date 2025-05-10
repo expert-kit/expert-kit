@@ -1,4 +1,5 @@
 #![feature(pattern)]
+use ek_base::config::get_ek_settings;
 use ek_computation::{
     proto::ek::worker::v1::{
         computation_service_server::ComputationServiceServer,
@@ -13,7 +14,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = tokio::task::spawn(async move {
         let hn = x::get_hostname();
         log::info!("ek hostname: {:}", hn);
-        let control_endpoint = x::get_control_plan_addr();
+        let control_endpoint = x::get_controller_addr();
         log::info!("control endpoint {:}", control_endpoint.uri());
         let cli = StateServiceClient::connect(control_endpoint).await.unwrap();
         let mut state_client = StateClient::new(cli, &hn);
@@ -24,7 +25,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let srv = tokio::task::spawn(async move {
         let server = BasicExpertImpl::new();
-        let addr = "[::1]:51234".parse().unwrap();
+        let settings = &get_ek_settings().worker;
+        let addr = format!("{}:{}", settings.listen.host, settings.listen.port)
+            .parse()
+            .unwrap();
         let err = tonic::transport::Server::builder()
             .add_service(ComputationServiceServer::new(server))
             .serve(addr)
