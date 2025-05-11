@@ -35,7 +35,7 @@ pub enum EKError {
     #[error("opendal error")]
     OpenDALError(#[from] opendal::Error),
 
-    #[error("diesel error")]
+    #[error("diesel error: {0}")]
     DieselError(#[from] diesel::result::Error),
 
     #[error("deadpool error")]

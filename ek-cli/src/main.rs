@@ -1,7 +1,9 @@
+#![feature(random)]
 use std::{mem::transmute, path::PathBuf};
 mod db;
 mod doctor;
 mod model;
+mod schedule;
 
 use db::execute_db_command;
 use doctor::doctor_main;
@@ -10,6 +12,7 @@ use ek_db::weight_srv;
 
 use clap::{Parser, Subcommand};
 use model::execute_model;
+use schedule::execute_schedule;
 extern crate pretty_env_logger;
 
 #[derive(Subcommand, Debug)]
@@ -50,6 +53,12 @@ enum Command {
         #[command(subcommand)]
         command: model::ModelCommand,
     },
+
+    #[command(about = "schedule operations")]
+    Schedule {
+        #[command(subcommand)]
+        command: schedule::ScheduleCommand,
+    },
 }
 
 /// Expert Kit is an efficient foundation of Expert Parallelism (EP) for MoE model Inference on heterogenous hardware
@@ -79,6 +88,7 @@ async fn main() {
         }
         Command::DB { dsn, command } => execute_db_command(command, dsn.as_str()).await,
         Command::Model { command } => execute_model(command).await,
+        Command::Schedule { command } => execute_schedule(command).await,
     };
     if let Err(e) = res {
         eprintln!("Error: {}", e);
