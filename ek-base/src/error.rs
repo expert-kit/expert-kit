@@ -32,7 +32,7 @@ pub enum EKError {
     #[error("NotFound `{0}`")]
     NotFound(string::String),
 
-    #[error("opendal error")]
+    #[error("opendal error {0}")]
     OpenDALError(#[from] opendal::Error),
 
     #[error("diesel error: {0}")]
@@ -53,10 +53,10 @@ pub enum EKError {
     #[error("tonic transport error")]
     TonicTransportError(#[from] tonic::transport::Error),
 
-    #[error("io error")]
+    #[error("io error: {0}")]
     IoError(#[from] std::io::Error),
 
-    #[error("json error")]
+    #[error("json error: {0}")]
     JsonError(#[from] serde_json::Error),
 
     #[error("parse int error")]

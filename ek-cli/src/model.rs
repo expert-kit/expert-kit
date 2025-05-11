@@ -7,10 +7,8 @@ use log::info;
 pub enum ModelCommand {
     #[command(about = "update or create a model in meta db")]
     Upsert {
-        #[arg(long, help = "weight server address (e.g. http://localhost:6543)")]
-        weight_server: String,
         #[arg(long, help = "unique model name")]
-        model_name: String,
+        name: String,
     },
 }
 
@@ -22,10 +20,17 @@ async fn upsert_model(weight_server: &str, model_name: &str) -> EKResult<()> {
 }
 
 pub async fn execute_model(cmd: ModelCommand) -> EKResult<()> {
+    let settings = ek_base::config::get_ek_settings();
+    let weight_server =
+        settings
+            .weight
+            .server
+            .clone()
+            .ok_or(ek_base::error::EKError::InvalidInput(
+                "weight server not set".to_string(),
+            ))?;
+
     match cmd {
-        ModelCommand::Upsert {
-            weight_server,
-            model_name,
-        } => upsert_model(&weight_server, &model_name).await,
+        ModelCommand::Upsert { name } => upsert_model(&weight_server.addr, &name).await,
     }
 }

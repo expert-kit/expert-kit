@@ -4,6 +4,7 @@ pub mod poller;
 pub mod registry;
 pub mod service;
 
+
 use ek_base::error::EKResult;
 
 use super::{
@@ -19,7 +20,12 @@ pub async fn controller_main() -> EKResult<()> {
 
     let state_srv = tokio::task::spawn(async {
         let srv = controller::service::state::StateServerImpl::new();
-        let intra_addr = settings.controller.intra_listen.to_socket_addr();
+        let intra_addr = format!(
+            "{}:{}",
+            settings.controller.listen, settings.controller.ports.intra
+        )
+        .parse()
+        .unwrap();
         log::info!("state server listening on {}", intra_addr);
         let err = tonic::transport::Server::builder()
             .add_service(StateServiceServer::new(srv))
@@ -32,7 +38,12 @@ pub async fn controller_main() -> EKResult<()> {
 
     let computation_srv = tokio::task::spawn(async {
         let srv = controller::service::compute::ComputationProxyServiceImpl::new();
-        let inter_addr = settings.controller.inter_listen.to_socket_addr();
+        let inter_addr = format!(
+            "{}:{}",
+            settings.controller.listen, settings.controller.ports.inter
+        )
+        .parse()
+        .unwrap();
         log::info!("computation server listening on {}", inter_addr);
         let err = tonic::transport::Server::builder()
             .add_service(ComputationServiceServer::new(srv))
