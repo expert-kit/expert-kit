@@ -11,7 +11,7 @@ use ek_computation::state::{
     writer::StateWriterImpl,
 };
 use ek_db::{safetensor::ExpertKey, weight_srv::client::WeightSrvClient};
-use indicatif::{ProgressBar, ProgressState, ProgressStyle};
+use indicatif::ProgressBar;
 use log::info;
 use serde::Deserialize;
 use tokio::task::JoinSet;
