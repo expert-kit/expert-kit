@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use clap::ValueEnum;
-use ek_base::config::get_config_key;
+use ek_base::config::get_ek_settings;
 
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, ValueEnum, Debug)]
 pub enum ExpertBackendType {
@@ -28,9 +28,10 @@ pub struct EKInstance {
 
 impl Default for EKInstance {
     fn default() -> Self {
+        let settings = get_ek_settings();
         Self {
-            dim: get_config_key("hidden_dim").parse().unwrap(),
-            hidden: get_config_key("intermediate_dim").parse().unwrap(),
+            dim: settings.hidden_dim,
+            hidden: settings.intermediate_dim,
             backend: ExpertBackendType::Torch,
         }
     }

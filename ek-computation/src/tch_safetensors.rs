@@ -126,7 +126,7 @@ mod test {
 
     #[test]
     fn test_io() {
-        let origin_t = Tensor::rand(&[128, 128], (tch::Kind::Float, tch::Device::Cpu));
+        let origin_t = Tensor::rand([128, 128], (tch::Kind::Float, tch::Device::Cpu));
         let t_copy = origin_t.copy();
         let serialized = write_safetensors(&[("test", origin_t)]).unwrap();
         let tensors = read_safetensors(&serialized).unwrap();

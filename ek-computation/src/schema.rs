@@ -32,7 +32,9 @@ diesel::table! {
         id -> Int4,
         hostname -> Text,
         device -> Text,
+        last_seen_at -> Timestamp,
         config -> Jsonb,
+        
     }
 }
 

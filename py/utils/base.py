@@ -13,7 +13,6 @@ logging.basicConfig(
 
 
 def getLogger(name: str):
-
     logger = logging.getLogger(name)
     return logger
 
@@ -47,7 +46,6 @@ async def get_db_pool() -> AsyncConnectionPool:
             open=False,
             connection_class=AsyncConnection[DictRow],
             kwargs={"row_factory": dict_row},
-            
         )
         await _pool.open()
     return _pool

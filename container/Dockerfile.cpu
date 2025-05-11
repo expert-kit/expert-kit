@@ -26,9 +26,11 @@ RUN  cargo new --lib ek-base
 RUN  cargo new --lib ek-benchmark
 RUN  cargo new --lib ek-computation
 RUN  cargo new --lib ek-db
+RUN  cargo new --lib ek-cli
 COPY ./ek-base/Cargo.toml ./ek-base/
 COPY ./ek-benchmark/Cargo.toml ./ek-benchmark/
 COPY ./ek-computation/Cargo.toml ./ek-computation/
+COPY ./ek-cli/Cargo.toml ./ek-cli/
 COPY ./ek-db/Cargo.toml ./ek-db/
 COPY ./Cargo.toml ./Cargo.lock ./
 RUN --mount=type=cache,target=/usr/local/cargo/registry  HTTP_PROXY=${OPT_PROXY} HTTPS_PROXY=${OPT_PROXY} cargo build --release --lib

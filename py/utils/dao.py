@@ -1,5 +1,28 @@
 import json
+import requests
 from utils.base import ConnType
+from pydantic import BaseModel
+import typing
+
+
+class ModelVital(BaseModel):
+    moe_layers: typing.Tuple[int, int]
+    routed_experts: int
+    hidden_dim: int
+    inter_dim: int
+
+
+class WeightServerClient:
+
+    def __init__(self, addr: str):
+        self.base = addr
+
+    def vital(self, model_name: str):
+        url = f"{self.base}/meta/vital/{model_name}"
+        res = requests.get(url)
+        if res.status_code != 200:
+            raise Exception(f"failed to get vital from {url}")
+        return ModelVital(**res.json())
 
 
 class ModelDAO:
@@ -21,7 +44,7 @@ class ModelDAO:
             (name, json.dumps(config)),
         )
         id = await res.fetchone()
-        return id['id']
+        return id["id"]
 
 
 class InstanceDAO:

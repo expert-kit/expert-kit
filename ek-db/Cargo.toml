@@ -12,3 +12,12 @@ bytes = { workspace = true }
 tokio = { workspace = true }
 ek_base = { path = "../ek-base" }
 once_cell = { workspace = true }
+serde_json = { workspace = true }
+serde = { workspace = true }
+memmap2 = { workspace = true }
+moka = { version = "0.12.10", features = ["future"] }
+actix-web = { workspace = true }
+reqwest = { workspace = true }
+actix-http = "3.10.0"
+pretty_env_logger = { workspace = true }
+log = { workspace = true }
