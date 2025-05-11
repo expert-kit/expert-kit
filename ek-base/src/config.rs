@@ -1,6 +1,11 @@
-use std::{net::SocketAddr, path::Path, sync::LazyLock};
+use std::{
+    net::SocketAddr,
+    path::{Path, PathBuf},
+    sync::LazyLock,
+};
 
 use config::{Config, Environment};
+use diesel::dsl::Set;
 use once_cell::sync::OnceCell;
 use serde::Deserialize;
 
@@ -103,14 +108,17 @@ pub fn env_source() -> Environment {
     });
     ENV_SRC.clone()
 }
-pub fn get_ek_settings() -> &'static Settings {
+pub fn get_ek_settings_base(src: &[&str]) -> &'static Settings {
     static CONFIG: OnceCell<Settings> = OnceCell::new();
     let res = CONFIG.get_or_init(|| {
         let mut settings = Config::builder();
-        let possible_config_files = vec!["/etc/expert-kit/config.yaml"];
-        for path in possible_config_files {
+        let candidates = src.iter().chain(["/etc/expert-kit/config.yaml"].iter());
+
+        for path in candidates {
             if Path::new(path).exists() {
+                log::info!("Loading config from {}", path);
                 settings = settings.add_source(config::File::with_name(path));
+                break;
             }
         }
         settings = settings.add_source(env_source());
@@ -119,6 +127,10 @@ pub fn get_ek_settings() -> &'static Settings {
         settings.try_deserialize::<Settings>().unwrap()
     });
     res
+}
+
+pub fn get_ek_settings() -> &'static Settings {
+    get_ek_settings_base(&[])
 }
 
 #[cfg(test)]

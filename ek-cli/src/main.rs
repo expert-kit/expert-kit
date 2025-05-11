@@ -7,6 +7,7 @@ mod schedule;
 
 use db::execute_db;
 use doctor::doctor_main;
+use ek_base::config::{self, get_ek_settings, get_ek_settings_base};
 use ek_computation::{controller::controller_main, worker::worker_main};
 use ek_db::weight_srv;
 
@@ -61,6 +62,8 @@ enum Command {
 struct RootCli {
     #[arg(long, default_value_t = false)]
     debug: bool,
+    #[arg(long, global = true)]
+    config: Option<String>,
     #[command(subcommand)]
     command: Command,
 }
@@ -72,6 +75,21 @@ async fn main() {
         unsafe { std::env::set_var("RUST_LOG", "debug") };
     }
     env_logger::init_from_env(env_logger::Env::default().default_filter_or("info"));
+    let mut config_src = vec![];
+    let env_config = std::option_env!("EK_CONFIG");
+    if let Some(path) = env_config {
+        config_src.push(path.to_string());
+    }
+    if let Some(path) = cli.config {
+        config_src.push(path.to_string());
+    }
+    get_ek_settings_base(
+        &config_src
+            .as_slice()
+            .iter()
+            .map(|x| x.as_str())
+            .collect::<Vec<_>>(),
+    );
     let res = match cli.command {
         Command::Worker {} => worker_main().await,
         Command::Controller {} => controller_main().await,
