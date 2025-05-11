@@ -6,10 +6,12 @@ import torch
 import argparse
 from expertkit_torch.grpc_client import ExpertKitClient
 
-layer_idx = 0
+layer_idx = 3
 
 
-def intercept_moe(with_ek: bool):
+def intercept_moe(ek_addr: str | None):
+    with_ek = ek_addr is not None
+
     class InterceptedDeepseekV3MoE(nn.Module):
         """
         A mixed expert module containing shared experts.
@@ -21,8 +23,12 @@ def intercept_moe(with_ek: bool):
             super().__init__()
             global layer_idx
             self.layer_id = layer_idx
+
+            print(f"load moe layer {self.layer_id}")
             layer_idx += 1
             self.config = config
+            if with_ek and InterceptedDeepseekV3MoE.client is None:
+                InterceptedDeepseekV3MoE.client = ExpertKitClient(ek_addr, 10)
             if not with_ek:
                 self.experts = nn.ModuleList(
                     [
@@ -49,10 +55,7 @@ def intercept_moe(with_ek: bool):
             total_seq_len, _ = hidden_states.shape
             for seq_idx in range(total_seq_len):
                 eids = topk_indices[seq_idx].tolist()
-                ids = [
-                    f"model-layer{self.layer_id}-expert{expert_idx}.safetensors"
-                    for expert_idx in eids
-                ]
+                ids = [f"ds-tiny/l{self.layer_id}-e{expert_idx}" for expert_idx in eids]
                 expert_ids.append(ids)
 
             for seq_idx in range(total_seq_len):
@@ -125,20 +128,24 @@ def intercept_moe(with_ek: bool):
     setattr(ds_v3, "DeepseekV3MoE", InterceptedDeepseekV3MoE)
 
 
-def evaluate(model_path=str, enable_ek=True):
-    tokenizer = AutoTokenizer.from_pretrained("deepseek-v3")
+def evaluate(model_path=str, ek_addr: str | None = None):
+    intercept_moe(ek_addr=ek_addr)
+    tokenizer = AutoTokenizer.from_pretrained(model_path)
     chat = [
         {"role": "user", "content": "Hello, how are you?"},
     ]
     model_config = ds_v3_config.DeepseekV3Config.from_pretrained(model_path)
-    model = ds_v3.DeepseekV3ForCausalLM.from_pretrained(model_path, config=model_config)
+    model = ds_v3.DeepseekV3ForCausalLM.from_pretrained(
+        model_path, config=model_config, local_files_only=True
+    )
     inputs = tokenizer.apply_chat_template(
         chat, tokenize=True, add_generation_prompt=True, return_tensors="pt"
     ).to(model.device)
-    import time
-
-    start = time.time()
-    outputs = model.generate(inputs, max_new_tokens=50)
+    # print(123,inputs)
+    generated_ids = model.generate(inputs, max_new_tokens=50)
+    output_ids = generated_ids[0].tolist()
+    content = tokenizer.decode(output_ids[:], skip_special_tokens=True).strip("\n")
+    print("output: ", content)
 
 
 if __name__ == "__main__":
@@ -150,10 +157,9 @@ if __name__ == "__main__":
         help="Path to the model directory.",
     )
     parser.add_argument(
-        "--enable_ek",
-        type=bool,
-        action=argparse.BooleanOptionalAction,
-        help="Enable ExpertKit.",
+        "--ek_addr",
+        type=str,
+        help="ExpertKit address. like http://localhost:5002",
     )
     args = parser.parse_args()
-    evaluate(model_path=args.model_path, enable_ek=args.enable_ek)
+    evaluate(model_path=args.model_path, ek_addr=args.ek_addr)
