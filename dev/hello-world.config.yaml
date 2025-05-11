@@ -1,0 +1,26 @@
+db_dsn: postgres://dev:dev@localhost:5432/dev
+hidden_dim: 16
+intermediate_dim: 8
+instance_name: local-test
+model_name: ds-tiny
+
+weight:
+  server:
+    addr: http://localhost:6543
+  cache:
+    Fs:
+      path: /tmp/expert-kit/cache
+
+worker:
+  id: local-dev
+  listen: 0.0.0.0
+  broadcast: 0.0.0.0
+  ports:
+    main: 51234
+
+controller:
+  listen: 0.0.0.0
+  broadcast: localhost
+  ports:
+    intra: 5001
+    inter: 5002

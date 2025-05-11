@@ -9,88 +9,70 @@
 ```bash
 git clone  https://github.com/expert-kit/expert-kit.git
 cd expert-kit
-cargo build
+
+
+# make sure these directories exist
+mkdir vendor
+mkdir -p /tmp/expert-kit/cache
+
+# make sure these environment variables are set, especially when you create a new terminal session.
+export LIBTORCH=$(realpath ./vendor/libtorch)
+export DYLD_FALLBACK_LIBRARY_PATH=$(realpath ./vendor/libtorch/lib)
+export LD_LIBRARY_PATH=$(realpath ./vendor/libtorch/lib)
+export DS_TINY_ROOT="$(realpath ./ek-db/resources/ds-tiny/)"
+export EK_CONFIG="$(realpath ./dev/hello-world.config.yaml)"
+
+
+# download libtorch from https://pytorch.org/, and place it in the vendor directory of expert-kit
+# Mac: https://download.pytorch.org/libtorch/cpu/libtorch-macos-arm64-2.7.0.zip
+# Linux: https://download.pytorch.org/libtorch/cpu/libtorch-cxx11-abi-shared-with-deps-2.7.0%2Bcpu.zip
+wget https://download.pytorch.org/libtorch/cpu/libtorch-macos-arm64-2.7.0.zip -O /tmp/libtorch.zip
+unzip /tmp/libtorch.zip -d ./vendor/
+
+
+# download the expert-kit source code
+# since we are using git lfs, make sure you have git-lfs installed and initialized
+git lfs fetch --all  # download the ds-tiny weight
+
+cargo build --release
 uv sync
 ```
 
-2. Download the `ds-tiny` model weights
+2. run weight server and meta db
 
 ```bash
-# we assume you are in the expert-kit root directory
-mkdir -p ./data
-wget <!TBD!> -o /tmp/ds-tiny.tar.gz
-tar -xvf /tmp/ds-tiny.tar.gz -C ./data/ds-tiny/
+# run meta db
+docker-compose -f dev/meta-db.docker-compose.yaml up -d
+
+# run weight server
+cargo run --bin ek-cli weight-server --model "${DS_TINY_ROOT}"
 ```
 
-3. Run the meta server and prepare the local test config
+3. prepare the metadata
 
 ```bash
-cd dev
-docker-compose up -d
-
-export CONVERTED_ROOT=$(realpath ./data/ek-ds-tiny)
-mkdir -p $CONVERTED_ROOT
-
-mkdir -p /etc/expert-kit
-
-cat > /etc/expert-kit/config.yaml <<EOF
-storage_provider: fs
-storage_fs_path: $CONVERTED_ROOT
-db_dsn: postgres://dev:dev@localhost:5432/dev
-hidden_dim: 256
-intermediate_dim: 128
-instance_name: local_test
-EOF
-
-```
-
-3. convert the model weights to expert-kit format and prepare the cluster meta.
-
-```bash
-
-# split the model weights in order to make expert-kit load weight in expert granularity.
-# This will cost a while, please be patient.
-# If the process is interrupted, you can resume it by running the same command again.
-python py/expert_split.py \
-    --model_dir ./data/ds-tiny \
-    --fs_path "$CONVERTED_ROOT" \
-    --model_idx_file model.safetensors.index.json \
-    --check_remote  \
-    --upload_missing
-
-# register the model weights to the meta server
-python py/create_model.py \
-    --model_name ds_tiny \
-    --fs_path "$CONVERTED_ROOT"
-
-# create the expert distribution config based on the static configs.
-python py/schedule_static.py \
-  --fs_path "$CONVERTED_ROOT"  \
-  --instance_name local_test \
-  --inventory ./dev/local.inventory.yaml \
-  --model_name ds_tiny
+cargo run --bin ek-cli db migrate
+cargo run --bin ek-cli model upsert --name ds-tiny
+cargo run --bin ek-cli schedule  static --inventory ./dev/local.inventory.yaml
 ```
 
 4. run the frontend controller and backend worker
 
 ```bash
-# lib torch will be dynamically loaded by the expert-kit, so you need to set the environment variable to point to the libtorch.so
-# for mac
-export DYLD_FALLBACK_LIBRARY_PATH=<LIB_TORCH_PATH>
-# for linux: TODO
-
 # run the frontend controller
-cargo run  --release --bin controller
-
+cargo run --bin ek-cli controller
 # create a new terminal session, then run worker
-EK_HOSTNAME=local-dev cargo run  --release --bin worker
+# pay attention to the required environment variable
+cargo run --bin ek-cli worker
 ```
 
 5. run a simple test
 
 ```bash
-
-cd ek-integration/expertkit_torch/tests
+cd ek-integration/expertkit_torch/
 # compare the result between the vanilla pytorch and expert-kit offloaded
-python3 test_correct.py
+python3 -m expertkit_torch.models.deepseek_v3.model --model_path "${DS_TINY_ROOT}" --ek_addr 127.0.0.1:5002
+
+# some random char would be generated
+# example: Seeds TESToth inventory inventory inventory inventory inventoryothothothothothothothothothothothothothothothothothothothothothothothoth апреothothoth conson conson conson conson conson地道 conson conson conson conson conson地道 conson conson
 ```
