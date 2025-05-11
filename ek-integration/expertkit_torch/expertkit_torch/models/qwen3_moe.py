@@ -20,15 +20,17 @@
 
 import argparse
 import time
+import torch
+import torch.nn.functional as F
+
+from typing import Optional
 from transformers import (
     AutoTokenizer,
     AutoModelForCausalLM,
 )
 from transformers.utils.logging import set_verbosity_error
 from transformers.models.qwen3_moe import modeling_qwen3_moe as qwen3_moe
-import torch
 from torch import nn
-import torch.nn.functional as F
 from expertkit_torch.grpc_client import ExpertKitClient
 
 set_verbosity_error()
@@ -47,6 +49,7 @@ def intercept_moe(with_ek: bool):
                 Intercepted.client = ExpertKitClient(config.ek_addr, 10)
             self.layer_id = layer_idx
             layer_idx += 1
+            layer_idx = layer_idx % config.num_hidden_layers
             self.num_experts = config.num_experts
             self.top_k = config.num_experts_per_tok
             self.norm_topk_prob = config.norm_topk_prob
@@ -83,9 +86,6 @@ def intercept_moe(with_ek: bool):
                     for expert_idx in eids
                 ]
                 expert_ids.append(ids)
-
-            for seq_idx in range(total_seq_len):
-                eids = selected_experts[seq_idx].tolist()
 
             # TODO
             outputs = self.client.forward_expert(
@@ -183,57 +183,149 @@ def intercept_moe(with_ek: bool):
     delattr(qwen3_moe, "Qwen3MoeSparseMoeBlock")
     setattr(qwen3_moe, "Qwen3MoeSparseMoeBlock", Intercepted)
 
+tokenizer:Optional[AutoTokenizer] = None
+model:Optional[AutoModelForCausalLM] = None
 
-def evaluate(*, model_path="./", prompt="What is MoE Model?", enable_ek=True):
+def evaluate_batch(*, model_path="./", prompts=None, enable_ek=True):
+    """
+    Batch inference version of the evaluate function.
+    
+    Args:
+        model_path: Path to the pretrained model
+        prompts: List of prompt strings for batch processing
+        enable_ek: Whether to enable expert knowledge
+    
+    Returns:
+        List of dictionaries containing thinking_content and content for each prompt
+    """
+    if prompts is None:
+        prompts = ["What is MoE Model?"]
+    
+    # Ensure prompts is a list
+    if isinstance(prompts, str):
+        prompts = [prompts]
+    
     intercept_moe(enable_ek)
-    # load the tokenizer and the model
-    tokenizer = AutoTokenizer.from_pretrained(
-        pretrained_model_name_or_path=model_path,
-    )
-    model = AutoModelForCausalLM.from_pretrained(
-        pretrained_model_name_or_path=model_path,
-        torch_dtype="auto",
-    )
 
-    # prepare the model input
-    messages = [{"role": "user", "content": prompt}]
-    text = tokenizer.apply_chat_template(
-        messages,
-        tokenize=False,
-        add_generation_prompt=True,
-        enable_thinking=True,  # Switches between thinking and non-thinking modes. Default is True.
-    )
-    model_inputs = tokenizer([text], return_tensors="pt").to(model.device)
-
-    # conduct text completion
+    # Load the tokenizer and the model only once
+    global tokenizer, model
+    if tokenizer is None:    
+        tokenizer = AutoTokenizer.from_pretrained(
+            pretrained_model_name_or_path=model_path,
+        )
+    if model is None:
+        model = AutoModelForCausalLM.from_pretrained(
+            pretrained_model_name_or_path=model_path,
+            torch_dtype="auto",
+        )
+    
+    # Prepare batch messages
+    batch_messages = []
+    for prompt in prompts:
+        messages = [{"role": "user", "content": prompt}]
+        text = tokenizer.apply_chat_template(
+            messages,
+            tokenize=False,
+            add_generation_prompt=True,
+            enable_thinking=True,
+        )
+        batch_messages.append(text)
+    
+    # Tokenize batch inputs with padding
+    model_inputs = tokenizer(
+        batch_messages, 
+        return_tensors="pt", 
+        padding=True, 
+        truncation=True
+    ).to(model.device)
+    
+    # Conduct batch text completion
     now = time.time()
-    generated_ids = model.generate(**model_inputs, max_new_tokens=50)
+    generated_ids = model.generate(
+        **model_inputs, 
+        max_new_tokens=50,
+        pad_token_id=tokenizer.eos_token_id  # Handle padding properly
+    )
     end = time.time()
-    print("elapsed time:", end - now)
-    output_ids = generated_ids[0][len(model_inputs.input_ids[0]) :].tolist()
-
-    # parsing thinking content
-    try:
-        # rindex finding 151668 (</think>)
-        index = len(output_ids) - output_ids[::-1].index(151668)
-    except ValueError:
-        print("value error")
-        index = 0
-
-    thinking_content = tokenizer.decode(
-        output_ids[:index], skip_special_tokens=True
-    ).strip("\n")
-    content = tokenizer.decode(output_ids[index:], skip_special_tokens=True).strip("\n")
-
-    print("thinking content:", thinking_content)
-    print("content:", content)
+    
+    # Calculate TPS metrics
+    generation_time = end - now
+    total_input_tokens = model_inputs.input_ids.numel()
+    total_output_tokens = generated_ids.numel() - total_input_tokens
+    
+    # Calculate different TPS metrics
+    total_tps = (total_input_tokens + total_output_tokens) / generation_time
+    output_tps = total_output_tokens / generation_time
+    
+    print(f"\n--- Test Size {len(prompts)} ---")
+    print(f"Batch inference elapsed time: {generation_time:.2f}s for {len(prompts)} prompts")
+    print(f"Average time per prompt: {generation_time/len(prompts):.3f}s")
+    print(f"Total tokens processed: {total_input_tokens + total_output_tokens} ({total_input_tokens} input + {total_output_tokens} output)")
+    print(f"Total TPS (input+output): {total_tps:.2f} tokens/second")
+    print(f"Output TPS (generation only): {output_tps:.2f} tokens/second")
+    print(f"Average TPS per prompt: {output_tps/len(prompts):.2f} tokens/second")
+    print()
+    
+    # Process each generated sequence in the batch
+    results = []
+    for i in range(len(prompts)):
+        # Extract output tokens for this sequence
+        input_length = len(model_inputs.input_ids[i])
+        output_ids = generated_ids[i][input_length:].tolist()
+        
+        # Remove padding tokens
+        if tokenizer.pad_token_id is not None:
+            output_ids = [token_id for token_id in output_ids if token_id != tokenizer.pad_token_id]
+        
+        # Parse thinking content
+        try:
+            # Find the last occurrence of 151668 (</think>)
+            index = len(output_ids) - output_ids[::-1].index(151668)
+        except ValueError:
+            print(f"Value error for prompt {i}")
+            index = 0
+        
+        thinking_content = tokenizer.decode(
+            output_ids[:index], skip_special_tokens=True
+        ).strip("\n")
+        content = tokenizer.decode(
+            output_ids[index:], skip_special_tokens=True
+        ).strip("\n")
+        
+        results.append({
+            "prompt": prompts[i],
+            "thinking_content": thinking_content,
+            "content": content,
+            "input_tokens": len(model_inputs.input_ids[i]),
+            "output_tokens": len(output_ids),
+        })
+    
+    # Print results for debugging
+    # if len(results) > 0:
+    #     print(f"Output of first result")
+    #     print(f"Prompt: {results[0]['prompt']}")
+    #     print(f"Input tokens: {results[0]['input_tokens']}, Output tokens: {result['output_tokens']}")
+    #     print(f"Thinking content: {results[0]['thinking_content']}")
+    #     print(f"Content: {results[0]['content']}")
+    #     print()
+    
+    # Return results with performance metrics
     return {
-        "thinking_content": thinking_content,
-        "content": content,
+        "results": results,
+        "performance": {
+            "total_time": generation_time,
+            "total_input_tokens": total_input_tokens,
+            "total_output_tokens": total_output_tokens,
+            "total_tps": total_tps,
+            "output_tps": output_tps,
+            "average_time_per_prompt": generation_time / len(prompts),
+            "effective_tps_per_prompt": output_tps / len(prompts),
+        }
     }
 
 
-if __name__ == "__main__":
+# Example usage:
+def main():
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--model_path",
@@ -248,4 +340,17 @@ if __name__ == "__main__":
         help="Enable ExpertKit.",
     )
     args = parser.parse_args()
-    evaluate(model_path=args.model_path, enable_ek=args.enable_ek)
+
+    test_prompts = [
+        "What is MoE Model?",
+        "Explain the benefits of mixture of experts.",
+        "How does MoE improve model efficiency?",
+        "Compare MoE with dense models.",
+    ] * 512
+    
+    test_batch_sizes = [1, 2, 4, 8, 16, 32, 64, 128, 256]
+    for batch_size in test_batch_sizes:
+        batch_result = evaluate_batch(prompts=test_prompts[:batch_size], model_path=args.model_path, enable_ek=args.enable_ek)
+
+if __name__ == "__main__":
+    main()
