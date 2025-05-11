@@ -5,7 +5,8 @@
         "**/.git/subtree-cache/**": true,
         "**/.hg/store/**": true,
         "vendor/**/*": true,
-        "data/**/*": true
+        "data/**/*": true,
+        "target/**/*":true
     },
     "files.exclude": {
         "**/.git": true,
@@ -14,15 +15,16 @@
         "**/.DS_Store": true,
         "**/Thumbs.db": true,
         "vendor/**/*": true,
-        "data/**/*": true
+        "data/**/*": true,
+        "target/**/*":true
     },
     "search.exclude": {
         "**/node_modules": true,
         "**/bower_components": true,
         "**/*.code-search": true,
-        "data": true,
+        "data/**/*": true,
         "vendor/**/*": true,
-        "target": true
+        "target/**/*":true
     },
     "rust-analyzer.server.extraEnv": {
         "LIBTORCH": "${workspaceFolder}/vendor/libtorch",

@@ -29,7 +29,7 @@ pub async fn worker_main() -> EKResult<()> {
     let srv = tokio::task::spawn(async move {
         let server = BasicExpertImpl::new();
         let settings = &get_ek_settings().worker;
-        let addr = format!("{}:{}", settings.listen.host, settings.listen.port)
+        let addr = format!("{}:{}", settings.listen, settings.ports.main)
             .parse()
             .unwrap();
         let err = tonic::transport::Server::builder()

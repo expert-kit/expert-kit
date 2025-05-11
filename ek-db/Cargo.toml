@@ -21,3 +21,4 @@ reqwest = { workspace = true }
 actix-http = "3.10.0"
 pretty_env_logger = { workspace = true }
 log = { workspace = true }
+dashmap = "6.1.0"

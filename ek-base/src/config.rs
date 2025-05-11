@@ -20,17 +20,31 @@ impl Addr {
 #[derive(Debug, Deserialize, Clone)]
 #[allow(unused)]
 pub struct ControllerSettings {
-    pub inter_listen: Addr,
-    pub intra_listen: Addr,
-    pub broadcast: Addr,
+    pub listen: String,
+    pub broadcast: String,
+    pub ports: ControllerPorts,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+#[allow(unused)]
+pub struct ControllerPorts {
+    pub intra: u16,
+    pub inter: u16,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+#[allow(unused)]
+pub struct WorkerPorts {
+    pub main: u16,
 }
 
 #[derive(Debug, Deserialize, Clone)]
 #[allow(unused)]
 pub struct WorkerSettings {
     pub id: Option<String>,
-    pub listen: Addr,
-    pub broadcast: Addr,
+    pub listen: String,
+    pub broadcast: String,
+    pub ports: WorkerPorts,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -121,6 +135,7 @@ db_dsn: postgres://dev:dev@localhost:5432/dev
 hidden_dim: 2048
 intermediate_dim: 768
 instance_name: qwen3_moe_30b_local_test
+model_name: ds-tiny
 
 weight:
   server:
@@ -131,23 +146,18 @@ weight:
 
 worker:
   id: local_test
-  listen:
-    host: 0.0.0.0
-    port: 51234
-  broadcast:
-    host: 0.0.0.0
-    port: 51234
+  listen: 0.0.0.0
+  broadcast: 0.0.0.0
+  ports:
+    main: 51234
 
 controller:
-  intra_listen:
-    host: 0.0.0.0
-    port: 5002
-  inter_listen:
-    host: 0.0.0.0
-    port: 5002
-  broadcast:
-    host: 0.0.0.0
-    port: 5002"#
+  listen: 0.0.0.0
+  broadcast: localhost
+  ports:
+    intra: 5001
+    inter: 5002
+"#
     }
 
     #[test]

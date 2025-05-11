@@ -16,8 +16,7 @@ pub trait ExpertDB {
     async fn insert(&mut self, id: &str, backend: ExpertBackend) -> EKResult<()>;
     async fn keys(&self) -> EKResult<Vec<String>>;
     async fn load(&self, id: &str) -> EKResult<Arc<ExpertBackend>>;
-    fn lock(&mut self, id: &str) -> EKResult<bool>;
-    fn unlock(&mut self, id: &str);
+    fn mark_loading(&mut self, id: &str) -> EKResult<bool>;
     fn loaded(&self) -> usize;
     fn loading(&self) -> usize;
     fn has(&self, id: &str) -> bool;
@@ -56,10 +55,7 @@ impl ExpertDB for ExpertDBImpl {
         is_loading || is_loaded
     }
 
-    fn unlock(&mut self, id: &str) {
-        self.loading.remove(id);
-    }
-    fn lock(&mut self, id: &str) -> EKResult<bool> {
+    fn mark_loading(&mut self, id: &str) -> EKResult<bool> {
         let locked = self.loading.get(id);
         if let Some(locked) = locked {
             if *locked {
