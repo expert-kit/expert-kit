@@ -1,8 +1,8 @@
-# Run Deepseek-Tiny model in Expert-Kit
+# Run Deepseek-Tiny model on Expert-Kit
 
 `DeepSeek-Tiny(ds-tiny)` is a education-only model used to demonstrate the capabilities of the Expert-Kit. It shares the same architecture as the full Deepseek-v3 model and is tuned to be smaller by reducing the number of parameters. `ds-tiny` only contains 1.5B parameters and can be easily run on a single machine, thus help users to quickly test the Expert-Kit features.
 
-## Step by Step Guide
+## Step by Step Guide (~20min)
 
 1. Setup expert-kit development environment and prepare source code
 
@@ -76,3 +76,5 @@ python3 -m expertkit_torch.models.deepseek_v3.model --model_path "${DS_TINY_ROOT
 # some random char would be generated
 # example: Seeds TESToth inventory inventory inventory inventory inventoryothothothothothothothothothothothothothothothothothothothothothothothoth апреothothoth conson conson conson conson conson地道 conson conson conson conson conson地道 conson conson
 ```
+
+Although no meaningful text generated here, we use the same code as the real deepseek-v3 model. To try some real-world examples which generate real output, please move to [qwen3 tutorial](./qwen3-moe-a3b-demo.md).
