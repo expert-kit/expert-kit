@@ -81,7 +81,6 @@ impl Doctor {
                 Ok(Ok(None)) => {
                     log::info!("✅ \tSuccess: {}", checker.success);
                 }
-
                 Ok(Ok(Some(w))) => {
                     log::error!("⚠️ \t   Warn: {}\n\thint:{}", checker.success, w,);
                 }

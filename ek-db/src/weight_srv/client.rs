@@ -1,5 +1,7 @@
 use ek_base::error::{EKError, EKResult};
 
+use crate::safetensor::transformer::VitalMeta;
+
 pub struct WeightSrvClient {
     pub client: reqwest::Client,
     pub addr: String,
@@ -35,6 +37,19 @@ impl WeightSrvClient {
         } else {
             Err(EKError::NotFound(format!(
                 "failed to load layer from {}",
+                url
+            )))
+        }
+    }
+    pub async fn load_meta_vital(&self, model: &str) -> EKResult<VitalMeta> {
+        let url = format!("{}/meta/vital/{}", self.addr, model);
+        let res = self.client.get(&url).send().await?;
+        if res.status().is_success() {
+            let res = serde_json::from_str::<VitalMeta>(&res.text().await?)?;
+            Ok(res)
+        } else {
+            Err(EKError::NotFound(format!(
+                "failed to load meta vital from {}",
                 url
             )))
         }

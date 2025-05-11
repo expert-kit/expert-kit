@@ -11,7 +11,10 @@ use crate::{
 use tonic::async_trait;
 
 use super::models::{self, NewExpert, NewInstance, NewModel, NewNode};
-use diesel::{ExpressionMethods, SelectableHelper, upsert::excluded};
+use diesel::{
+    ExpressionMethods, SelectableHelper,
+    upsert::excluded,
+};
 use diesel_async::{AsyncConnection, RunQueryDsl};
 use ek_base::error::{EKError, EKResult};
 use models::{Expert, Instance, Model, Node};
@@ -139,6 +142,46 @@ impl StateWriter for StateWriterImpl {
 }
 
 impl StateWriterImpl {
+    pub async fn expert_upsert(&self, node: NewExpert) -> EKResult<()> {
+        let mut conn = POOL.get().await?;
+        diesel::insert_into(schema::expert::table)
+            .values(node)
+            .on_conflict((
+                schema::expert::node_id,
+                schema::expert::instance_id,
+                schema::expert::expert_id,
+            ))
+            .do_update()
+            .set(schema::expert::expert_id.eq(excluded(schema::expert::expert_id)))
+            .execute(&mut conn)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn instance_upsert(&self, node: NewInstance) -> EKResult<Instance> {
+        let mut conn = POOL.get().await?;
+        let res = diesel::insert_into(schema::instance::table)
+            .values(node)
+            .on_conflict(schema::instance::name)
+            .do_update()
+            .set(schema::instance::name.eq(excluded(schema::instance::name)))
+            .returning(models::Instance::as_returning())
+            .get_result(&mut conn)
+            .await?;
+        Ok(res)
+    }
+    pub async fn node_upsert(&self, node: NewNode) -> EKResult<Node> {
+        let mut conn = POOL.get().await?;
+        let res = diesel::insert_into(schema::node::table)
+            .values(node)
+            .on_conflict(schema::node::hostname)
+            .do_update()
+            .set(schema::node::hostname.eq(excluded(schema::node::hostname)))
+            .returning(models::Node::as_returning())
+            .get_result(&mut conn)
+            .await?;
+        Ok(res)
+    }
     pub async fn model_upsert(&self, weight_server: &str, model_name: &str) -> EKResult<()> {
         let mut conn = POOL.get().await?;
         let new_model = NewModel {

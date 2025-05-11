@@ -1,4 +1,5 @@
 nodes:
-  - hostname: local-dev
+  - id: local-dev
     address: http://localhost:51234
     channel: grpc
+    device: cpu
