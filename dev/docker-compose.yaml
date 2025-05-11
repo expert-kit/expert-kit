@@ -13,13 +13,13 @@ services:
       timeout: 5s
       retries: 5
     ports:
-      - "5430:5432"
+      - "5432:5432"
     volumes:
       - ../data/pg:/var/lib/postgresql/data
     networks:
       - expert-kit-network
   ek-migrations:
-    image: ek-controller:latest
+    image: ek-op:latest
     depends_on:
       ek-postgres:
         condition: service_healthy
@@ -32,12 +32,13 @@ services:
     networks:
       - expert-kit-network
   ek-controller:
-    image: ek-controller:latest
+    image: ek-runtime:latest
     container_name: ek-controller
     restart: unless-stopped 
     depends_on:
       ek-postgres:
         condition: service_healthy
+    command: ["ek-cli", "controller"]
     ports:
       - 5001:5001
       - 5002:5002
@@ -50,11 +51,12 @@ services:
     networks:
       - expert-kit-network
   ek-worker:
-    image: ek-worker:latest
+    image: ek-runtime:latest
     container_name: ek-worker
     restart: unless-stopped
     depends_on:
       - ek-controller
+    command: ["ek-cli", "worker"]
     volumes:
       - ../data:/app/data
       - ./config:/etc/expert-kit:ro
@@ -62,7 +64,6 @@ services:
       - EK_HOSTNAME=local-dev
       - EK_CONTROL_PLAN_ADDR=http://ek-controller:5001
       - RUST_LOG=info
-      - LD_LIBRARY_PATH=/opt/torch/libtorch/lib:$LD_LIBRARY_PATH
     networks:
       - expert-kit-network
 

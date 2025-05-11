@@ -1,7 +1,7 @@
 ####################################
-# RUST BUILD STAGE
+# BASE STAGE
 ####################################
-FROM ubuntu:24.04 AS ek-rust-build
+FROM ubuntu:24.04 AS base
 
 ARG PROXY
 ARG TORCH_VERSION
@@ -34,6 +34,12 @@ RUN apt-get update && apt-get install -y \
     libssl-dev \
     libpq-dev\
     protobuf-compiler
+
+
+####################################
+# RUST BUILD STAGE
+####################################
+FROM base AS ek-rust-build
 
 # Prepare libtorch
 WORKDIR /
@@ -88,29 +94,7 @@ EOF
 # This stage is used for execute scripts, 
 # (e.g. model split, expert assignment, etc.)
 ####################################
-FROM ubuntu:24.04 AS ek-op
-
-ARG PROXY
-ARG TORCH_VERSION
-
-# Env variables
-## Proxy
-ENV HTTP_PROXY=${PROXY}
-ENV HTTPS_PROXY=${PROXY}
-## Others
-ENV PATH="/root/.cargo/bin:/root/.local/bin:${PATH}"
-
-# Prepare essential dependencies
-RUN apt-get update && apt-get install -y \
-    unzip  \
-    tar \
-    git \
-    wget \
-    curl \
-    libssl-dev \
-    libpq-dev\
-    protobuf-compiler && \
-    rm -rf /var/lib/apt/lists/*
+FROM base AS ek-op
 
 # Copy rust binary
 COPY --from=ek-rust-build /root/.cargo/bin /root/.cargo/bin
@@ -118,11 +102,13 @@ COPY --from=ek-rust-build /root/.cargo/bin /root/.cargo/bin
 # Prepare uv
 RUN curl -LsSf https://astral.sh/uv/install.sh | sh
 
+#TODO: Prepare python environment
+
 
 ####################################
 # RUNTIME STAGE
 ####################################
-FROM ubuntu:24.04 AS ek-runtime
+FROM base AS ek-runtime
 
 # Set env
 WORKDIR /ek
@@ -131,13 +117,38 @@ ENV LD_LIBRARY_PATH=$LIBTORCH/lib
 
 # Create default config with a readable format
 RUN mkdir -p /etc/expert-kit && cat > /etc/expert-kit/config.yaml <<EOF
-storage_provider: fs
-storage_fs_path: /app/data/converted
-db_dsn: postgres://dev:dev@postgres:5432/dev
-hidden_dim: 256
-intermediate_dim: 128
-instance_name: local_test
+db_dsn: postgres://dev:dev@localhost:5432/dev
+hidden_dim: 2048
+intermediate_dim: 768
+instance_name: qwen3_moe_30b_local_test
 model_name: ds-tiny
+
+weight:
+  server:
+    addr: http://?
+  cache:
+    Fs:
+      path: /
+
+worker:
+  id: local_test
+  listen:
+    host: 0.0.0.0
+    port: 51234
+  broadcast:
+    host: 0.0.0.0
+    port: 51234
+
+controller:
+  intra_listen:
+    host: 0.0.0.0
+    port: 5001
+  inter_listen:
+    host: 0.0.0.0
+    port: 5002
+  broadcast:
+    host: 0.0.0.0
+    port: 5002
 EOF
 
 # Copy libtorch from build stage
@@ -146,5 +157,6 @@ COPY --from=ek-rust-build /opt/torch/libtorch /opt/torch/libtorch
 # Copy binary from build stage
 COPY --from=ek-rust-build /app/target/release/controller /usr/local/bin/
 COPY --from=ek-rust-build /app/target/release/worker /usr/local/bin/
+COPY --from=ek-rust-build /app/target/release/ek-cli /usr/local/bin/
 
 ENTRYPOINT [ "" ]
