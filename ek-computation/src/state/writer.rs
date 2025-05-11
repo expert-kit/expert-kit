@@ -11,10 +11,7 @@ use crate::{
 use tonic::async_trait;
 
 use super::models::{self, NewExpert, NewInstance, NewModel, NewNode};
-use diesel::{
-    ExpressionMethods, SelectableHelper,
-    upsert::excluded,
-};
+use diesel::{ExpressionMethods, SelectableHelper, upsert::excluded};
 use diesel_async::{AsyncConnection, RunQueryDsl};
 use ek_base::error::{EKError, EKResult};
 use models::{Expert, Instance, Model, Node};

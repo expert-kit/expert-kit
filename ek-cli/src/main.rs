@@ -5,7 +5,7 @@ mod doctor;
 mod model;
 mod schedule;
 
-use db::execute_db_command;
+use db::execute_db;
 use doctor::doctor_main;
 use ek_computation::{controller::controller_main, worker::worker_main};
 use ek_db::weight_srv;
@@ -38,12 +38,6 @@ enum Command {
 
     #[command(about = "low-level db operations")]
     DB {
-        #[arg(
-            long,
-            global = true,
-            help = "Database connection string (postgres://user:password@host:port/dbname)"
-        )]
-        dsn: String,
         #[command(subcommand)]
         command: db::DBCommand,
     },
@@ -86,7 +80,7 @@ async fn main() {
             let model: &[PathBuf] = unsafe { transmute(model.as_slice()) };
             weight_srv::server::listen(model, (host, port)).await
         }
-        Command::DB { dsn, command } => execute_db_command(command, dsn.as_str()).await,
+        Command::DB { command } => execute_db(command).await,
         Command::Model { command } => execute_model(command).await,
         Command::Schedule { command } => execute_schedule(command).await,
     };
