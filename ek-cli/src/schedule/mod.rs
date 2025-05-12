@@ -76,8 +76,8 @@ async fn upsert_nodes(inventory: PathBuf) -> EKResult<Vec<i32>> {
 async fn execute_static_schedule(inventory: PathBuf) -> EKResult<()> {
     // mplement the static scheduling logic here
     let settings = get_ek_settings();
-    let model_name = settings.model_name.clone();
-    let instance_name = settings.instance_name.clone();
+    let model_name = settings.inference.model_name.clone();
+    let instance_name = settings.inference.instance_name.clone();
     let ws_addr = settings.weight.server.as_ref().unwrap().addr.clone();
     info!(
         "Running static schedule for model: {}, instance: {}, weight server: {}",

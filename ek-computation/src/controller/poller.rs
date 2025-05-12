@@ -57,7 +57,7 @@ impl StatePollerImpl {
         let settings = get_ek_settings();
 
         let instance = schema::instance::table
-            .filter(schema::instance::name.eq(settings.instance_name.clone()))
+            .filter(schema::instance::name.eq(settings.inference.instance_name.clone()))
             .first::<models::Instance>(&mut conn)
             .await?;
 
