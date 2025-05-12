@@ -34,6 +34,12 @@
     },
     "terminal.integrated.env.osx": {
         "LIBTORCH": "${workspaceFolder}/vendor/libtorch",
+        "ORT_LIB_LOCATION": "${workspaceFolder}/vendor/onnxruntime",
+        "DYLD_FALLBACK_LIBRARY_PATH": "${workspaceFolder}/vendor/libtorch/lib"
+    },
+    "terminal.integrated.env.linux": {
+        "LIBTORCH": "${workspaceFolder}/vendor/libtorch",
+        "LD_LIBRARY_PATH": "${workspaceFolder}/vendor/libtorch/lib",
         "ORT_LIB_LOCATION": "${workspaceFolder}/vendor/onnxruntime"
     },
     "cSpell.words": [

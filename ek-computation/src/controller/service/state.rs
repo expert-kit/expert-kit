@@ -47,7 +47,6 @@ impl StateServerImpl {
             if let Err(e) = e {
                 log::error!("worker ping error: {}", e);
             }
-            dbg!(msg);
         }
         log::warn!("worker ping stream closed for worker_id={}", id);
     }

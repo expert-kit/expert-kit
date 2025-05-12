@@ -59,7 +59,7 @@ impl StateClient {
         log::info!("start sync remote state");
         let req_stream = StateClient::get_request_stream(self.worker_id.to_owned())
             .await
-            .throttle(std::time::Duration::from_secs(1));
+            .throttle(std::time::Duration::from_secs(3));
         let res = self.cli.retrieve(req_stream).await.unwrap();
         let mut stream = res.into_inner();
         while let Some(msg) = stream.next().await {
