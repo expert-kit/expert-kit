@@ -91,6 +91,7 @@ pub enum OpenDALStorage {
 #[allow(unused)]
 pub struct Settings {
     pub db_dsn: String,
+    pub max_conn_size: usize,
     pub hidden_dim: usize,
     pub intermediate_dim: usize,
     pub instance_name: String,
@@ -144,6 +145,7 @@ mod test {
     fn get_example_config() -> &'static str {
         r#"
 db_dsn: postgres://dev:dev@localhost:5432/dev
+max_conn_size: 32
 hidden_dim: 2048
 intermediate_dim: 768
 instance_name: qwen3_moe_30b_local_test

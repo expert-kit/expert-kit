@@ -10,5 +10,5 @@ pub static POOL: Lazy<Pool<AsyncPgConnection>> = Lazy::new(|| {
     log::debug!("connect to database {}", settings.db_dsn.clone());
     let config =
         AsyncDieselConnectionManager::<diesel_async::AsyncPgConnection>::new(settings.db_dsn.clone());
-    Pool::builder(config).build().unwrap()
+    Pool::builder(config).max_size(settings.max_conn_size.clone()).build().unwrap()
 });
