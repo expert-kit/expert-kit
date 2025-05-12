@@ -1,8 +1,12 @@
-db_dsn: postgres://dev:dev@ek-postgres:5432/dev
-hidden_dim: 2048
-intermediate_dim: 768
-instance_name: qwen3_moe_30b_local_test
-model_name: qwen3
+inference:
+  instance_name: qwen3_moe_30b_local_test
+  model_name: qwen3
+  hidden_dim: 2048
+  intermediate_dim: 768
+  
+db:
+  db_dsn: postgres://dev:dev@localhost:5432/dev
+  max_conn_size: 32
 
 weight:
   server:
