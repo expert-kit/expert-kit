@@ -1,4 +1,5 @@
 db_dsn: postgres://dev:dev@localhost:5432/dev
+max_conn_size: 32
 hidden_dim: 16
 intermediate_dim: 8
 instance_name: local-test
