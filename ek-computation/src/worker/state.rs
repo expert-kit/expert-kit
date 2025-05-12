@@ -1,10 +1,5 @@
 use std::{sync::Arc, time};
 
-use ek_base::{config::get_ek_settings, error::EKResult};
-use ek_db::safetensor::{ExpertKey, SafeTensorDB};
-use tokio::{sync::RwLock, task::JoinSet};
-use tonic::transport::Channel;
-
 use crate::{
     proto::ek::{
         object::v1::Metadata,
@@ -15,7 +10,11 @@ use crate::{
     },
     x::EKInstance,
 };
-use tokio_stream::StreamExt;
+use ek_base::{config::get_ek_settings, error::EKResult};
+use ek_db::safetensor::{ExpertKey, SafeTensorDB};
+use tokio::{sync::RwLock, task::JoinSet};
+use tokio_stream::{Stream, StreamExt};
+use tonic::transport::Channel;
 
 use super::{
     core::{GlobalEKInstanceGate, get_instance_gate},
@@ -43,12 +42,25 @@ impl StateClient {
             gate,
         }
     }
+
+    async fn get_request_stream(worker_id: String) -> impl Stream<Item = RetrieveStateReq> {
+        let settings = get_ek_settings();
+        let dev = settings.worker.device.clone();
+        let dev = dev.unwrap_or("cpu".to_string());
+        tokio_stream::iter(1..usize::MAX).map(move |_| RetrieveStateReq {
+            id: worker_id.clone(),
+            addr: settings.worker.broadcast.clone(),
+            channel: "grpc".to_string(),
+            device: dev.clone(),
+        })
+    }
+
     pub async fn run(&mut self) -> EKResult<()> {
         log::info!("start sync remote state");
-        let req = RetrieveStateReq {
-            hostname: self.worker_id.clone(),
-        };
-        let res = self.cli.retrieve(req).await.unwrap();
+        let req_stream = StateClient::get_request_stream(self.worker_id.to_owned())
+            .await
+            .throttle(std::time::Duration::from_secs(1));
+        let res = self.cli.retrieve(req_stream).await.unwrap();
         let mut stream = res.into_inner();
         while let Some(msg) = stream.next().await {
             let msg = msg?;

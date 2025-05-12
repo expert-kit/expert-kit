@@ -34,8 +34,12 @@ message ExpertState {
 }
 
 message RetrieveStateReq {
-  string hostname = 1;
+  string id = 1;
+  string addr = 2;
+  string channel = 3;
+  string device = 4;
 }
+
 message RetrieveStateResp {
   message ExpertWithState {
     ek.object.v1.ExpertSlice target = 1;
@@ -49,6 +53,6 @@ message UpdateStateReq {
 message UpdateStateResp {}
 
 service StateService {
-  rpc Retrieve(RetrieveStateReq) returns (stream RetrieveStateResp);
+  rpc Retrieve(stream RetrieveStateReq) returns (stream RetrieveStateResp);
   rpc Update(UpdateStateReq) returns (UpdateStateResp);
 }
