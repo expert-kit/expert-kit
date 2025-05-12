@@ -1,6 +1,26 @@
-storage_provider: fs
-storage_fs_path: /app/data/qwen3/ek-qwen3
 db_dsn: postgres://dev:dev@ek-postgres:5432/dev
-hidden_dim:  2048
+hidden_dim: 2048
 intermediate_dim: 768
 instance_name: qwen3_moe_30b_local_test
+model_name: qwen3
+
+weight:
+  server:
+    addr: http://ek-weight-server:6543
+  cache:
+    Fs:
+      path: /tmp/expert-kit/cache
+
+worker:
+  id: local-dev
+  listen: 0.0.0.0
+  broadcast: ek-worker
+  ports:
+    main: 51234
+
+controller:
+  listen: 0.0.0.0
+  broadcast: ek-controller
+  ports:
+    intra: 5001
+    inter: 5002

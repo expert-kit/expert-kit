@@ -98,6 +98,7 @@ FROM base AS ek-op
 
 # Copy rust binary
 COPY --from=ek-rust-build /root/.cargo/bin /root/.cargo/bin
+COPY --from=ek-rust-build /app/target/release/ek-cli /usr/local/bin/
 
 # Prepare uv
 RUN curl -LsSf https://astral.sh/uv/install.sh | sh
@@ -114,6 +115,10 @@ FROM base AS ek-runtime
 WORKDIR /ek
 ENV LIBTORCH=/opt/torch/libtorch
 ENV LD_LIBRARY_PATH=$LIBTORCH/lib
+# Unset proxy
+ENV HTTP_PROXY=
+ENV HTTPS_PROXY=
+ENV NO_PROXY=
 
 # Create default config with a readable format
 RUN mkdir -p /etc/expert-kit && cat > /etc/expert-kit/config.yaml <<EOF

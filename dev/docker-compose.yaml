@@ -1,0 +1,95 @@
+version: "3"
+services:
+  ek-postgres:
+    container_name: ek-postgres
+    image: postgres:latest
+    environment:
+      POSTGRES_USER: dev
+      POSTGRES_PASSWORD: dev
+      POSTGRES_DB: dev
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "dev"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    ports:
+      - "5432:5432"
+    volumes:
+      - ../data/pg:/var/lib/postgresql/data
+    networks:
+      - expert-kit-network
+  ek-migrations:
+    image: ek-op:latest
+    depends_on:
+      ek-postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://dev:dev@ek-postgres:5432/dev
+    volumes:
+      - ../ek-computation/migrations:/app/ek-migrations
+    working_dir: /app/ek-migrations
+    command: diesel migration run --migration-dir /app/ek-migrations
+    networks:
+      - expert-kit-network
+  ek-weight-server:
+    image: ek-runtime:latest
+    container_name: ek-weight-server
+    restart: unless-stopped 
+    depends_on:
+      ek-postgres:
+        condition: service_healthy
+    command: ["ek-cli", "weight-server", "--model", "/ek/qwen3"]
+    ports:
+      - 6543:6543
+    volumes:
+      - ./local.inventory.yaml:/ek/local.inventory.yaml:ro
+      - ../data/qwen3/qwen3:/ek/qwen3
+      - ./config:/etc/expert-kit:ro
+    environment:
+      - RUST_LOG=info
+    networks:
+      - expert-kit-network
+  ek-controller:
+    image: ek-runtime:latest
+    container_name: ek-controller
+    restart: unless-stopped 
+    depends_on:
+      ek-postgres:
+        condition: service_healthy
+    command: ["ek-cli", "controller"]
+    ports:
+      - 5001:5001
+      - 5002:5002
+    volumes:
+      - ../data/qwen3/ek-qwen3:/ek/qwen3
+      - ./config:/etc/expert-kit:ro
+    environment:
+      - RUST_LOG=info
+    networks:
+      - expert-kit-network
+  ek-worker:
+    image: ek-runtime:latest
+    container_name: ek-worker
+    restart: unless-stopped
+    depends_on:
+      - ek-controller
+    command: ["ek-cli", "worker"]
+    volumes:
+      - ../data/qwen3/ek-qwen3:/ek/qwen3
+      - ./config:/etc/expert-kit:ro
+    environment:
+      - EK_HOSTNAME=local-dev
+      - EK_CONTROL_PLAN_ADDR=http://ek-controller:5001
+      - RUST_LOG=info
+    networks:
+      - expert-kit-network
+
+networks:
+  expert-kit-network:
+    driver: bridge
+
+volumes:
+  postgres_data:
+    driver: local
+  model_data:
+    driver: local
