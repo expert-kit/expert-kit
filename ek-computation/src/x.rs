@@ -30,8 +30,8 @@ impl Default for EKInstance {
     fn default() -> Self {
         let settings = get_ek_settings();
         Self {
-            dim: settings.hidden_dim,
-            hidden: settings.intermediate_dim,
+            dim: settings.inference.hidden_dim,
+            hidden: settings.inference.intermediate_dim,
             backend: ExpertBackendType::Torch,
         }
     }

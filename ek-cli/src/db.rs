@@ -32,7 +32,7 @@ pub enum DBCommand {
 
 pub async fn execute_db(cmd: DBCommand) -> EKResult<()> {
     let settings = get_ek_settings();
-    let mut conn = PgConnection::establish(&settings.db_dsn).unwrap();
+    let mut conn = PgConnection::establish(&settings.db.db_dsn).unwrap();
 
     match cmd {
         DBCommand::Migrate => run_migrations(&mut conn).await,
