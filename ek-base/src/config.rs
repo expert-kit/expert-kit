@@ -1,11 +1,6 @@
-use std::{
-    net::SocketAddr,
-    path::{Path, PathBuf},
-    sync::LazyLock,
-};
+use std::{net::SocketAddr, path::Path, sync::LazyLock};
 
 use config::{Config, Environment};
-use diesel::dsl::Set;
 use once_cell::sync::OnceCell;
 use serde::Deserialize;
 
@@ -50,6 +45,7 @@ pub struct WorkerSettings {
     pub listen: String,
     pub broadcast: String,
     pub ports: WorkerPorts,
+    pub device: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
