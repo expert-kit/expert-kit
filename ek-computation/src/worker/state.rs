@@ -82,7 +82,7 @@ impl StateClient {
         let edb = self.expert_db.clone();
         let expert = expert.clone();
         let instance = EKInstance::default();
-        let model_name = &settings.model_name;
+        let model_name = &settings.inference.model_name;
         js.spawn(async move {
             let id = expert.id.clone();
             log::debug!("load expert {}", &id);

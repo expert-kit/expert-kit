@@ -1,8 +1,12 @@
-db_dsn: postgres://dev:dev@localhost:5432/dev
-hidden_dim: 16
-intermediate_dim: 8
-instance_name: local-test
-model_name: ds-tiny
+inference:
+  hidden_dim: 16
+  intermediate_dim: 8
+  instance_name: local-test
+  model_name: ds-tiny
+
+db:
+  db_dsn: postgres://dev:dev@localhost:5432/dev
+  max_conn_size: 32
 
 weight:
   server:

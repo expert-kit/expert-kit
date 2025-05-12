@@ -19,6 +19,22 @@ impl Addr {
 
 #[derive(Debug, Deserialize, Clone)]
 #[allow(unused)]
+pub struct InferenceSettings {
+    pub instance_name: String,
+    pub model_name: String,
+    pub hidden_dim: usize,
+    pub intermediate_dim: usize
+}
+
+#[derive(Debug, Deserialize, Clone)]
+#[allow(unused)]
+pub struct DBSettings {
+    pub db_dsn: String,
+    pub max_conn_size: usize,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+#[allow(unused)]
 pub struct ControllerSettings {
     pub listen: String,
     pub broadcast: String,
@@ -86,11 +102,8 @@ pub enum OpenDALStorage {
 #[derive(Debug, Deserialize, Clone)]
 #[allow(unused)]
 pub struct Settings {
-    pub db_dsn: String,
-    pub hidden_dim: usize,
-    pub intermediate_dim: usize,
-    pub instance_name: String,
-    pub model_name: String,
+    pub inference: InferenceSettings,
+    pub db: DBSettings,
     pub weight: WeightSettings,
     pub controller: ControllerSettings,
     pub worker: WorkerSettings,
@@ -139,11 +152,15 @@ mod test {
 
     fn get_example_config() -> &'static str {
         r#"
-db_dsn: postgres://dev:dev@localhost:5432/dev
-hidden_dim: 2048
-intermediate_dim: 768
-instance_name: qwen3_moe_30b_local_test
-model_name: ds-tiny
+inference:
+  instance_name: qwen3_moe_30b_local_test
+  model_name: ds-tiny
+  hidden_dim: 2048
+  intermediate_dim: 768
+  
+db:
+  db_dsn: postgres://dev:dev@localhost:5432/dev
+  max_conn_size: 32
 
 weight:
   server:
