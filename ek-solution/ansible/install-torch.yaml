@@ -1,0 +1,5 @@
+---
+- hosts: all
+  become: yes # Needed for installing to /opt
+  roles:
+    - torch

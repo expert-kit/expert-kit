@@ -1,4 +1,6 @@
 {
+    "ansible.ansible.path": ".venv/bin/ansible",
+    "ansible.validation.lint.path": ".venv/bin/ansible-lint",
     "files.watcherExclude": {
         "**/.git/objects/**": true,
         "**/.git/subtree-cache/**": true,
@@ -57,5 +59,6 @@
         "safetensor",
         "safetensors",
         "serde"
-    ]
+    ],
+    "ansible.python.interpreterPath": "/root/Project/expert-kit/.venv/bin/python"
 }
