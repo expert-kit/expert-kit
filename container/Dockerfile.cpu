@@ -139,6 +139,6 @@ controller:
   ports:
     intra: 5001
     inter: 5002
-EOF 
+EOF
 
 ENTRYPOINT [ "" ]
