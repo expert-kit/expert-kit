@@ -39,7 +39,7 @@ async fn load_layer(
     let model = req.match_info().get("model").unwrap();
     let key = req.match_info().get("key").unwrap();
     let pretrained = wm.load_pretrained(model.to_owned()).await?;
-    let tv = pretrained.read().await.get_layer(key.to_owned()).await?;
+    let tv = pretrained.read().await.get_layer(key).await?;
     Ok(tv)
 }
 

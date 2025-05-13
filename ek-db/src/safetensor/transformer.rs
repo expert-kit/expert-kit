@@ -116,7 +116,10 @@ impl WeightMap {
         Ok(Self { map })
     }
     fn map_layer(&self, key: &String) -> String {
-        self.map.get(key).unwrap().to_owned()
+        self.map
+            .get(key)
+            .unwrap_or_else(|| panic!("weight map should contain key {}", key.as_str()))
+            .to_owned()
     }
 }
 
@@ -187,11 +190,21 @@ where
         })
     }
 
+    pub fn layer_names_except_experts(&self) -> Vec<String> {
+        let mut names = vec![];
+        for (k, _v) in self.weight_map.map.iter() {
+            if !k.contains("mlp.experts") {
+                names.push(k.to_string());
+            }
+        }
+        names
+    }
+
     pub fn config(&self) -> &ModelConfig {
         &self.model_config
     }
 
-    async fn get_safetensor(&self, key: String) -> EKResult<&SafeTensors<'data>> {
+    async fn get_safetensor(&self, key: &str) -> EKResult<&SafeTensors<'data>> {
         let _lg = self.ser_lk.lock().await;
         let fp = self.weight_map.map_layer(&key.to_string());
         let fp = self.desc.root.join(fp);
@@ -211,11 +224,16 @@ where
 
         Ok(res)
     }
+    pub async fn get_tensor(&self, key: &str) -> EKResult<TensorView<'data>> {
+        let st = self.get_safetensor(key).await?;
+        let tv = st.tensor(key)?;
+        Ok(tv)
+    }
 
-    pub async fn get_layer(&self, key: String) -> EKResult<Vec<u8>> {
-        let st = self.get_safetensor(key.clone()).await?;
+    pub async fn get_layer(&self, key: &str) -> EKResult<Vec<u8>> {
+        let st = self.get_safetensor(key).await?;
         let serialized = {
-            let tv = &st.tensor(key.as_str()).unwrap();
+            let tv = &st.tensor(key).unwrap();
             safetensors::tensor::serialize([("data", tv)].to_vec(), &None)?
         };
         Ok(serialized)
@@ -247,7 +265,7 @@ where
         let mut tensors = vec![];
 
         for key in keys.iter() {
-            let st = self.get_safetensor(key.clone()).await?;
+            let st = self.get_safetensor(key).await?;
             let tensor = st.tensor(key)?;
             tensors.push((key.clone(), tensor));
         }
@@ -276,7 +294,7 @@ mod test {
         let pretrained: TransformerPretrained =
             TransformerPretrained::try_from_desc(&desc).unwrap();
         let tensor = pretrained
-            .get_layer("model.layers.21.mlp.experts.94.down_proj.weight".to_owned())
+            .get_layer("model.layers.21.mlp.experts.94.down_proj.weight")
             .await
             .unwrap();
         let tv = safetensors::SafeTensors::deserialize(&tensor)
