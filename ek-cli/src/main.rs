@@ -3,16 +3,18 @@ use std::{mem::transmute, path::PathBuf};
 mod db;
 mod doctor;
 mod model;
+mod pretrain;
 mod schedule;
 
 use db::execute_db;
 use doctor::doctor_main;
-use ek_base::config::{self, get_ek_settings, get_ek_settings_base};
+use ek_base::config::get_ek_settings_base;
 use ek_computation::{controller::controller_main, worker::worker_main};
 use ek_db::weight_srv;
 
 use clap::{Parser, Subcommand};
 use model::execute_model;
+use pretrain::{PretrainCommand, execute_pretrain};
 use schedule::execute_schedule;
 extern crate pretty_env_logger;
 
@@ -35,6 +37,12 @@ enum Command {
         port: u16,
         #[arg(long)]
         model: Vec<PathBuf>,
+    },
+
+    #[command(about = "safetensor pretrain weight manipulation")]
+    Pretrain {
+        #[command(subcommand)]
+        command: PretrainCommand,
     },
 
     #[command(about = "low-level db operations")]
@@ -91,6 +99,7 @@ async fn main() {
             .collect::<Vec<_>>(),
     );
     let res = match cli.command {
+        Command::Pretrain { command } => execute_pretrain(command).await,
         Command::Worker {} => worker_main().await,
         Command::Controller {} => controller_main().await,
         Command::Doctor {} => doctor_main().await,

@@ -1,11 +1,6 @@
-use std::{
-    net::SocketAddr,
-    path::{Path, PathBuf},
-    sync::LazyLock,
-};
+use std::{net::SocketAddr, path::Path, sync::LazyLock};
 
 use config::{Config, Environment};
-use diesel::dsl::Set;
 use once_cell::sync::OnceCell;
 use serde::Deserialize;
 
@@ -28,7 +23,7 @@ pub struct InferenceSettings {
     pub instance_name: String,
     pub model_name: String,
     pub hidden_dim: usize,
-    pub intermediate_dim: usize
+    pub intermediate_dim: usize,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -66,6 +61,7 @@ pub struct WorkerSettings {
     pub listen: String,
     pub broadcast: String,
     pub ports: WorkerPorts,
+    pub device: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -197,7 +193,7 @@ controller:
             .build()
             .unwrap();
         let res = config.try_deserialize::<Settings>().unwrap();
-        assert_eq!(res.hidden_dim, 2048);
+        assert_eq!(res.inference.hidden_dim, 2048);
     }
 
     #[test]

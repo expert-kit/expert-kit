@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{sync::Arc, time};
 
 use crate::{
     proto::ek::object::v1::ExpertSlice,
@@ -139,6 +139,17 @@ impl StateWriter for StateWriterImpl {
 }
 
 impl StateWriterImpl {
+    pub async fn node_update_seen(&self, hostname: &str) -> EKResult<()> {
+        let mut conn = POOL.get().await?;
+        use schema::node::dsl;
+        diesel::update(schema::node::table)
+            .filter(dsl::hostname.eq(hostname))
+            .set(dsl::last_seen_at.eq(time::SystemTime::now()))
+            .execute(&mut conn)
+            .await?;
+        Ok(())
+    }
+
     pub async fn expert_upsert(&self, node: NewExpert) -> EKResult<()> {
         let mut conn = POOL.get().await?;
         diesel::insert_into(schema::expert::table)
