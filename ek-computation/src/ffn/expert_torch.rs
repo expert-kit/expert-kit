@@ -161,29 +161,29 @@ pub fn w8a16_activate(x: &tch::Tensor, s: &tch::Tensor, block_size: i64) -> tch:
     let n = shape[1];
     let pad = x_shape[0] % block_size;
     let s = s.reshape(&[shape[0], shape[1], 1]);
-    if pad > 0 {
+    let l = if pad > 0 {
         let t = tch::Tensor::zeros(&[pad, x_shape[1]], (x.kind(), x.device()));
         let lx = (tch::Tensor::cat(&[x, &t], 0))
-            .reshape(&[m, n, block_size * block_size])
-            .to_kind(tch::Kind::Float);
-        let o = (lx * s)
-            .to_kind(tch::Kind::BFloat16)
-            .reshape(&x_shape.clone());
-        return o;
-    } else {
-        let l = x
             .reshape(&[m, block_size, n, block_size])
             .permute(&[0, 2, 1, 3])
             .reshape(&[m, n, block_size * block_size])
             .to_kind(tch::Kind::Float);
-
-        let o = (l * s)
-            .to_kind(tch::Kind::BFloat16)
-            .reshape(&[m, n, block_size, block_size])
+        lx
+    } else {
+        let lx = x
+            .reshape(&[m, block_size, n, block_size])
             .permute(&[0, 2, 1, 3])
-            .reshape(&x_shape.clone());
-        return o;
-    }
+            .reshape(&[m, n, block_size * block_size])
+            .to_kind(tch::Kind::Float);
+        lx
+    };
+
+    let o = (l * s)
+        .to_kind(tch::Kind::BFloat16)
+        .reshape(&[m, n, block_size, block_size])
+        .permute(&[0, 2, 1, 3])
+        .reshape(&x_shape.clone());
+    o
 }
 
 unsafe impl Sync for TorchFFN {}
