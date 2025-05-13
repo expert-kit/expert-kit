@@ -1248,6 +1248,7 @@ dependencies = [
  "indicatif",
  "log",
  "pretty_env_logger",
+ "safetensors 0.5.3",
  "serde",
  "serde_json",
  "serde_yaml",

@@ -8,7 +8,7 @@ edition = "2024"
 clap = { workspace = true }
 ek_db = { path = "../ek-db" }
 ek_computation = { path = "../ek-computation" }
-ek_base= { path = "../ek-base" }
+ek_base = { path = "../ek-base" }
 tokio = { workspace = true }
 pretty_env_logger = { workspace = true }
 log = { workspace = true }
@@ -22,3 +22,5 @@ serde_json = { workspace = true }
 serde = { workspace = true }
 serde_yaml = "0.9.34"
 indicatif = "0.17.11"
+
+safetensors = { workspace = true }
