@@ -5,10 +5,7 @@ pub mod state;
 pub mod x;
 
 use super::{
-    proto::ek::worker::v1::{
-        computation_service_server::ComputationServiceServer,
-        state_service_client::StateServiceClient,
-    },
+    proto::ek::worker::v1::computation_service_server::ComputationServiceServer,
     worker::{server::BasicExpertImpl, state::StateClient},
 };
 use ek_base::{config::get_ek_settings, error::EKResult};
@@ -19,8 +16,7 @@ pub async fn worker_main() -> EKResult<()> {
         log::info!("ek hostname: {:}", worker_id);
         let control_endpoint = x::get_controller_addr();
         log::info!("control endpoint {:}", control_endpoint.uri());
-        let cli = StateServiceClient::connect(control_endpoint).await.unwrap();
-        let mut state_client = StateClient::new(cli, &worker_id);
+        let mut state_client = StateClient::new( control_endpoint, &worker_id);
         if let Err(e) = state_client.run().await {
             log::error!("state client error {:}", e);
         }
@@ -33,7 +29,11 @@ pub async fn worker_main() -> EKResult<()> {
             .parse()
             .unwrap();
         let err = tonic::transport::Server::builder()
-            .add_service(ComputationServiceServer::new(server))
+            .add_service(
+                ComputationServiceServer::new(server)
+                    .max_decoding_message_size(200 * 1024 * 1024)
+                    .max_encoding_message_size(200 * 1024 * 1024),
+            )
             .serve(addr)
             .await;
         if let Err(e) = err {

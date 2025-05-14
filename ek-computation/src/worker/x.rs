@@ -18,13 +18,6 @@ pub async fn load_expert_task(
     expert_key: &ExpertKey,
 ) -> EKResult<()> {
     let expert_str_key = expert_key.as_object_key();
-    // {
-    //     let read_guard = expert_db.read().await;
-    //     if read_guard.has(&expert_str_key) {
-    //         log::info!("expert {} already loaded or is loading", &expert_str_key);
-    //         return Ok(());
-    //     }
-    // }
     {
         let mut wg = expert_db.write().await;
         wg.mark_loading(&expert_str_key)?;

@@ -1,0 +1,51 @@
+- name: Ensure the weight cache directory exists
+  ansible.builtin.file:
+    path: "{{ ek_worker_weight_cache_dir }}"
+    state: directory
+    mode: "0755"
+    owner: root
+    group: root
+
+- name: Ensure the bin dir exists
+  ansible.builtin.file:
+    path: "{{ ek_worker_bin_dir }}"
+    state: directory
+    mode: "0755"
+    owner: root
+    group: root
+
+- name: Ensure the config dir exists
+  ansible.builtin.file:
+    path: "{{ ek_worker_config_dir }}"
+    state: directory
+    mode: "0755"
+    owner: root
+    group: root
+
+- name: Copy ek worker binary
+  ansible.builtin.copy:
+    src: "{{ ek_worker_bin }}"
+    dest: "{{ ek_worker_bin_dir }}/ek-cli"
+    mode: "0755"
+    owner: root
+    group: root
+
+- name: Copy ek worker config
+  ansible.builtin.copy:
+    src: "{{ ek_worker_config }}"
+    dest: "{{ ek_worker_config_dir }}/config.yaml"
+    mode: "0644"
+    owner: root
+    group: root
+
+- name: Prepare env
+  ansible.builtin.blockinfile:
+    path: "/root/.bashrc"
+    block: |
+      export PATH=$PATH:{{ ek_worker_bin_dir }}
+      export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/opt/libtorch/lib
+      export EK_WORKER_ID={{ inventory_hostname }}
+      export EK_WORKER_BROADCAST={{ ansible_ssh_host }}
+
+    marker_begin: "# {mark} ANSIBLE MANAGED BLOCK"
+    marker_end: "# {mark} ANSIBLE MANAGED BLOCK"

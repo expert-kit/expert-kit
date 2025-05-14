@@ -6,6 +6,8 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "accelerate>=1.6.0",
+    "ansible>=11.5.0",
+    "ansible-lint>=25.4.0",
     "duckdb>=1.2.1",
     "grpcio>=1.71.0",
     "grpcio-tools>=1.71.0",
@@ -21,7 +23,7 @@ dependencies = [
     "ruff>=0.9.10",
     "safetensors>=0.5.3",
     "torch==2.7.0",
-    "transformers>=4.51.3",
+    "transformers[cu128]>=4.51.3",
     "uvloop>=0.21.0",
 ]
 
@@ -38,6 +40,9 @@ torch = [
     { index = "pytorch-cpu", marker = "sys_platform == 'darwin'", extra = "cpu" },
     { index = "pytorch-cu128", marker = "sys_platform != 'darwin'", extra = "cu128" },
 ]
+[[tool.uv.index]]
+name = "tuna"
+url = "https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple"
 
 [[tool.uv.index]]
 name = "pytorch-cpu"

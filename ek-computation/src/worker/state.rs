@@ -12,9 +12,12 @@ use crate::{
 };
 use ek_base::{config::get_ek_settings, error::EKResult};
 use ek_db::safetensor::{ExpertKey, SafeTensorDB};
-use tokio::{sync::RwLock, task::JoinSet};
+use tokio::{
+    sync::{RwLock, Semaphore},
+    task::JoinSet,
+};
 use tokio_stream::{Stream, StreamExt};
-use tonic::transport::Channel;
+use tonic::transport::Endpoint;
 
 use super::{
     core::{GlobalEKInstanceGate, get_instance_gate},
@@ -24,22 +27,22 @@ use super::{
 pub struct StateClient {
     tensor_db: Arc<RwLock<SafeTensorDB>>,
     expert_db: Arc<RwLock<dyn ExpertDB + Sync + Send + 'static>>,
-    cli: StateServiceClient<Channel>,
     worker_id: String,
     gate: GlobalEKInstanceGate,
+    controller_addr: Endpoint,
 }
 
 impl StateClient {
-    pub fn new(cli: StateServiceClient<Channel>, worker_id: &str) -> Self {
+    pub fn new(addr: Endpoint, worker_id: &str) -> Self {
         let edb = get_expert_db();
         let gate = get_instance_gate();
         let tdb = SafeTensorDB::new_shared();
         Self {
             tensor_db: tdb,
             expert_db: edb,
-            cli,
             worker_id: worker_id.to_owned(),
             gate,
+            controller_addr: addr,
         }
     }
 
@@ -49,18 +52,21 @@ impl StateClient {
         let dev = dev.unwrap_or("cpu".to_string());
         tokio_stream::iter(1..usize::MAX).map(move |_| RetrieveStateReq {
             id: worker_id.clone(),
-            addr: settings.worker.broadcast.clone(),
+            addr: format!(
+                "http://{}:{}",
+                settings.worker.broadcast, settings.worker.ports.main
+            ),
             channel: "grpc".to_string(),
             device: dev.clone(),
         })
     }
 
-    pub async fn run(&mut self) -> EKResult<()> {
-        log::info!("start sync remote state");
+    async fn run_inner(&mut self) -> EKResult<()> {
+        let mut cli = StateServiceClient::connect(self.controller_addr.clone()).await?;
         let req_stream = StateClient::get_request_stream(self.worker_id.to_owned())
             .await
             .throttle(std::time::Duration::from_secs(3));
-        let res = self.cli.retrieve(req_stream).await.unwrap();
+        let res = cli.retrieve(req_stream).await?;
         let mut stream = res.into_inner();
         while let Some(msg) = stream.next().await {
             let msg = msg?;
@@ -76,20 +82,39 @@ impl StateClient {
         Ok(())
     }
 
-    fn spawn_expert_loading_task(&self, js: &mut JoinSet<EKResult<()>>, expert: &Metadata) {
+    pub async fn run(&mut self) -> EKResult<()> {
+        loop {
+            log::info!("start sync remote state");
+            let e = self.run_inner().await;
+            if let Err(e) = e {
+                log::error!("state client error {:?}", e);
+                tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+            }
+        }
+    }
+
+    fn spawn_expert_loading_task(
+        &self,
+        js: &mut JoinSet<EKResult<()>>,
+        expert: &Metadata,
+        token: Arc<Semaphore>,
+    ) {
         let settings = get_ek_settings();
         let tdb = self.tensor_db.clone();
         let edb = self.expert_db.clone();
         let expert = expert.clone();
         let instance = EKInstance::default();
         let model_name = &settings.inference.model_name;
+        let token = token.clone();
         js.spawn(async move {
+            let permit = token.acquire().await.unwrap();
             let id = expert.id.clone();
             log::debug!("load expert {}", &id);
             let ek = ExpertKey::from_expert_id(model_name, &expert.id)?;
             if let Err(e) = x::load_expert_task(tdb, edb.clone(), instance, &ek).await {
                 log::error!("error in load expert {}", e)
             }
+            drop(permit);
             Ok(())
         });
     }
@@ -122,8 +147,9 @@ impl StateClient {
         let now = time::Instant::now();
         log::info!("load new experts, len={}", exp_new.len());
         let mut js: JoinSet<EKResult<()>> = JoinSet::new();
+        let token = Arc::new(Semaphore::new(64));
         for expert in &exp_new {
-            self.spawn_expert_loading_task(&mut js, expert);
+            self.spawn_expert_loading_task(&mut js, expert, token.clone());
         }
 
         let edb = self.expert_db.clone();
@@ -163,7 +189,7 @@ impl StateClient {
         let exp_incoming = slice.expert_meta.clone();
         self.load_new_experts(&exp_incoming).await?;
 
-        let exp_current = self.gate.lock().await.current_experts().await?;
+        let exp_current = self.gate.read().await.current_experts().await?;
         self.remove_stale_experts(&exp_incoming, &exp_current).await;
         Ok(())
     }
