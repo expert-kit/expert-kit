@@ -34,10 +34,10 @@ Here are some tutorials to help you quickly start with Expert Kit.
 
 ## Performance
 
-| Model                  | Throughput (tokens/s) | Environment                                 |
-| ---------------------- | --------------------- | ------------------------------------------- |
-| DeepSeek-V3 671B W8A16 | 14.26                 | 1x4090(24G) + 5xAMD Epyc 7302               |
-| Qwen3-MoE-30B FP16     | 36.38                 | 1xA10(24G) + 1xAMD Epyc 7302 +1xKunPeng 920 |
+| Model                  | Throughput (tokens/s) | Environment                                         |
+| ---------------------- | --------------------- | --------------------------------------------------- |
+| DeepSeek-V3 671B W8A16 | 14.26                 | 1xNvidia 4090(24G) + 5xAMD EPYC 7302                |
+| Qwen3-MoE-30B FP16     | 36.38                 | 1xNvidia A10(24G) + 1xAMD EPYC 7302 + 1xKunpeng 920 |
 
 ## Repository Map
 
