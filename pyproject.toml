@@ -23,7 +23,7 @@ dependencies = [
     "ruff>=0.9.10",
     "safetensors>=0.5.3",
     "torch==2.7.0",
-    "transformers>=4.51.3",
+    "transformers[cu128]>=4.51.3",
     "uvloop>=0.21.0",
 ]
 

@@ -5,8 +5,24 @@ from torch import nn
 import torch
 import argparse
 from expertkit_torch.grpc_client import ExpertKitClient
+from transformers import modeling_utils as mu
 
 layer_idx = 3
+
+
+def intercept_missing():
+    """
+    Intercept the missing function in the DeepseekV3 model.
+    """
+
+    def missing_function(self, *args, **kwargs):
+        return ([], [])
+
+    # Intercept the missing function in the DeepseekV3 model
+    delattr(mu, "_find_mismatched_keys")
+    delattr(mu, "_find_missing_and_unexpected_keys")
+    setattr(mu, "_find_mismatched_keys", missing_function)
+    setattr(mu, "_find_missing_and_unexpected_keys", missing_function)
 
 
 def intercept_moe(ek_addr: str | None, model_name: str):
@@ -26,7 +42,7 @@ def intercept_moe(ek_addr: str | None, model_name: str):
             layer_idx += 1
             self.config = config
             if with_ek and InterceptedDeepseekV3MoE.client is None:
-                InterceptedDeepseekV3MoE.client = ExpertKitClient(ek_addr, 120)
+                InterceptedDeepseekV3MoE.client = ExpertKitClient(ek_addr, 240)
             if not with_ek:
                 self.experts = nn.ModuleList(
                     [
@@ -49,6 +65,7 @@ def intercept_moe(ek_addr: str | None, model_name: str):
             topk_indices: torch.Tensor,
             topk_weights: torch.Tensor,
         ):
+
             expert_ids = []
             total_seq_len, _ = hidden_states.shape
             for seq_idx in range(total_seq_len):
@@ -65,13 +82,19 @@ def intercept_moe(ek_addr: str | None, model_name: str):
             if self.client is None:
                 raise SystemError("client is None, please check the address")
 
+            import time
+
+            print(f"send at {self.layer_id} {hidden_states.shape=}")
+            start = time.time()
             hidden_states = hidden_states.to(torch.bfloat16)
 
             outputs = self.client.forward_expert(
                 expert_ids=expert_ids, hidden_state=hidden_states
             )
+            end = time.time()
             outputs = outputs.to(device=hidden_states.device, dtype=hidden_states.dtype)
             expanded_weights = topk_weights.unsqueeze(-1)
+            print(f"send at {self.layer_id} elapsed= {end - start},{outputs.shape}  {expanded_weights.shape=}")
             output = torch.sum(expanded_weights * outputs, dim=1)
 
             final_hidden_states = output.type(hidden_states.dtype).reshape(
@@ -85,10 +108,6 @@ def intercept_moe(ek_addr: str | None, model_name: str):
             topk_indices: torch.Tensor,
             topk_weights: torch.Tensor,
         ):
-            r"""
-            CALL FOR CONTRIBUTION! I don't have time to optimise this right now, but expert weights need to be fused
-            to not have to do a loop here (deepseek has 256 experts soooo yeah).
-            """
             final_hidden_states = torch.zeros_like(
                 hidden_states, dtype=topk_weights.dtype
             )
@@ -134,7 +153,11 @@ def intercept_moe(ek_addr: str | None, model_name: str):
     setattr(ds_v3, "DeepseekV3MoE", InterceptedDeepseekV3MoE)
 
 
+@torch.no_grad()
+@torch.inference_mode()
 def evaluate(model_path=str, ek_addr: str | None = None, model_name: str = ""):
+
+    intercept_missing()
     intercept_moe(ek_addr=ek_addr, model_name=model_name)
     tokenizer = AutoTokenizer.from_pretrained(model_path)
     chat = [
@@ -150,7 +173,7 @@ def evaluate(model_path=str, ek_addr: str | None = None, model_name: str = ""):
     model_config = ds_v3_config.DeepseekV3Config.from_pretrained(model_path)
 
     batch_messages = []
-    prompts = test_prompts[:48]
+    prompts = test_prompts[:1]
     for prompt in prompts:
         messages = [{"role": "user", "content": prompt}]
         text = tokenizer.apply_chat_template(
@@ -166,7 +189,6 @@ def evaluate(model_path=str, ek_addr: str | None = None, model_name: str = ""):
         config=model_config,
         local_files_only=True,
         device_map="cuda",
-        torch_dtype=torch.float16,
     )
     inputs = tokenizer.apply_chat_template(
         chat, tokenize=True, add_generation_prompt=True, return_tensors="pt"
@@ -180,7 +202,7 @@ def evaluate(model_path=str, ek_addr: str | None = None, model_name: str = ""):
         batch_messages, return_tensors="pt", padding=True, truncation=True
     ).to(model.device)
     generated_ids = model.generate(
-        **model_inputs, max_new_tokens=3, pad_token_id=tokenizer.eos_token_id
+        **model_inputs, max_new_tokens=1, pad_token_id=tokenizer.eos_token_id
     )
     now = time.time()
     output_ids = generated_ids[0].tolist()

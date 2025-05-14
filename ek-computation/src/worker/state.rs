@@ -17,7 +17,7 @@ use tokio::{
     task::JoinSet,
 };
 use tokio_stream::{Stream, StreamExt};
-use tonic::transport::Channel;
+use tonic::transport::Endpoint;
 
 use super::{
     core::{GlobalEKInstanceGate, get_instance_gate},
@@ -27,22 +27,22 @@ use super::{
 pub struct StateClient {
     tensor_db: Arc<RwLock<SafeTensorDB>>,
     expert_db: Arc<RwLock<dyn ExpertDB + Sync + Send + 'static>>,
-    cli: StateServiceClient<Channel>,
     worker_id: String,
     gate: GlobalEKInstanceGate,
+    controller_addr: Endpoint,
 }
 
 impl StateClient {
-    pub fn new(cli: StateServiceClient<Channel>, worker_id: &str) -> Self {
+    pub fn new(addr: Endpoint, worker_id: &str) -> Self {
         let edb = get_expert_db();
         let gate = get_instance_gate();
         let tdb = SafeTensorDB::new_shared();
         Self {
             tensor_db: tdb,
             expert_db: edb,
-            cli,
             worker_id: worker_id.to_owned(),
             gate,
+            controller_addr: addr,
         }
     }
 
@@ -61,12 +61,14 @@ impl StateClient {
         })
     }
 
-    pub async fn run(&mut self) -> EKResult<()> {
-        log::info!("start sync remote state");
+    async fn run_inner(&mut self) -> EKResult<()> {
+        let mut cli = StateServiceClient::connect(self.controller_addr.clone())
+            .await
+            .unwrap();
         let req_stream = StateClient::get_request_stream(self.worker_id.to_owned())
             .await
             .throttle(std::time::Duration::from_secs(3));
-        let res = self.cli.retrieve(req_stream).await.unwrap();
+        let res = cli.retrieve(req_stream).await.unwrap();
         let mut stream = res.into_inner();
         while let Some(msg) = stream.next().await {
             let msg = msg?;
@@ -80,6 +82,17 @@ impl StateClient {
             }
         }
         Ok(())
+    }
+
+    pub async fn run(&mut self) -> EKResult<()> {
+        loop {
+            log::info!("start sync remote state");
+            let e = self.run_inner().await;
+            if let Err(e) = e {
+                log::error!("state client error {:?}", e);
+                tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+            }
+        }
     }
 
     fn spawn_expert_loading_task(
