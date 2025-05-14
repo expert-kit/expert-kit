@@ -1,13 +1,13 @@
-use std::{collections::HashMap, mem::transmute, path::PathBuf, sync::Arc};
+use std::{collections::HashMap, fmt::format, path::PathBuf};
 
 use actix_web::{HttpResponse, Responder, body::BoxBody, http::header::ContentType};
 use ek_base::error::{EKError, EKResult};
-use memmap2::{Mmap, MmapOptions};
-use moka::future::Cache;
-use once_cell::sync::OnceCell;
+use memmap2::MmapOptions;
 use safetensors::{SafeTensors, tensor::TensorView};
 use serde::{Deserialize, Serialize};
-use tokio::fs::File;
+use tokio::{fs::File, sync::Mutex};
+
+use super::memcache::{SafeTensorWithData, SafetensorCache};
 #[derive(Debug, Clone)]
 pub struct ModelConfig {
     map: std::collections::HashMap<String, serde_json::Value>,
@@ -115,8 +115,8 @@ impl WeightMap {
             });
         Ok(Self { map })
     }
-    fn map_layer(&self, key: &String) -> String {
-        self.map.get(key).unwrap().to_owned()
+    fn map_layer(&self, key: &String) -> Option<String> {
+        self.map.get(key).map(|e| e.clone())
     }
 }
 
@@ -134,28 +134,6 @@ impl Default for TransformerModelDesc {
             weight_map_name: "model.safetensors.index.json".to_string(),
             config_name: "config.json".to_string(),
         }
-    }
-}
-
-#[derive(Debug)]
-struct SafeTensorWithData<'data> {
-    st: OnceCell<Arc<SafeTensors<'data>>>,
-    mmap: Mmap,
-}
-
-impl<'data> SafeTensorWithData<'data> {
-    fn new(mmap: Mmap) -> Self {
-        Self {
-            st: OnceCell::new(),
-            mmap,
-        }
-    }
-    fn safetensors(&'data self) -> Arc<SafeTensors<'data>> {
-        let st = self.st.get_or_init(|| {
-            let st = safetensors::SafeTensors::deserialize(&self.mmap).unwrap();
-            Arc::new(st)
-        });
-        st.clone()
     }
 }
 
@@ -188,7 +166,8 @@ pub struct TransformerPretrained<'data> {
     desc: TransformerModelDesc,
     weight_map: WeightMap,
     model_config: ModelConfig,
-    safetensors_cache: Cache<PathBuf, Arc<SafeTensorWithData<'data>>>,
+    safetensors_cache: SafetensorCache<'data>, // SafeTensorCaCache<PathBuf, Arc<SafeTensorWithData<'data>>>,
+    ser_lk: Mutex<()>,
 }
 
 impl<'data> TransformerPretrained<'data>
@@ -203,39 +182,65 @@ where
             desc: desc.clone(),
             weight_map,
             model_config,
-            safetensors_cache: Cache::new(100000),
+            safetensors_cache: SafetensorCache::new(),
+            ser_lk: Mutex::new(()),
         })
+    }
+
+    pub fn layer_names_except_experts(&self) -> Vec<String> {
+        let mut names = vec![];
+        for (k, _v) in self.weight_map.map.iter() {
+            if !k.contains("mlp.experts") {
+                names.push(k.to_string());
+            }
+        }
+        names
     }
 
     pub fn config(&self) -> &ModelConfig {
         &self.model_config
     }
 
-    async fn get_safetensor(&self, key: String) -> EKResult<Arc<SafeTensorWithData<'data>>> {
-        let fp = self.weight_map.map_layer(&key.to_string());
+    fn has_layer(&self, key: &str) -> bool {
+        self.weight_map.map.contains_key(key)
+    }
+
+    async fn get_safetensor(&self, key: &str) -> EKResult<&SafeTensors<'data>> {
+        let _lg = self.ser_lk.lock().await;
+        let fp = self
+            .weight_map
+            .map_layer(&key.to_string())
+            .ok_or(EKError::NotFound(format!(
+                "safetensor not found for layer: {}",
+                key
+            )))?;
         let fp = self.desc.root.join(fp);
-        let hit = self.safetensors_cache.contains_key(&fp.clone());
+        let fp_str = fp.to_str().unwrap();
+        let hit = self.safetensors_cache.contains_key(fp_str);
         if !hit {
             let file = File::open(fp.clone()).await.unwrap();
             let buffer = unsafe { MmapOptions::new().map(&file).unwrap() };
             let st = SafeTensorWithData::new(buffer);
-            let st = Arc::new(st);
-            self.safetensors_cache.insert(fp.clone(), st.clone()).await;
+            // let st = Arc::new(st);
+            self.safetensors_cache.insert(fp_str, st);
         }
         let res = self
             .safetensors_cache
-            .get(&fp)
-            .await
+            .get(fp_str)
             .ok_or(EKError::NotFound("safetensor not found".to_string()))?;
 
         Ok(res)
     }
+    pub async fn get_tensor(&self, key: &str) -> EKResult<TensorView<'data>> {
+        let st = self.get_safetensor(key).await?;
+        let tv = st.tensor(key)?;
+        Ok(tv)
+    }
 
-    pub async fn get_layer(&self, key: String) -> EKResult<Vec<u8>> {
-        let st = self.get_safetensor(key.clone()).await?;
+    pub async fn get_layer(&self, key: &str) -> EKResult<Vec<u8>> {
+        let st = self.get_safetensor(key).await?;
         let serialized = {
-            let st: &SafeTensorWithData = unsafe { transmute(st.as_ref()) };
-            let tv = &st.safetensors().tensor(key.as_str()).unwrap();
+            let tv = &st.tensor(key).unwrap();
             safetensors::tensor::serialize([("data", tv)].to_vec(), &None)?
         };
         Ok(serialized)
@@ -250,16 +255,28 @@ where
             "model.layers.{}.mlp.experts.{}.up_proj.weight",
             layer_id, expert_id
         );
+        let key_up_scale = format!("{}_scale_inv", key_up);
+
         let key_gate = format!(
             "model.layers.{}.mlp.experts.{}.down_proj.weight",
             layer_id, expert_id
         );
+        let key_gate_scale = format!("{}_scale_inv", key_gate);
         let key_down = format!(
             "model.layers.{}.mlp.experts.{}.gate_proj.weight",
             layer_id, expert_id
         );
 
-        Ok(vec![key_down, key_gate, key_up])
+        let key_down_scale = format!("{}_scale_inv", key_down);
+
+        Ok(vec![
+            key_down,
+            key_gate,
+            key_up,
+            key_up_scale,
+            key_gate_scale,
+            key_down_scale,
+        ])
     }
 
     pub async fn get_expert(&self, layer_id: usize, eid: usize) -> EKResult<Vec<u8>> {
@@ -267,9 +284,11 @@ where
         let mut tensors = vec![];
 
         for key in keys.iter() {
-            let st = self.get_safetensor(key.clone()).await?;
-            let st: &SafeTensorWithData = unsafe { transmute(st.as_ref()) };
-            let tensor = st.safetensors().tensor(key)?;
+            if !self.has_layer(key) {
+                continue;
+            }
+            let st = self.get_safetensor(key).await?;
+            let tensor = st.tensor(key)?;
             tensors.push((key.clone(), tensor));
         }
         let serialized = safetensors::tensor::serialize(tensors, &None)?;
@@ -279,7 +298,10 @@ where
 
 #[cfg(test)]
 mod test {
+    use std::sync::Arc;
+
     use ek_base::utils::workspace_root;
+    use tokio::task::JoinSet;
 
     use crate::safetensor::transformer::{TransformerModelDesc, TransformerPretrained};
 
@@ -294,9 +316,10 @@ mod test {
         let pretrained: TransformerPretrained =
             TransformerPretrained::try_from_desc(&desc).unwrap();
         let tensor = pretrained
-            .get_layer("model.layers.21.mlp.experts.94.down_proj.weight".to_owned())
+            .get_layer("model.layers.9.mlp.experts.94.down_proj.weight")
             .await
             .unwrap();
+
         let tv = safetensors::SafeTensors::deserialize(&tensor)
             .unwrap()
             .tensor("data")
@@ -315,22 +338,45 @@ mod test {
         };
         let pretrained: TransformerPretrained =
             TransformerPretrained::try_from_desc(&desc).unwrap();
-        let tensor = pretrained.get_expert(21, 97).await.unwrap();
+        let tensor = pretrained.get_expert(9, 97).await.unwrap();
         let st = safetensors::SafeTensors::deserialize(&tensor).unwrap();
         let names = st.names();
         assert_eq!(names.len(), 3);
         let expected = vec![
-            "model.layers.21.mlp.experts.97.gate_proj.weight",
-            "model.layers.21.mlp.experts.97.down_proj.weight",
-            "model.layers.21.mlp.experts.97.up_proj.weight",
+            "model.layers.9.mlp.experts.97.gate_proj.weight",
+            "model.layers.9.mlp.experts.97.down_proj.weight",
+            "model.layers.9.mlp.experts.97.up_proj.weight",
         ];
 
         for name in expected {
             assert!(names.contains(&&name.to_string()));
         }
         let tensor = st
-            .tensor("model.layers.21.mlp.experts.97.down_proj.weight")
+            .tensor("model.layers.9.mlp.experts.97.down_proj.weight")
             .unwrap();
         assert_eq!(tensor.shape(), &[16, 8]);
+    }
+
+    #[tokio::test]
+    async fn pressure_test() {
+        let root = workspace_root();
+        let test_model = root.join("ek-db").join("resources").join("ds-tiny");
+        let desc = TransformerModelDesc {
+            root: test_model.clone(),
+            ..TransformerModelDesc::default()
+        };
+        let pretrained: TransformerPretrained =
+            TransformerPretrained::try_from_desc(&desc).unwrap();
+        let pretrained = Arc::new(pretrained);
+
+        let mut js = JoinSet::new();
+
+        for layer in 3..9{
+            for expert in 1..10 {
+                let p = pretrained.clone();
+                js.spawn(async move { p.get_expert(layer, expert).await });
+            }
+        }
+        js.join_all().await;
     }
 }

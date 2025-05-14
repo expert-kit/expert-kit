@@ -7,7 +7,6 @@ use opendal::{
 pub fn op_from_settings(config: &OpenDALStorage) -> opendal::Operator {
     match config {
         OpenDALStorage::S3(s3_cfg) => {
-            log::info!("using s3 as weight store");
             let builder = opendal_s3::default()
                 .access_key_id(s3_cfg.access_key_id.as_str())
                 .secret_access_key(s3_cfg.access_key_secret.as_str())
@@ -16,7 +15,6 @@ pub fn op_from_settings(config: &OpenDALStorage) -> opendal::Operator {
             Operator::new(builder).unwrap().finish()
         }
         OpenDALStorage::Fs(fs_cfg) => {
-            log::info!("using local file system as weight store");
             let builder = Fs::default().root(&fs_cfg.path);
             Operator::new(builder).unwrap().finish()
         }

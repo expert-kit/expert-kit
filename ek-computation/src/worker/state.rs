@@ -1,11 +1,5 @@
 use std::{sync::Arc, time};
 
-use ek_base::{config::get_ek_settings, error::EKResult};
-use ek_db::safetensor::{ExpertKey, SafeTensorDB};
-use log::info;
-use tokio::{sync::RwLock, task::JoinHandle};
-use tonic::transport::Channel;
-
 use crate::{
     proto::ek::{
         object::v1::Metadata,
@@ -16,7 +10,11 @@ use crate::{
     },
     x::EKInstance,
 };
-use tokio_stream::StreamExt;
+use ek_base::{config::get_ek_settings, error::EKResult};
+use ek_db::safetensor::{ExpertKey, SafeTensorDB};
+use tokio::{sync::RwLock, task::JoinSet};
+use tokio_stream::{Stream, StreamExt};
+use tonic::transport::Channel;
 
 use super::{
     core::{GlobalEKInstanceGate, get_instance_gate},
@@ -44,19 +42,31 @@ impl StateClient {
             gate,
         }
     }
+
+    async fn get_request_stream(worker_id: String) -> impl Stream<Item = RetrieveStateReq> {
+        let settings = get_ek_settings();
+        let dev = settings.worker.device.clone();
+        let dev = dev.unwrap_or("cpu".to_string());
+        tokio_stream::iter(1..usize::MAX).map(move |_| RetrieveStateReq {
+            id: worker_id.clone(),
+            addr: settings.worker.broadcast.clone(),
+            channel: "grpc".to_string(),
+            device: dev.clone(),
+        })
+    }
+
     pub async fn run(&mut self) -> EKResult<()> {
-        let req = RetrieveStateReq {
-            hostname: self.worker_id.clone(),
-        };
-        let res = self.cli.retrieve(req).await.unwrap();
+        log::info!("start sync remote state");
+        let req_stream = StateClient::get_request_stream(self.worker_id.to_owned())
+            .await
+            .throttle(std::time::Duration::from_secs(3));
+        let res = self.cli.retrieve(req_stream).await.unwrap();
         let mut stream = res.into_inner();
         while let Some(msg) = stream.next().await {
             let msg = msg?;
             if let Some(state) = msg.state {
                 match self.handle_states(state).await {
-                    Ok(_) => {
-                        info!("sync remote state success");
-                    }
+                    Ok(_) => {}
                     Err(e) => {
                         log::error!("sync remote state error {:?}", e);
                     }
@@ -66,32 +76,20 @@ impl StateClient {
         Ok(())
     }
 
-    async fn spawn_expert_loading_task(&self, expert: &Metadata) {
+    fn spawn_expert_loading_task(&self, js: &mut JoinSet<EKResult<()>>, expert: &Metadata) {
         let settings = get_ek_settings();
         let tdb = self.tensor_db.clone();
         let edb = self.expert_db.clone();
         let expert = expert.clone();
-        // TODO(multi-model): read instance here
         let instance = EKInstance::default();
-        let model_name = &settings.model_name;
-        let _model: JoinHandle<EKResult<()>> = tokio::spawn(async move {
-            let now = time::Instant::now();
+        let model_name = &settings.inference.model_name;
+        js.spawn(async move {
             let id = expert.id.clone();
-            log::info!("load expert {}", &id);
+            log::debug!("load expert {}", &id);
             let ek = ExpertKey::from_expert_id(model_name, &expert.id)?;
             if let Err(e) = x::load_expert_task(tdb, edb.clone(), instance, &ek).await {
                 log::error!("error in load expert {}", e)
             }
-            let rg = edb.read().await;
-            let loaded = rg.loaded();
-            let loading = rg.loading();
-            log::info!(
-                "load expert {} done, currently loaded={} loading={}, elapsed_ms={},",
-                &id,
-                loaded,
-                loading,
-                now.elapsed().as_millis()
-            );
             Ok(())
         });
     }
@@ -107,8 +105,7 @@ impl StateClient {
 
     async fn get_new_experts(&self, incoming: &[Metadata]) -> Vec<Metadata> {
         let mut diff = vec![];
-        let edb = self.expert_db.clone();
-        let rg = edb.read().await;
+        let rg = self.expert_db.read().await;
         for expert in incoming {
             if !rg.has(&expert.id) {
                 diff.push(expert.clone());
@@ -117,25 +114,57 @@ impl StateClient {
         diff
     }
 
+    async fn load_new_experts(&mut self, exp_incoming: &[Metadata]) -> EKResult<()> {
+        let exp_new = self.get_new_experts(exp_incoming).await;
+        if exp_new.is_empty() {
+            return Ok(());
+        }
+        let now = time::Instant::now();
+        log::info!("load new experts, len={}", exp_new.len());
+        let mut js: JoinSet<EKResult<()>> = JoinSet::new();
+        for expert in &exp_new {
+            self.spawn_expert_loading_task(&mut js, expert);
+        }
+
+        let edb = self.expert_db.clone();
+        let v = tokio::spawn(async move {
+            let start = time::Instant::now();
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                {
+                    let rg = edb.read().await;
+                    let loaded = rg.loaded();
+                    let loading = rg.loading();
+                    log::info!(
+                        "loading progress: loaded={} loading={} elapsed_ms={},",
+                        loaded,
+                        loading,
+                        start.elapsed().as_millis()
+                    );
+                }
+            }
+        });
+
+        js.join_all().await;
+        v.abort();
+        log::info!(
+            "experts is loaded. elapsed_ms={}",
+            now.elapsed().as_millis()
+        );
+        Ok(())
+    }
+
     async fn handle_states(&mut self, state: ExpertWithState) -> EKResult<()> {
-        let exp_current = self.gate.lock().await.current_experts().await?;
         if state.target.is_none() {
             return Ok(());
         }
         let slice = state.target.unwrap();
-        let exp_incoming = slice.expert_meta.clone();
-        let exp_new = self.get_new_experts(&exp_incoming).await;
-        for expert in exp_new {
-            if exp_current.contains(&expert.id) {
-                // update
-                // TODO: change replication?
-                continue;
-            }
-            self.spawn_expert_loading_task(&expert).await;
-        }
 
-        self.remove_stale_experts(&exp_incoming, &exp_current)
-            .await;
+        let exp_incoming = slice.expert_meta.clone();
+        self.load_new_experts(&exp_incoming).await?;
+
+        let exp_current = self.gate.lock().await.current_experts().await?;
+        self.remove_stale_experts(&exp_incoming, &exp_current).await;
         Ok(())
     }
 }

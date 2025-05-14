@@ -97,10 +97,13 @@ where
 {
     pub up_w: T,
     pub up_b: Option<T>,
+    pub up_scale: Option<T>,
     pub down_w: T,
     pub down_b: Option<T>,
+    pub down_scale: Option<T>,
     pub gate_w: T,
     pub gate_b: Option<T>,
+    pub gate_scale: Option<T>,
 }
 
 impl<T> Display for ExpertWeight<T>
@@ -120,19 +123,22 @@ where
 
 impl<T: EkTensor + FromSafeTensor> ExpertWeight<T> {
     pub fn from_safetensor(st: &safetensors::SafeTensors) -> EKResult<Self> {
-        let up_w = T::lookup_suffix(st, &["w1.weight","up_proj.weight"])
+        let up_w = T::lookup_suffix(st, &["w1.weight", "up_proj.weight"])
             .ok_or(EKError::ExpertWeightNotFound("w1/up_w".to_owned()))?;
-        let down_w = T::lookup_suffix(st, &["w2.weight","down_proj.weight"])
+        let down_w = T::lookup_suffix(st, &["w2.weight", "down_proj.weight"])
             .ok_or(EKError::ExpertWeightNotFound("w2/down_w".to_owned()))?;
-        let gate_w = T::lookup_suffix(st, &["w3.weight","gate_proj.weight"])
+        let gate_w = T::lookup_suffix(st, &["w3.weight", "gate_proj.weight"])
             .ok_or(EKError::ExpertWeightNotFound("w3/gate_w".to_owned()))?;
         Ok(Self {
             up_w,
             up_b: None,
+            up_scale: None,
             down_w,
             down_b: None,
+            down_scale: None,
             gate_w,
             gate_b: None,
+            gate_scale: None,
         })
     }
 
@@ -140,10 +146,13 @@ impl<T: EkTensor + FromSafeTensor> ExpertWeight<T> {
         Self {
             down_w: T::rand(vec![dim, hidden], dtype, dev),
             down_b: None,
+            up_scale: None,
             up_w: T::rand(vec![hidden, dim], dtype, dev),
             up_b: None,
+            down_scale: None,
             gate_w: T::rand(vec![hidden, dim], dtype, dev),
             gate_b: None,
+            gate_scale: None,
         }
     }
 }

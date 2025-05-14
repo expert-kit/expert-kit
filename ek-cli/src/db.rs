@@ -1,7 +1,7 @@
 use clap::Subcommand;
 use diesel::{Connection, PgConnection, RunQueryDsl, sql_query};
 use diesel_migrations::{EmbeddedMigrations, MigrationHarness, embed_migrations};
-use ek_base::error::EKResult;
+use ek_base::{config::get_ek_settings, error::EKResult};
 
 pub const MIGRATIONS: EmbeddedMigrations = embed_migrations!("../ek-computation/migrations/");
 
@@ -27,14 +27,15 @@ pub enum DBCommand {
     #[command(
         about = "Drop ALL the table and data in the database. This is a destructive operation. Use with caution."
     )]
-    DrainDB,
+    Drain,
 }
 
-pub async fn execute_db_command(cmd: DBCommand, dsn: &str) -> EKResult<()> {
-    let mut conn = PgConnection::establish(dsn).unwrap();
+pub async fn execute_db(cmd: DBCommand) -> EKResult<()> {
+    let settings = get_ek_settings();
+    let mut conn = PgConnection::establish(&settings.db.db_dsn).unwrap();
 
     match cmd {
         DBCommand::Migrate => run_migrations(&mut conn).await,
-        DBCommand::DrainDB => drain_db(&mut conn).await,
+        DBCommand::Drain => drain_db(&mut conn).await,
     }
 }

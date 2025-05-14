@@ -19,18 +19,49 @@ impl Addr {
 
 #[derive(Debug, Deserialize, Clone)]
 #[allow(unused)]
+pub struct InferenceSettings {
+    pub instance_name: String,
+    pub model_name: String,
+    pub hidden_dim: usize,
+    pub intermediate_dim: usize,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+#[allow(unused)]
+pub struct DBSettings {
+    pub db_dsn: String,
+    pub max_conn_size: usize,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+#[allow(unused)]
 pub struct ControllerSettings {
-    pub inter_listen: Addr,
-    pub intra_listen: Addr,
-    pub broadcast: Addr,
+    pub listen: String,
+    pub broadcast: String,
+    pub ports: ControllerPorts,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+#[allow(unused)]
+pub struct ControllerPorts {
+    pub intra: u16,
+    pub inter: u16,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+#[allow(unused)]
+pub struct WorkerPorts {
+    pub main: u16,
 }
 
 #[derive(Debug, Deserialize, Clone)]
 #[allow(unused)]
 pub struct WorkerSettings {
     pub id: Option<String>,
-    pub listen: Addr,
-    pub broadcast: Addr,
+    pub listen: String,
+    pub broadcast: String,
+    pub ports: WorkerPorts,
+    pub device: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -71,11 +102,8 @@ pub enum OpenDALStorage {
 #[derive(Debug, Deserialize, Clone)]
 #[allow(unused)]
 pub struct Settings {
-    pub db_dsn: String,
-    pub hidden_dim: usize,
-    pub intermediate_dim: usize,
-    pub instance_name: String,
-    pub model_name: String,
+    pub inference: InferenceSettings,
+    pub db: DBSettings,
     pub weight: WeightSettings,
     pub controller: ControllerSettings,
     pub worker: WorkerSettings,
@@ -89,14 +117,17 @@ pub fn env_source() -> Environment {
     });
     ENV_SRC.clone()
 }
-pub fn get_ek_settings() -> &'static Settings {
+pub fn get_ek_settings_base(src: &[&str]) -> &'static Settings {
     static CONFIG: OnceCell<Settings> = OnceCell::new();
     let res = CONFIG.get_or_init(|| {
         let mut settings = Config::builder();
-        let possible_config_files = vec!["/etc/expert-kit/config.yaml"];
-        for path in possible_config_files {
+        let candidates = src.iter().chain(["/etc/expert-kit/config.yaml"].iter());
+
+        for path in candidates {
             if Path::new(path).exists() {
+                log::info!("Loading config from {}", path);
                 settings = settings.add_source(config::File::with_name(path));
+                break;
             }
         }
         settings = settings.add_source(env_source());
@@ -105,6 +136,10 @@ pub fn get_ek_settings() -> &'static Settings {
         settings.try_deserialize::<Settings>().unwrap()
     });
     res
+}
+
+pub fn get_ek_settings() -> &'static Settings {
+    get_ek_settings_base(&[])
 }
 
 #[cfg(test)]
@@ -117,10 +152,15 @@ mod test {
 
     fn get_example_config() -> &'static str {
         r#"
-db_dsn: postgres://dev:dev@localhost:5432/dev
-hidden_dim: 2048
-intermediate_dim: 768
-instance_name: qwen3_moe_30b_local_test
+inference:
+  instance_name: qwen3_moe_30b_local_test
+  model_name: ds-tiny
+  hidden_dim: 2048
+  intermediate_dim: 768
+  
+db:
+  db_dsn: postgres://dev:dev@localhost:5432/dev
+  max_conn_size: 32
 
 weight:
   server:
@@ -131,23 +171,18 @@ weight:
 
 worker:
   id: local_test
-  listen:
-    host: 0.0.0.0
-    port: 51234
-  broadcast:
-    host: 0.0.0.0
-    port: 51234
+  listen: 0.0.0.0
+  broadcast: 0.0.0.0
+  ports:
+    main: 51234
 
 controller:
-  intra_listen:
-    host: 0.0.0.0
-    port: 5002
-  inter_listen:
-    host: 0.0.0.0
-    port: 5002
-  broadcast:
-    host: 0.0.0.0
-    port: 5002"#
+  listen: 0.0.0.0
+  broadcast: localhost
+  ports:
+    intra: 5001
+    inter: 5002
+"#
     }
 
     #[test]
@@ -158,7 +193,7 @@ controller:
             .build()
             .unwrap();
         let res = config.try_deserialize::<Settings>().unwrap();
-        assert_eq!(res.hidden_dim, 2048);
+        assert_eq!(res.inference.hidden_dim, 2048);
     }
 
     #[test]

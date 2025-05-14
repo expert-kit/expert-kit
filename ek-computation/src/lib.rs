@@ -1,4 +1,6 @@
 #![feature(pattern)]
+#![feature(test)]
+
 pub mod controller;
 pub mod ffn;
 pub mod proto;

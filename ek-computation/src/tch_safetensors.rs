@@ -21,6 +21,7 @@ pub fn tch_kind_to_dtype(kind: Kind) -> Result<Dtype, TchError> {
         Kind::Half => Dtype::F16,
         Kind::Float => Dtype::F32,
         Kind::Double => Dtype::F64,
+        Kind::Float8e4m3fn => Dtype::F8_E4M3,
         kind => return Err(TchError::Convert(format!("unsupported kind ({kind:?})"))),
     };
     Ok(dtype)
@@ -38,6 +39,7 @@ pub fn dtype_to_tch_kind(dtype: Dtype) -> Result<Kind, TchError> {
         Dtype::F16 => Kind::Half,
         Dtype::F32 => Kind::Float,
         Dtype::F64 => Kind::Double,
+        Dtype::F8_E4M3 => Kind::Float8e4m3fn,
         dtype => return Err(TchError::Convert(format!("unsupported dtype {dtype:?}"))),
     };
     Ok(kind)

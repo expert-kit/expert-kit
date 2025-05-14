@@ -1,11 +1,11 @@
+pub mod memcache;
 pub mod transformer;
 
-use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use bytes::Bytes;
 use ek_base::config::get_ek_settings;
 use ek_base::error::{EKError, EKResult};
+use memcache::MemCache;
 use opendal::{self};
 use opendal::{Buffer, Operator};
 use safetensors::tensor::SafeTensors;
@@ -16,8 +16,7 @@ use crate::weight_srv::client::WeightSrvClient;
 
 pub struct SafeTensorDB {
     dal: Operator,
-
-    data: BTreeMap<String, Bytes>,
+    data: MemCache,
     weight_srv: Option<WeightSrvClient>,
 }
 
@@ -38,7 +37,7 @@ impl SafeTensorDB {
         let dal = op_from_settings(&settings.cache);
 
         let inner = SafeTensorDB {
-            data: BTreeMap::new(),
+            data: MemCache::new(),
             dal,
             weight_srv: weight_srv_cli,
         };
@@ -110,16 +109,35 @@ impl SafeTensorDB {
         }
     }
 
-    pub async fn load(&self, desc: &ExpertKey) -> EKResult<Buffer> {
+    fn as_safetensor<'a>(&'a self, key: &str) -> EKResult<SafeTensors<'a>> {
+        let r = self.data.get_ref(key).unwrap();
+        let st = safetensors::SafeTensors::deserialize(r)?;
+        Ok(st)
+    }
+
+    pub async fn load<'a>(&'a self, desc: &ExpertKey) -> EKResult<SafeTensors<'a>> {
+        let key = desc.as_object_key();
+        let mem_hit = self.data.contains_key(&key);
+        if mem_hit {
+            let st = self.as_safetensor(&key)?;
+            return Ok(st);
+        }
         let cache_hit = self.dal.exists(&desc.as_object_key()).await?;
 
         // cache hit -> load from cache
         if cache_hit {
             let cached = self.load_from_fs_cache(desc).await;
-            if let Ok(ref buf) = cached {
-                return Ok(buf.clone());
-            } else {
-                log::warn!("failed to load from cache: {:}", desc.as_object_key());
+            match cached {
+                Ok(buf) => {
+                    self.data.insert(&key, buf.to_bytes());
+                }
+                Err(e) => {
+                    log::warn!(
+                        "failed to load from cache: {:} reason={}",
+                        desc.as_object_key(),
+                        e
+                    );
+                }
             }
         }
 
@@ -128,30 +146,22 @@ impl SafeTensorDB {
 
         let res: Buffer = self.load_from_weight_srv(desc).await?;
 
-        log::info!(
+        log::debug!(
             "loaded from weight server: {}, elapsed_ms={}",
             desc.as_object_key(),
             start.elapsed().as_millis()
         );
-        let obj_key = desc.as_object_key().to_owned();
         let to_cache = res.clone();
         let cache_backend = self.dal.clone();
-        tokio::spawn(async move { cache_backend.write(obj_key.as_str(), to_cache).await });
-
-        Ok(res)
-    }
-
-    pub fn save(&mut self, key: &str, buf: Buffer) -> EKResult<()> {
-        self.data.insert(key.into(), buf.to_bytes());
-        Ok(())
-    }
-
-    pub fn as_safetensor<'a>(&'a self, key: &str) -> EKResult<SafeTensors<'a>> {
-        let d = self
-            .data
-            .get(key)
-            .ok_or(EKError::NotFound("tensor not found".into()))?;
-        let st = safetensors::SafeTensors::deserialize(d)?;
+        let moved_key = key.clone();
+        tokio::spawn(async move {
+            let err = cache_backend.write(moved_key.as_str(), to_cache).await;
+            if let Err(err) = err {
+                log::error!("failed to cache to local cache {}: {}", moved_key, err);
+            }
+        });
+        self.data.insert(&key, res.to_bytes());
+        let st = self.as_safetensor(&key)?;
         Ok(st)
     }
 }

@@ -1030,6 +1030,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "dashmap"
+version = "6.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5041cc499144891f3790297212f32a74fb938e5136a14943f338ef9e0ae276cf"
+dependencies = [
+ "cfg-if",
+ "crossbeam-utils",
+ "hashbrown 0.14.5",
+ "lock_api",
+ "once_cell",
+ "parking_lot_core",
+]
+
+[[package]]
 name = "deadpool"
 version = "0.12.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1234,6 +1248,7 @@ dependencies = [
  "indicatif",
  "log",
  "pretty_env_logger",
+ "safetensors 0.5.3",
  "serde",
  "serde_json",
  "serde_yaml",
@@ -1275,6 +1290,7 @@ dependencies = [
  "ek_base",
  "ek_db",
  "env_logger 0.11.8",
+ "float8",
  "gethostname",
  "log",
  "ndarray",
@@ -1308,6 +1324,7 @@ dependencies = [
  "actix-http",
  "actix-web",
  "bytes",
+ "dashmap",
  "ek_base",
  "log",
  "memmap2",
@@ -1495,6 +1512,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b09cf3155332e944990140d967ff5eceb70df778b34f77d8075db46e4704e6d8"
 dependencies = [
  "num-traits",
+]
+
+[[package]]
+name = "float8"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dee36245af1dccf978103fcd393582806db2a1d0bcd2f38c663cdbb4a363a01c"
+dependencies = [
+ "half",
 ]
 
 [[package]]

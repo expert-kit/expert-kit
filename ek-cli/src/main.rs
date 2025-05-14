@@ -3,15 +3,18 @@ use std::{mem::transmute, path::PathBuf};
 mod db;
 mod doctor;
 mod model;
+mod pretrain;
 mod schedule;
 
-use db::execute_db_command;
+use db::execute_db;
 use doctor::doctor_main;
+use ek_base::config::get_ek_settings_base;
 use ek_computation::{controller::controller_main, worker::worker_main};
 use ek_db::weight_srv;
 
 use clap::{Parser, Subcommand};
 use model::execute_model;
+use pretrain::{PretrainCommand, execute_pretrain};
 use schedule::execute_schedule;
 extern crate pretty_env_logger;
 
@@ -36,14 +39,14 @@ enum Command {
         model: Vec<PathBuf>,
     },
 
+    #[command(about = "safetensor pretrain weight manipulation")]
+    Pretrain {
+        #[command(subcommand)]
+        command: PretrainCommand,
+    },
+
     #[command(about = "low-level db operations")]
     DB {
-        #[arg(
-            long,
-            global = true,
-            help = "Database connection string (postgres://user:password@host:port/dbname)"
-        )]
-        dsn: String,
         #[command(subcommand)]
         command: db::DBCommand,
     },
@@ -67,6 +70,8 @@ enum Command {
 struct RootCli {
     #[arg(long, default_value_t = false)]
     debug: bool,
+    #[arg(long, global = true)]
+    config: Option<String>,
     #[command(subcommand)]
     command: Command,
 }
@@ -78,7 +83,23 @@ async fn main() {
         unsafe { std::env::set_var("RUST_LOG", "debug") };
     }
     env_logger::init_from_env(env_logger::Env::default().default_filter_or("info"));
+    let mut config_src = vec![];
+    let env_config = std::option_env!("EK_CONFIG");
+    if let Some(path) = env_config {
+        config_src.push(path.to_string());
+    }
+    if let Some(path) = cli.config {
+        config_src.push(path.to_string());
+    }
+    get_ek_settings_base(
+        &config_src
+            .as_slice()
+            .iter()
+            .map(|x| x.as_str())
+            .collect::<Vec<_>>(),
+    );
     let res = match cli.command {
+        Command::Pretrain { command } => execute_pretrain(command).await,
         Command::Worker {} => worker_main().await,
         Command::Controller {} => controller_main().await,
         Command::Doctor {} => doctor_main().await,
@@ -86,7 +107,7 @@ async fn main() {
             let model: &[PathBuf] = unsafe { transmute(model.as_slice()) };
             weight_srv::server::listen(model, (host, port)).await
         }
-        Command::DB { dsn, command } => execute_db_command(command, dsn.as_str()).await,
+        Command::DB { command } => execute_db(command).await,
         Command::Model { command } => execute_model(command).await,
         Command::Schedule { command } => execute_schedule(command).await,
     };

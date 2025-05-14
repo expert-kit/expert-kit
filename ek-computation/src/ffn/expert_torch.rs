@@ -147,9 +147,43 @@ impl TchTensor {
 
 pub struct TorchFFN {
     dim: usize,
-    hidden: usize,
+    intermediate_dim: usize,
     module: OnceCell<Arc<Mutex<nn::Sequential>>>,
     weight: ExpertWeight<TchTensor>,
+}
+
+pub fn w8a16_activate(x: &tch::Tensor, s: &tch::Tensor, block_size: i64) -> tch::Tensor {
+    let shape = s.size();
+    let x_shape = x.size();
+    assert!(shape.len() == 2);
+    assert!(x_shape.len() == 2);
+    let m = shape[0];
+    let n = shape[1];
+    let pad = x_shape[0] % block_size;
+    let s = s.reshape(&[shape[0], shape[1], 1]);
+    let l = if pad > 0 {
+        let t = tch::Tensor::zeros(&[pad, x_shape[1]], (x.kind(), x.device()));
+        let lx = (tch::Tensor::cat(&[x, &t], 0))
+            .reshape(&[m, block_size, n, block_size])
+            .permute(&[0, 2, 1, 3])
+            .reshape(&[m, n, block_size * block_size])
+            .to_kind(tch::Kind::Float);
+        lx
+    } else {
+        let lx = x
+            .reshape(&[m, block_size, n, block_size])
+            .permute(&[0, 2, 1, 3])
+            .reshape(&[m, n, block_size * block_size])
+            .to_kind(tch::Kind::Float);
+        lx
+    };
+
+    let o = (l * s)
+        .to_kind(tch::Kind::BFloat16)
+        .reshape(&[m, n, block_size, block_size])
+        .permute(&[0, 2, 1, 3])
+        .reshape(&x_shape.clone());
+    o
 }
 
 unsafe impl Sync for TorchFFN {}
@@ -164,7 +198,7 @@ impl TorchFFN {
         let m = self.module.get_or_init(|| {
             tch::no_grad(|| {
                 let dim = self.dim as i64;
-                let hidden_dim = self.hidden as i64;
+                let hidden_dim = self.intermediate_dim as i64;
                 let vs = nn::VarStore::new(tch::Device::Cpu);
                 let path = vs.root();
                 let mut w1 = nn::linear(&path / "up", dim, hidden_dim, Default::default());
@@ -202,7 +236,7 @@ impl Expert<TchTensor> for TorchFFN {
     fn shape(&self) -> ExpertShape {
         ExpertShape {
             dim: self.dim,
-            hidden: self.hidden,
+            hidden: self.intermediate_dim,
         }
     }
 
@@ -213,7 +247,7 @@ impl Expert<TchTensor> for TorchFFN {
     fn construct(x: crate::x::EKInstance, weight: ExpertWeight<TchTensor>) -> EKResult<Self> {
         let cell: OnceCell<Arc<Mutex<nn::Sequential>>> = OnceCell::new();
         Ok(TorchFFN {
-            hidden: x.hidden,
+            intermediate_dim: x.hidden,
             dim: x.dim,
             module: cell,
             weight,
@@ -225,15 +259,18 @@ impl Expert<TchTensor> for TorchFFN {
 mod test {
     use std::fs;
 
+    use ek_base::utils::workspace_root;
     use safetensors::SafeTensors;
     use tch::IndexOp;
+    use test::Bencher;
+    extern crate test;
 
     use crate::{
         ffn::{EkTensor, Expert, ExpertWeight, expert_torch::TorchFFN},
         x::{self, test_root},
     };
 
-    use super::TchTensor;
+    use super::{TchTensor, w8a16_activate};
 
     #[test]
     fn test_io() {
@@ -276,5 +313,40 @@ mod test {
         let _vec1 = Vec::<f32>::try_from(res.i((0, 0..100))).unwrap();
         let _vec2 = Vec::<f32>::try_from(truth.i((0, 0..100))).unwrap();
         (res - truth).sum(tch::Kind::BFloat16).print();
+    }
+
+    #[test]
+    fn test_fp8_dequant() {
+        let st_fp = workspace_root()
+            .join("ek-computation")
+            .join("resources")
+            .join("w8a16active-l0q_a_proj.safetensors");
+        let st_bytes = fs::read(st_fp).unwrap();
+        let st = SafeTensors::deserialize(&st_bytes).unwrap();
+        let tv1 = st.tensor("src").unwrap();
+        let tv2 = st.tensor("src_scale").unwrap();
+        let expected = st.tensor("triton_dequanted").unwrap();
+        let tv1 = TchTensor::from_tensor_view(&tv1).inner();
+        let tv2 = TchTensor::from_tensor_view(&tv2).inner();
+        let expected = TchTensor::from_tensor_view(&expected).inner();
+        let res = w8a16_activate(&tv1, &tv2, 128);
+        let diff = (res - expected)
+            .sum(tch::Kind::Double)
+            .abs()
+            .double_value(&[]);
+        dbg!(diff);
+        assert!(diff < 0.2);
+    }
+
+    #[bench]
+    fn pressure_test(b: &mut Bencher) {
+        let tv1 = tch::Tensor::randn(vec![7168, 2048], (tch::Kind::Float, tch::Device::Cpu));
+        let tv2 = tch::Tensor::randn(vec![56, 16], (tch::Kind::Float, tch::Device::Cpu));
+        let _ = w8a16_activate(&tv1, &tv2, 128);
+        let _ = w8a16_activate(&tv1, &tv2, 128);
+        let _ = w8a16_activate(&tv1, &tv2, 128);
+        b.iter(|| {
+            let _ = w8a16_activate(&tv1, &tv2, 128);
+        });
     }
 }
