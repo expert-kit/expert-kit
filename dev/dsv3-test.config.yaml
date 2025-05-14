@@ -1,0 +1,30 @@
+inference:
+  hidden_dim: 7168
+  intermediate_dim: 2048
+  instance_name: dsv3-0324-test
+  model_name: r1-int8
+
+db:
+  db_dsn: postgres://dev:dev@localhost:5432/dev
+  max_conn_size: 32
+
+weight:
+  server:
+    addr: http://172.10.0.60:6543
+  cache:
+    Fs:
+      path: /var/expert-kit/cache
+
+worker:
+  id: "?"
+  listen: 0.0.0.0
+  broadcast: "?"
+  ports:
+    main: 51234
+
+controller:
+  listen: 0.0.0.0
+  broadcast: 172.10.0.2
+  ports:
+    intra: 5001
+    inter: 5002

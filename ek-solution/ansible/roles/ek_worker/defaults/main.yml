@@ -1,0 +1,5 @@
+ek_worker_weight_cache_dir: /var/expert-kit/cache
+ek_worker_bin_dir: /opt/expert-kit/
+ek_worker_config_dir: /etc/expert-kit/
+ek_worker_bin: ../../target/release/ek-cli
+ek_worker_config: ../../dev/dsv3-test.config.yaml
