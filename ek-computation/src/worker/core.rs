@@ -26,13 +26,13 @@ impl Default for EKInstanceGate {
     }
 }
 
-pub type GlobalEKInstanceGate = Arc<Mutex<EKInstanceGate>>;
+pub type GlobalEKInstanceGate = Arc<RwLock<EKInstanceGate>>;
 
 pub fn get_instance_gate() -> GlobalEKInstanceGate {
     static INSTANCE: OnceCell<GlobalEKInstanceGate> = OnceCell::new();
     let inst = INSTANCE.get_or_init(|| {
         let inner = EKInstanceGate::new();
-        Arc::new(Mutex::new(inner))
+        Arc::new(RwLock::new(inner))
     });
     inst.clone()
 }

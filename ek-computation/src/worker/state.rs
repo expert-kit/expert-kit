@@ -191,7 +191,7 @@ impl StateClient {
         let exp_incoming = slice.expert_meta.clone();
         self.load_new_experts(&exp_incoming).await?;
 
-        let exp_current = self.gate.lock().await.current_experts().await?;
+        let exp_current = self.gate.read().await.current_experts().await?;
         self.remove_stale_experts(&exp_incoming, &exp_current).await;
         Ok(())
     }
