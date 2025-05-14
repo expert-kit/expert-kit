@@ -82,7 +82,7 @@ def intercept_moe(with_ek: bool):
             for seq_idx in range(total_seq_len):
                 eids = selected_experts[seq_idx].tolist()
                 ids = [
-                    f"model-layer{self.layer_id}-expert{expert_idx}.safetensors"
+                    f"qwen3/l{self.layer_id}-e{expert_idx}"
                     for expert_idx in eids
                 ]
                 expert_ids.append(ids)
