@@ -1290,6 +1290,7 @@ dependencies = [
  "ek_base",
  "ek_db",
  "env_logger 0.11.8",
+ "float8",
  "gethostname",
  "log",
  "ndarray",
@@ -1511,6 +1512,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b09cf3155332e944990140d967ff5eceb70df778b34f77d8075db46e4704e6d8"
 dependencies = [
  "num-traits",
+]
+
+[[package]]
+name = "float8"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dee36245af1dccf978103fcd393582806db2a1d0bcd2f38c663cdbb4a363a01c"
+dependencies = [
+ "half",
 ]
 
 [[package]]
