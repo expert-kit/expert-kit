@@ -12,7 +12,10 @@ use crate::{
 };
 use ek_base::{config::get_ek_settings, error::EKResult};
 use ek_db::safetensor::{ExpertKey, SafeTensorDB};
-use tokio::{sync::RwLock, task::JoinSet};
+use tokio::{
+    sync::{RwLock, Semaphore},
+    task::JoinSet,
+};
 use tokio_stream::{Stream, StreamExt};
 use tonic::transport::Channel;
 
@@ -76,20 +79,28 @@ impl StateClient {
         Ok(())
     }
 
-    fn spawn_expert_loading_task(&self, js: &mut JoinSet<EKResult<()>>, expert: &Metadata) {
+    fn spawn_expert_loading_task(
+        &self,
+        js: &mut JoinSet<EKResult<()>>,
+        expert: &Metadata,
+        token: Arc<Semaphore>,
+    ) {
         let settings = get_ek_settings();
         let tdb = self.tensor_db.clone();
         let edb = self.expert_db.clone();
         let expert = expert.clone();
         let instance = EKInstance::default();
         let model_name = &settings.inference.model_name;
+        let token = token.clone();
         js.spawn(async move {
+            let permit = token.acquire().await.unwrap();
             let id = expert.id.clone();
             log::debug!("load expert {}", &id);
             let ek = ExpertKey::from_expert_id(model_name, &expert.id)?;
             if let Err(e) = x::load_expert_task(tdb, edb.clone(), instance, &ek).await {
                 log::error!("error in load expert {}", e)
             }
+            drop(permit);
             Ok(())
         });
     }
@@ -122,8 +133,9 @@ impl StateClient {
         let now = time::Instant::now();
         log::info!("load new experts, len={}", exp_new.len());
         let mut js: JoinSet<EKResult<()>> = JoinSet::new();
+        let token = Arc::new(Semaphore::new(64));
         for expert in &exp_new {
-            self.spawn_expert_loading_task(&mut js, expert);
+            self.spawn_expert_loading_task(&mut js, expert, token.clone());
         }
 
         let edb = self.expert_db.clone();

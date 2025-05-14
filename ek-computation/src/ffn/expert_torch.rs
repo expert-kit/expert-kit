@@ -114,13 +114,16 @@ impl EkTensor for TchTensor {
     }
 
     fn from_raw(data: &[u8], shape: &[usize], dtype: DType) -> Self {
-        Tensor::f_from_data_size(
-            data,
-            &shape.iter().map(|x| *x as i64).collect::<Vec<i64>>(),
-            dtype.into(),
-        )
-        .unwrap() // TODO: is it safe to unwrap?
-        .into()
+        unsafe {
+            Tensor::from_blob(
+                data.as_ptr(),
+                &shape.iter().map(|x| *x as i64).collect::<Vec<i64>>(),
+                &[],
+                dtype.into(),
+                tch::Device::Cpu,
+            )
+            .into()
+        }
     }
 
     fn from_tensor_view(tv: &TensorView<'_>) -> Self {
