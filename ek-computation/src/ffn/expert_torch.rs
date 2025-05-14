@@ -8,6 +8,7 @@ use crate::{
     x,
 };
 
+use diesel_async::RunQueryDsl;
 use ek_base::error::EKResult;
 use once_cell::sync::OnceCell;
 use safetensors::tensor::TensorView;
@@ -261,12 +262,15 @@ impl Expert<TchTensor> for TorchFFN {
 
     fn construct(x: crate::x::EKInstance, weight: ExpertWeight<TchTensor>) -> EKResult<Self> {
         let cell: OnceCell<Arc<Mutex<nn::Sequential>>> = OnceCell::new();
-        Ok(TorchFFN {
+        let res = TorchFFN {
             intermediate_dim: x.hidden,
             dim: x.dim,
             module: cell,
             weight,
-        })
+        };
+        // res.load_module();
+
+        Ok(res)
     }
 }
 
