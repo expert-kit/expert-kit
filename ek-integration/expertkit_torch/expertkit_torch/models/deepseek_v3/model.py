@@ -94,7 +94,9 @@ def intercept_moe(ek_addr: str | None, model_name: str):
             end = time.time()
             outputs = outputs.to(device=hidden_states.device, dtype=hidden_states.dtype)
             expanded_weights = topk_weights.unsqueeze(-1)
-            print(f"send at {self.layer_id} elapsed= {end - start},{outputs.shape}  {expanded_weights.shape=}")
+            print(
+                f"send at {self.layer_id} elapsed= {end - start},{outputs.shape}  {expanded_weights.shape=}"
+            )
             output = torch.sum(expanded_weights * outputs, dim=1)
 
             final_hidden_states = output.type(hidden_states.dtype).reshape(
@@ -155,7 +157,7 @@ def intercept_moe(ek_addr: str | None, model_name: str):
 
 @torch.no_grad()
 @torch.inference_mode()
-def evaluate(model_path=str, ek_addr: str | None = None, model_name: str = ""):
+def evaluate(model_path=str, ek_addr: str | None = None, model_name: str = "", batch=1):
 
     intercept_missing()
     intercept_moe(ek_addr=ek_addr, model_name=model_name)
@@ -165,15 +167,12 @@ def evaluate(model_path=str, ek_addr: str | None = None, model_name: str = ""):
     ]
     test_prompts = [
         "What is MoE Model?",
-        "Explain the benefits of mixture of experts.",
-        "How does MoE improve model efficiency?",
-        "Compare MoE with dense models.",
     ] * 512
 
     model_config = ds_v3_config.DeepseekV3Config.from_pretrained(model_path)
 
     batch_messages = []
-    prompts = test_prompts[:1]
+    prompts = test_prompts[:batch]
     for prompt in prompts:
         messages = [{"role": "user", "content": prompt}]
         text = tokenizer.apply_chat_template(
@@ -246,7 +245,17 @@ if __name__ == "__main__":
         required=True,
         help="ExpertKit address. like http://localhost:5002",
     )
+    parser.add_argument(
+        "--seq",
+        type=int,
+        required=False,
+        help="ExpertKit address. like http://localhost:5002",
+        default=1,
+    )
     args = parser.parse_args()
     evaluate(
-        model_path=args.model_path, ek_addr=args.ek_addr, model_name=args.model_name
+        model_path=args.model_path,
+        ek_addr=args.ek_addr,
+        model_name=args.model_name,
+        batch=args.seq,
     )
