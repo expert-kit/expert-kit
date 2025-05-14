@@ -92,7 +92,7 @@ mod test {
         let app =
             test::init_service(App::new().app_data(web::Data::new(wm)).service(load_layer)).await;
         let req = test::TestRequest::default()
-            .uri("/weight/ds-tiny/model.layers.21.mlp.experts.94.down_proj.weight")
+            .uri("/weight/ds-tiny/model.layers.9.mlp.experts.94.down_proj.weight")
             .insert_header(ContentType::plaintext())
             .to_request();
         let resp = test::call_service(&app, req).await;
@@ -116,7 +116,7 @@ mod test {
         let app =
             test::init_service(App::new().app_data(web::Data::new(wm)).service(load_expert)).await;
         let req = test::TestRequest::default()
-            .uri("/expert/ds-tiny/18/32")
+            .uri("/expert/ds-tiny/3/32")
             .insert_header(ContentType::plaintext())
             .to_request();
         let resp = test::call_service(&app, req).await;
@@ -129,16 +129,16 @@ mod test {
         let names = st.names();
         assert_eq!(names.len(), 3);
         let expected = vec![
-            "model.layers.18.mlp.experts.32.gate_proj.weight",
-            "model.layers.18.mlp.experts.32.down_proj.weight",
-            "model.layers.18.mlp.experts.32.up_proj.weight",
+            "model.layers.3.mlp.experts.32.gate_proj.weight",
+            "model.layers.3.mlp.experts.32.down_proj.weight",
+            "model.layers.3.mlp.experts.32.up_proj.weight",
         ];
 
         for name in expected {
             assert!(names.contains(&&name.to_string()));
         }
         let tensor = st
-            .tensor("model.layers.18.mlp.experts.32.down_proj.weight")
+            .tensor("model.layers.3.mlp.experts.32.down_proj.weight")
             .unwrap();
         assert_eq!(tensor.shape(), &[16, 8]);
     }
@@ -167,7 +167,7 @@ mod test {
         let bytes = to_bytes(body).await.unwrap();
         let vital: VitalMeta = serde_json::from_slice(bytes.as_ref()).unwrap();
         assert_eq!(vital.routed_experts, 256);
-        assert_eq!(vital.moe_layers, (3, 61));
+        assert_eq!(vital.moe_layers, (3, 10));
         assert_eq!(vital.hidden_dim, 16);
         assert_eq!(vital.inter_dim, 8);
     }

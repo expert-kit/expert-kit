@@ -1,4 +1,4 @@
-use std::{collections::HashMap, path::PathBuf};
+use std::{collections::HashMap, fmt::format, path::PathBuf};
 
 use actix_web::{HttpResponse, Responder, body::BoxBody, http::header::ContentType};
 use ek_base::error::{EKError, EKResult};
@@ -115,11 +115,8 @@ impl WeightMap {
             });
         Ok(Self { map })
     }
-    fn map_layer(&self, key: &String) -> String {
-        self.map
-            .get(key)
-            .unwrap_or_else(|| panic!("weight map should contain key {}", key.as_str()))
-            .to_owned()
+    fn map_layer(&self, key: &String) -> Option<String> {
+        self.map.get(key).map(|e| e.clone())
     }
 }
 
@@ -204,9 +201,19 @@ where
         &self.model_config
     }
 
+    fn has_layer(&self, key: &str) -> bool {
+        self.weight_map.map.contains_key(key)
+    }
+
     async fn get_safetensor(&self, key: &str) -> EKResult<&SafeTensors<'data>> {
         let _lg = self.ser_lk.lock().await;
-        let fp = self.weight_map.map_layer(&key.to_string());
+        let fp = self
+            .weight_map
+            .map_layer(&key.to_string())
+            .ok_or(EKError::NotFound(format!(
+                "safetensor not found for layer: {}",
+                key
+            )))?;
         let fp = self.desc.root.join(fp);
         let fp_str = fp.to_str().unwrap();
         let hit = self.safetensors_cache.contains_key(fp_str);
@@ -248,16 +255,28 @@ where
             "model.layers.{}.mlp.experts.{}.up_proj.weight",
             layer_id, expert_id
         );
+        let key_up_scale = format!("{}_scale_inv", key_up);
+
         let key_gate = format!(
             "model.layers.{}.mlp.experts.{}.down_proj.weight",
             layer_id, expert_id
         );
+        let key_gate_scale = format!("{}_scale_inv", key_gate);
         let key_down = format!(
             "model.layers.{}.mlp.experts.{}.gate_proj.weight",
             layer_id, expert_id
         );
 
-        Ok(vec![key_down, key_gate, key_up])
+        let key_down_scale = format!("{}_scale_inv", key_down);
+
+        Ok(vec![
+            key_down,
+            key_gate,
+            key_up,
+            key_up_scale,
+            key_gate_scale,
+            key_down_scale,
+        ])
     }
 
     pub async fn get_expert(&self, layer_id: usize, eid: usize) -> EKResult<Vec<u8>> {
@@ -265,6 +284,9 @@ where
         let mut tensors = vec![];
 
         for key in keys.iter() {
+            if !self.has_layer(key) {
+                continue;
+            }
             let st = self.get_safetensor(key).await?;
             let tensor = st.tensor(key)?;
             tensors.push((key.clone(), tensor));
@@ -294,9 +316,10 @@ mod test {
         let pretrained: TransformerPretrained =
             TransformerPretrained::try_from_desc(&desc).unwrap();
         let tensor = pretrained
-            .get_layer("model.layers.21.mlp.experts.94.down_proj.weight")
+            .get_layer("model.layers.9.mlp.experts.94.down_proj.weight")
             .await
             .unwrap();
+
         let tv = safetensors::SafeTensors::deserialize(&tensor)
             .unwrap()
             .tensor("data")
@@ -315,21 +338,21 @@ mod test {
         };
         let pretrained: TransformerPretrained =
             TransformerPretrained::try_from_desc(&desc).unwrap();
-        let tensor = pretrained.get_expert(21, 97).await.unwrap();
+        let tensor = pretrained.get_expert(9, 97).await.unwrap();
         let st = safetensors::SafeTensors::deserialize(&tensor).unwrap();
         let names = st.names();
         assert_eq!(names.len(), 3);
         let expected = vec![
-            "model.layers.21.mlp.experts.97.gate_proj.weight",
-            "model.layers.21.mlp.experts.97.down_proj.weight",
-            "model.layers.21.mlp.experts.97.up_proj.weight",
+            "model.layers.9.mlp.experts.97.gate_proj.weight",
+            "model.layers.9.mlp.experts.97.down_proj.weight",
+            "model.layers.9.mlp.experts.97.up_proj.weight",
         ];
 
         for name in expected {
             assert!(names.contains(&&name.to_string()));
         }
         let tensor = st
-            .tensor("model.layers.21.mlp.experts.97.down_proj.weight")
+            .tensor("model.layers.9.mlp.experts.97.down_proj.weight")
             .unwrap();
         assert_eq!(tensor.shape(), &[16, 8]);
     }
@@ -348,7 +371,7 @@ mod test {
 
         let mut js = JoinSet::new();
 
-        for layer in 3..20 {
+        for layer in 3..9{
             for expert in 1..10 {
                 let p = pretrained.clone();
                 js.spawn(async move { p.get_expert(layer, expert).await });
