@@ -62,13 +62,11 @@ impl StateClient {
     }
 
     async fn run_inner(&mut self) -> EKResult<()> {
-        let mut cli = StateServiceClient::connect(self.controller_addr.clone())
-            .await
-            .unwrap();
+        let mut cli = StateServiceClient::connect(self.controller_addr.clone()).await?;
         let req_stream = StateClient::get_request_stream(self.worker_id.to_owned())
             .await
             .throttle(std::time::Duration::from_secs(3));
-        let res = cli.retrieve(req_stream).await.unwrap();
+        let res = cli.retrieve(req_stream).await?;
         let mut stream = res.into_inner();
         while let Some(msg) = stream.next().await {
             let msg = msg?;

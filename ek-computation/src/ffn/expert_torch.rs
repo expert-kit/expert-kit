@@ -8,7 +8,6 @@ use crate::{
     x,
 };
 
-use diesel_async::RunQueryDsl;
 use ek_base::error::EKResult;
 use once_cell::sync::OnceCell;
 use safetensors::tensor::TensorView;

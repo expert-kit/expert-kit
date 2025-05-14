@@ -7,7 +7,7 @@ use core::fmt;
 use ek_base::error::EKResult;
 use once_cell::sync::OnceCell;
 use std::sync::Arc;
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::RwLock;
 
 pub struct EKInstanceGate {
     experts: Arc<RwLock<dyn ExpertDB + Send + Sync>>,
