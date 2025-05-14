@@ -116,7 +116,7 @@ impl WeightMap {
         Ok(Self { map })
     }
     fn map_layer(&self, key: &String) -> Option<String> {
-        self.map.get(key).map(|e| e.clone())
+        self.map.get(key).cloned()
     }
 }
 

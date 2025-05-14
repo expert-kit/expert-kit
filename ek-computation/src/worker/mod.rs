@@ -33,7 +33,11 @@ pub async fn worker_main() -> EKResult<()> {
             .parse()
             .unwrap();
         let err = tonic::transport::Server::builder()
-            .add_service(ComputationServiceServer::new(server))
+            .add_service(
+                ComputationServiceServer::new(server)
+                    .max_decoding_message_size(200 * 1024 * 1024)
+                    .max_encoding_message_size(200 * 1024 * 1024),
+            )
             .serve(addr)
             .await;
         if let Err(e) = err {

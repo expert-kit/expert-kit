@@ -52,7 +52,10 @@ impl StateClient {
         let dev = dev.unwrap_or("cpu".to_string());
         tokio_stream::iter(1..usize::MAX).map(move |_| RetrieveStateReq {
             id: worker_id.clone(),
-            addr: settings.worker.broadcast.clone(),
+            addr: format!(
+                "http://{}:{}",
+                settings.worker.broadcast, settings.worker.ports.main
+            ),
             channel: "grpc".to_string(),
             device: dev.clone(),
         })

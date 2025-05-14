@@ -147,7 +147,7 @@ impl SafeTensorDB {
         if cache_hit {
             let cached = self.load_from_fs_cache(desc).await?;
             self.data.insert(&key, cached.to_bytes());
-            return Ok(self.as_safetensor(&key)?);
+            return self.as_safetensor(&key);
         }
 
         // cache miss: load from weight server
