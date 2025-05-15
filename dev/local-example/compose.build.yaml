@@ -15,24 +15,30 @@ services:
     ports:
       - "5432:5432"
     volumes:
-      - ../data/pg:/var/lib/postgresql/data
+      - ../../data/pg:/var/lib/postgresql/data
     networks:
       - expert-kit-network
   ek-migrations:
-    image: ek-runtime:latest
+    build:
+      context: ../../
+      dockerfile: ./container/Dockerfile.cpu
+      target: ek-runtime
     depends_on:
       ek-postgres:
         condition: service_healthy
     environment:
       DATABASE_URL: postgres://dev:dev@ek-postgres:5432/dev
     volumes:
-      - ../ek-computation/migrations:/app/ek-migrations
+      - ../../ek-computation/migrations:/app/ek-migrations
     working_dir: /app/ek-migrations
     command: diesel migration run --migration-dir /app/ek-migrations
     networks:
       - expert-kit-network
   ek-weight-server:
-    image: ek-runtime:latest
+    build:
+      context: ../../
+      dockerfile: ./container/Dockerfile.cpu
+      target: ek-runtime
     container_name: ek-weight-server
     restart: unless-stopped 
     depends_on:
@@ -42,15 +48,18 @@ services:
     ports:
       - 6543:6543
     volumes:
-      - ./local.inventory.yaml:/ek/local.inventory.yaml:ro
-      - ./config:/etc/expert-kit:ro
-      - ../data/qwen3/qwen3:/ek/qwen3
+      - ./local.inventory.yaml:/ek/local.inventory.yaml
+      - ./config.yaml:/etc/expert-kit/config.yaml
+      - ../../data/qwen3:/ek/qwen3
     environment:
       - RUST_LOG=info
     networks:
       - expert-kit-network
   ek-controller:
-    image: ek-runtime:latest
+    build:
+      context: ../../
+      dockerfile: ./container/Dockerfile.cpu
+      target: ek-runtime
     container_name: ek-controller
     restart: unless-stopped 
     depends_on:
@@ -61,25 +70,27 @@ services:
       - 5001:5001
       - 5002:5002
     volumes:
-      - ./config:/etc/expert-kit:ro
-      - ../data/qwen3/ek-qwen3:/ek/qwen3
+      - ./config.yaml:/etc/expert-kit/config.yaml
+      - ../../data/qwen3/ek-qwen3:/ek/qwen3
     environment:
       - RUST_LOG=info
     networks:
       - expert-kit-network
   ek-worker:
-    image: ek-runtime:latest
+    build:
+      context: ../../
+      dockerfile: ./container/Dockerfile.cpu
+      target: ek-runtime
     container_name: ek-worker
     restart: unless-stopped
     depends_on:
       - ek-controller
     command: ["ek-cli", "worker"]
     volumes:
-      - ./config:/etc/expert-kit:ro
-      - ../data/qwen3/ek-qwen3:/ek/qwen3
+      - ./config.yaml:/etc/expert-kit/config.yaml
+      - ../../data/qwen3/ek-qwen3:/ek/qwen3
     environment:
-      - EK_HOSTNAME=local-dev
-      - EK_CONTROL_PLAN_ADDR=http://ek-controller:5001
+      - EK_WORKER_ID=local-dev
       - RUST_LOG=info
     networks:
       - expert-kit-network
@@ -87,9 +98,3 @@ services:
 networks:
   expert-kit-network:
     driver: bridge
-
-volumes:
-  postgres_data:
-    driver: local
-  model_data:
-    driver: local
