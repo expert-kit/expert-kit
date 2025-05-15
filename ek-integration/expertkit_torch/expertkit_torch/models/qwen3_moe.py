@@ -33,18 +33,24 @@ from expertkit_torch.grpc_client import ExpertKitClient
 
 set_verbosity_error()
 
+# default timeout interval for ek client, in seconds
+DEFAULT_TIMEOUT_INTVAL = 100
 layer_idx = 0
 
 
-def intercept_moe(with_ek: bool):
+def intercept_moe(
+    enable_ek: bool = True,
+    ek_addr: str = "localhost:50051",
+    ek_model_name: str = "qwen3",    
+):
     class Intercepted(nn.Module):
         client: ExpertKitClient = None
 
         def __init__(self, config):
             super().__init__()
             global layer_idx
-            if with_ek and Intercepted.client is None:
-                Intercepted.client = ExpertKitClient(config.ek_addr, 10)
+            if enable_ek and Intercepted.client is None:
+                Intercepted.client = ExpertKitClient(ek_addr, DEFAULT_TIMEOUT_INTVAL)
             self.layer_id = layer_idx
             layer_idx += 1
             self.num_experts = config.num_experts
@@ -52,7 +58,7 @@ def intercept_moe(with_ek: bool):
             self.norm_topk_prob = config.norm_topk_prob
 
             self.gate = nn.Linear(config.hidden_size, config.num_experts, bias=False)
-            if not with_ek:
+            if not enable_ek:
                 self.experts = nn.ModuleList(
                     [
                         qwen3_moe.Qwen3MoeMLP(
@@ -79,15 +85,11 @@ def intercept_moe(with_ek: bool):
             for seq_idx in range(total_seq_len):
                 eids = selected_experts[seq_idx].tolist()
                 ids = [
-                    f"model-layer{self.layer_id}-expert{expert_idx}.safetensors"
+                    f"{ek_model_name}/l{self.layer_id}-e{expert_idx}"
                     for expert_idx in eids
                 ]
                 expert_ids.append(ids)
 
-            for seq_idx in range(total_seq_len):
-                eids = selected_experts[seq_idx].tolist()
-
-            # TODO
             outputs = self.client.forward_expert(
                 expert_ids=expert_ids, hidden_state=hidden_states
             )
@@ -158,7 +160,7 @@ def intercept_moe(with_ek: bool):
                 selected_experts, num_classes=self.num_experts
             ).permute(2, 1, 0)
 
-            if with_ek:
+            if enable_ek:
                 final = self.ek_forward(
                     hidden_states=hidden_states,
                     routing_weights=routing_weights,
@@ -184,8 +186,20 @@ def intercept_moe(with_ek: bool):
     setattr(qwen3_moe, "Qwen3MoeSparseMoeBlock", Intercepted)
 
 
-def evaluate(*, model_path="./", prompt="What is MoE Model?", enable_ek=True):
-    intercept_moe(enable_ek)
+def evaluate(
+    *, 
+    model_path="./", 
+    prompt="What is MoE Model?", 
+
+    enable_ek=True,
+    ek_addr="localhost:50051",
+    ek_model_name="qwen3"
+):
+    intercept_moe(
+        enable_ek=enable_ek,
+        ek_addr=ek_addr,
+        ek_model_name=ek_model_name,
+    )
     # load the tokenizer and the model
     tokenizer = AutoTokenizer.from_pretrained(
         pretrained_model_name_or_path=model_path,
@@ -247,5 +261,24 @@ if __name__ == "__main__":
         action=argparse.BooleanOptionalAction,
         help="Enable ExpertKit.",
     )
+    parser.add_argument(
+        "--ek_model_name",
+        type=str,
+        default="qwen3",
+        help="The name of the model used in ExpertKit.",
+    )
+    parser.add_argument(
+        "--ek_addr",
+        type=str,
+        default="localhost:50051",
+        help="The address of the ExpertKit server.",
+    )
     args = parser.parse_args()
-    evaluate(model_path=args.model_path, enable_ek=args.enable_ek)
+    evaluate(
+        model_path=args.model_path, 
+        ek_model_name=args.ek_model_name,
+
+        enable_ek=args.enable_ek,
+        ek_addr=args.ek_addr,
+        ek_model_name=args.ek_model_name,
+    )
