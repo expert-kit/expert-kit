@@ -4,7 +4,6 @@ pub mod poller;
 pub mod registry;
 pub mod service;
 
-
 use ek_base::error::EKResult;
 
 use super::{
@@ -46,7 +45,11 @@ pub async fn controller_main() -> EKResult<()> {
         .unwrap();
         log::info!("computation server listening on {}", inter_addr);
         let err = tonic::transport::Server::builder()
-            .add_service(ComputationServiceServer::new(srv))
+            .add_service(
+                ComputationServiceServer::new(srv)
+                    .max_decoding_message_size(1024 * 1024 * 1024)
+                    .max_encoding_message_size(1024 * 1024 * 1024),
+            )
             .serve(inter_addr)
             .await;
         if let Err(e) = err {

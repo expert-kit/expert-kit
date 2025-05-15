@@ -5,11 +5,27 @@ from torch import nn
 import torch
 import argparse
 from expertkit_torch.grpc_client import ExpertKitClient
+from transformers import modeling_utils as mu
 
 layer_idx = 3
 
 
-def intercept_moe(ek_addr: str | None):
+def intercept_missing():
+    """
+    Intercept the missing function in the DeepseekV3 model.
+    """
+
+    def missing_function(self, *args, **kwargs):
+        return ([], [])
+
+    # Intercept the missing function in the DeepseekV3 model
+    delattr(mu, "_find_mismatched_keys")
+    delattr(mu, "_find_missing_and_unexpected_keys")
+    setattr(mu, "_find_mismatched_keys", missing_function)
+    setattr(mu, "_find_missing_and_unexpected_keys", missing_function)
+
+
+def intercept_moe(ek_addr: str | None, model_name: str):
     with_ek = ek_addr is not None
 
     class InterceptedDeepseekV3MoE(nn.Module):
@@ -17,18 +33,16 @@ def intercept_moe(ek_addr: str | None):
         A mixed expert module containing shared experts.
         """
 
-        client: ExpertKitClient = None
+        client: ExpertKitClient | None = None
 
         def __init__(self, config):
             super().__init__()
             global layer_idx
             self.layer_id = layer_idx
-
-            print(f"load moe layer {self.layer_id}")
             layer_idx += 1
             self.config = config
             if with_ek and InterceptedDeepseekV3MoE.client is None:
-                InterceptedDeepseekV3MoE.client = ExpertKitClient(ek_addr, 10)
+                InterceptedDeepseekV3MoE.client = ExpertKitClient(ek_addr, 240)
             if not with_ek:
                 self.experts = nn.ModuleList(
                     [
@@ -51,21 +65,38 @@ def intercept_moe(ek_addr: str | None):
             topk_indices: torch.Tensor,
             topk_weights: torch.Tensor,
         ):
+
             expert_ids = []
             total_seq_len, _ = hidden_states.shape
             for seq_idx in range(total_seq_len):
                 eids = topk_indices[seq_idx].tolist()
-                ids = [f"ds-tiny/l{self.layer_id}-e{expert_idx}" for expert_idx in eids]
+                ids = [
+                    f"{model_name}/l{self.layer_id}-e{expert_idx}"
+                    for expert_idx in eids
+                ]
                 expert_ids.append(ids)
 
             for seq_idx in range(total_seq_len):
                 eids = topk_indices[seq_idx].tolist()
 
+            if self.client is None:
+                raise SystemError("client is None, please check the address")
+
+            import time
+
+            print(f"send at {self.layer_id} {hidden_states.shape=}")
+            start = time.time()
+            hidden_states = hidden_states.to(torch.bfloat16)
+
             outputs = self.client.forward_expert(
                 expert_ids=expert_ids, hidden_state=hidden_states
             )
+            end = time.time()
             outputs = outputs.to(device=hidden_states.device, dtype=hidden_states.dtype)
             expanded_weights = topk_weights.unsqueeze(-1)
+            print(
+                f"send at {self.layer_id} elapsed= {end - start},{outputs.shape}  {expanded_weights.shape=}"
+            )
             output = torch.sum(expanded_weights * outputs, dim=1)
 
             final_hidden_states = output.type(hidden_states.dtype).reshape(
@@ -79,10 +110,6 @@ def intercept_moe(ek_addr: str | None):
             topk_indices: torch.Tensor,
             topk_weights: torch.Tensor,
         ):
-            r"""
-            CALL FOR CONTRIBUTION! I don't have time to optimise this right now, but expert weights need to be fused
-            to not have to do a loop here (deepseek has 256 experts soooo yeah).
-            """
             final_hidden_states = torch.zeros_like(
                 hidden_states, dtype=topk_weights.dtype
             )
@@ -128,24 +155,75 @@ def intercept_moe(ek_addr: str | None):
     setattr(ds_v3, "DeepseekV3MoE", InterceptedDeepseekV3MoE)
 
 
-def evaluate(model_path=str, ek_addr: str | None = None):
-    intercept_moe(ek_addr=ek_addr)
+@torch.no_grad()
+@torch.inference_mode()
+def evaluate(model_path=str, ek_addr: str | None = None, model_name: str = "", batch=1):
+
+    intercept_missing()
+    intercept_moe(ek_addr=ek_addr, model_name=model_name)
     tokenizer = AutoTokenizer.from_pretrained(model_path)
     chat = [
         {"role": "user", "content": "Hello, how are you?"},
     ]
+    test_prompts = [
+        "What is MoE Model?",
+    ] * 512
+
     model_config = ds_v3_config.DeepseekV3Config.from_pretrained(model_path)
+
+    batch_messages = []
+    prompts = test_prompts[:batch]
+    for prompt in prompts:
+        messages = [{"role": "user", "content": prompt}]
+        text = tokenizer.apply_chat_template(
+            messages,
+            tokenize=False,
+            add_generation_prompt=True,
+            enable_thinking=True,
+        )
+        batch_messages.append(text)
+
     model = ds_v3.DeepseekV3ForCausalLM.from_pretrained(
-        model_path, config=model_config, local_files_only=True
+        model_path,
+        config=model_config,
+        local_files_only=True,
+        device_map="cuda",
     )
     inputs = tokenizer.apply_chat_template(
         chat, tokenize=True, add_generation_prompt=True, return_tensors="pt"
     ).to(model.device)
-    # print(123,inputs)
-    generated_ids = model.generate(inputs, max_new_tokens=50)
+
+    import time
+
+    start = time.time()
+
+    model_inputs = tokenizer(
+        batch_messages, return_tensors="pt", padding=True, truncation=True
+    ).to(model.device)
+    generated_ids = model.generate(
+        **model_inputs, max_new_tokens=1, pad_token_id=tokenizer.eos_token_id
+    )
+    now = time.time()
     output_ids = generated_ids[0].tolist()
-    content = tokenizer.decode(output_ids[:], skip_special_tokens=True).strip("\n")
-    print("output: ", content)
+
+    generation_time = now - start
+
+    total_input_tokens = model_inputs.input_ids.numel()
+    total_output_tokens = generated_ids.numel() - total_input_tokens
+    total_tps = (total_input_tokens + total_output_tokens) / generation_time
+    output_tps = total_output_tokens / generation_time
+
+    elasped = now - start
+    print(f"\n--- Test Size {len(prompts)} ---")
+    print(
+        f"Batch inference elapsed time: {generation_time:.2f}s for {len(prompts)} prompts"
+    )
+    print(
+        f"Total tokens processed: {total_input_tokens + total_output_tokens} ({total_input_tokens} input + {total_output_tokens} output)"
+    )
+    print(f"Total TPS (input+output): {total_tps:.2f} tokens/second")
+    print(f"Output TPS (generation only): {output_tps:.2f} tokens/second")
+    print(f"Average TPS per prompt: {output_tps/len(prompts):.2f} tokens/second")
 
 
 if __name__ == "__main__":
@@ -161,5 +239,23 @@ if __name__ == "__main__":
         type=str,
         help="ExpertKit address. like http://localhost:5002",
     )
+    parser.add_argument(
+        "--model_name",
+        type=str,
+        required=True,
+        help="The name of the model used in ExpertKit. like qwen3",
+    )
+    parser.add_argument(
+        "--seq",
+        type=int,
+        required=False,
+        help="Batch size for evaluation.",
+        default=1,
+    )
     args = parser.parse_args()
-    evaluate(model_path=args.model_path, ek_addr=args.ek_addr)
+    evaluate(
+        model_path=args.model_path,
+        ek_addr=args.ek_addr,
+        model_name=args.model_name,
+        batch=args.seq,
+    )

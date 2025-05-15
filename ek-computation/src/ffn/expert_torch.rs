@@ -114,13 +114,16 @@ impl EkTensor for TchTensor {
     }
 
     fn from_raw(data: &[u8], shape: &[usize], dtype: DType) -> Self {
-        Tensor::f_from_data_size(
-            data,
-            &shape.iter().map(|x| *x as i64).collect::<Vec<i64>>(),
-            dtype.into(),
-        )
-        .unwrap() // TODO: is it safe to unwrap?
-        .into()
+        unsafe {
+            Tensor::from_blob(
+                data.as_ptr(),
+                &shape.iter().map(|x| *x as i64).collect::<Vec<i64>>(),
+                &[],
+                dtype.into(),
+                tch::Device::Cpu,
+            )
+            .into()
+        }
     }
 
     fn from_tensor_view(tv: &TensorView<'_>) -> Self {
@@ -160,30 +163,27 @@ pub fn w8a16_activate(x: &tch::Tensor, s: &tch::Tensor, block_size: i64) -> tch:
     let m = shape[0];
     let n = shape[1];
     let pad = x_shape[0] % block_size;
-    let s = s.reshape(&[shape[0], shape[1], 1]);
+    let s = s.reshape([shape[0], shape[1], 1]);
     let l = if pad > 0 {
-        let t = tch::Tensor::zeros(&[pad, x_shape[1]], (x.kind(), x.device()));
-        let lx = (tch::Tensor::cat(&[x, &t], 0))
-            .reshape(&[m, block_size, n, block_size])
-            .permute(&[0, 2, 1, 3])
-            .reshape(&[m, n, block_size * block_size])
-            .to_kind(tch::Kind::Float);
-        lx
+        let t = tch::Tensor::zeros([pad, x_shape[1]], (x.kind(), x.device()));
+
+        (tch::Tensor::cat(&[x, &t], 0))
+            .reshape([m, block_size, n, block_size])
+            .permute([0, 2, 1, 3])
+            .reshape([m, n, block_size * block_size])
+            .to_kind(tch::Kind::Float)
     } else {
-        let lx = x
-            .reshape(&[m, block_size, n, block_size])
-            .permute(&[0, 2, 1, 3])
-            .reshape(&[m, n, block_size * block_size])
-            .to_kind(tch::Kind::Float);
-        lx
+        x.reshape([m, block_size, n, block_size])
+            .permute([0, 2, 1, 3])
+            .reshape([m, n, block_size * block_size])
+            .to_kind(tch::Kind::Float)
     };
 
-    let o = (l * s)
+    (l * s)
         .to_kind(tch::Kind::BFloat16)
-        .reshape(&[m, n, block_size, block_size])
-        .permute(&[0, 2, 1, 3])
-        .reshape(&x_shape.clone());
-    o
+        .reshape([m, n, block_size, block_size])
+        .permute([0, 2, 1, 3])
+        .reshape(x_shape.clone())
 }
 
 unsafe impl Sync for TorchFFN {}
@@ -204,9 +204,24 @@ impl TorchFFN {
                 let mut w1 = nn::linear(&path / "up", dim, hidden_dim, Default::default());
                 let mut w2 = nn::linear(&path / "down", hidden_dim, dim, Default::default());
                 let mut w3 = nn::linear(&path / "gate", dim, hidden_dim, Default::default());
-                w1.ws = self.weight.up_w.0.shallow_clone();
-                w2.ws = self.weight.down_w.0.shallow_clone();
-                w3.ws = self.weight.gate_w.0.shallow_clone();
+                w1.ws = self
+                    .weight
+                    .up_w
+                    .0
+                    .shallow_clone()
+                    .to_kind(tch::Kind::BFloat16);
+                w2.ws = self
+                    .weight
+                    .down_w
+                    .0
+                    .shallow_clone()
+                    .to_kind(tch::Kind::BFloat16);
+                w3.ws = self
+                    .weight
+                    .gate_w
+                    .0
+                    .shallow_clone()
+                    .to_kind(tch::Kind::BFloat16);
                 w1.bs = None;
                 w2.bs = None;
                 w3.bs = None;
@@ -246,12 +261,15 @@ impl Expert<TchTensor> for TorchFFN {
 
     fn construct(x: crate::x::EKInstance, weight: ExpertWeight<TchTensor>) -> EKResult<Self> {
         let cell: OnceCell<Arc<Mutex<nn::Sequential>>> = OnceCell::new();
-        Ok(TorchFFN {
+        let res = TorchFFN {
             intermediate_dim: x.hidden,
             dim: x.dim,
             module: cell,
             weight,
-        })
+        };
+        // res.load_module();
+
+        Ok(res)
     }
 }
 

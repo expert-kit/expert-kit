@@ -1,0 +1,25 @@
+nodes:
+  - id: 2023us-1
+    address: http://172.10.0.4:51234
+    channel: grpc
+    device: cpu
+
+  - id: 2023us-2
+    address: http://172.10.0.41:51234
+    channel: grpc
+    device: cpu
+
+  - id: 2023us-3
+    address: http://172.10.0.52:51234
+    channel: grpc
+    device: cpu
+
+  - id: 2023us-4
+    address: http://172.10.0.60:51234
+    channel: grpc
+    device: cpu
+
+  - id: 2023us-5
+    address: http://172.10.0.61:51234
+    channel: grpc
+    device: cpu

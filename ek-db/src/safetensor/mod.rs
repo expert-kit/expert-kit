@@ -111,8 +111,26 @@ impl SafeTensorDB {
 
     fn as_safetensor<'a>(&'a self, key: &str) -> EKResult<SafeTensors<'a>> {
         let r = self.data.get_ref(key).unwrap();
-        let st = safetensors::SafeTensors::deserialize(r)?;
-        Ok(st)
+        let st = safetensors::SafeTensors::deserialize(r);
+        match st {
+            Ok(st) => Ok(st),
+            Err(e) => {
+                log::warn!("failed to load from cache: {:} reason={}", key, e);
+                let op_copy = self.dal.clone();
+                let key_copy = key.to_owned();
+                tokio::spawn(async move {
+                    let err = op_copy.delete(&key_copy).await;
+                    if let Err(err) = err {
+                        log::error!(
+                            "failed to delete corrupted safetensor from cache {}: {}",
+                            key_copy,
+                            err
+                        );
+                    };
+                });
+                Err(e)?
+            }
+        }
     }
 
     pub async fn load<'a>(&'a self, desc: &ExpertKey) -> EKResult<SafeTensors<'a>> {
@@ -122,45 +140,34 @@ impl SafeTensorDB {
             let st = self.as_safetensor(&key)?;
             return Ok(st);
         }
-        let cache_hit = self.dal.exists(&desc.as_object_key()).await?;
+
+        let cache_hit = self.dal.exists(&key).await?;
 
         // cache hit -> load from cache
         if cache_hit {
-            let cached = self.load_from_fs_cache(desc).await;
-            match cached {
-                Ok(buf) => {
-                    self.data.insert(&key, buf.to_bytes());
-                }
-                Err(e) => {
-                    log::warn!(
-                        "failed to load from cache: {:} reason={}",
-                        desc.as_object_key(),
-                        e
-                    );
-                }
-            }
+            let cached = self.load_from_fs_cache(desc).await?;
+            self.data.insert(&key, cached.to_bytes());
+            return self.as_safetensor(&key);
         }
 
         // cache miss: load from weight server
         let start = std::time::Instant::now();
-
         let res: Buffer = self.load_from_weight_srv(desc).await?;
-
         log::debug!(
             "loaded from weight server: {}, elapsed_ms={}",
             desc.as_object_key(),
             start.elapsed().as_millis()
         );
+        self.data.insert(&key, res.to_bytes());
         let to_cache = res.clone();
-        let cache_backend = self.dal.clone();
-        let moved_key = key.clone();
+        let op_copy = self.dal.clone();
+        let moved_key = key.to_owned();
         tokio::spawn(async move {
-            let err = cache_backend.write(moved_key.as_str(), to_cache).await;
+            let err = op_copy.write(moved_key.as_str(), to_cache).await;
             if let Err(err) = err {
                 log::error!("failed to cache to local cache {}: {}", moved_key, err);
             }
         });
-        self.data.insert(&key, res.to_bytes());
         let st = self.as_safetensor(&key)?;
         Ok(st)
     }

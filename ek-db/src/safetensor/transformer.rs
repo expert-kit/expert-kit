@@ -1,4 +1,4 @@
-use std::{collections::HashMap, fmt::format, path::PathBuf};
+use std::{collections::HashMap, path::PathBuf};
 
 use actix_web::{HttpResponse, Responder, body::BoxBody, http::header::ContentType};
 use ek_base::error::{EKError, EKResult};
@@ -116,7 +116,7 @@ impl WeightMap {
         Ok(Self { map })
     }
     fn map_layer(&self, key: &String) -> Option<String> {
-        self.map.get(key).map(|e| e.clone())
+        self.map.get(key).cloned()
     }
 }
 
@@ -371,7 +371,7 @@ mod test {
 
         let mut js = JoinSet::new();
 
-        for layer in 3..9{
+        for layer in 3..9 {
             for expert in 1..10 {
                 let p = pretrained.clone();
                 js.spawn(async move { p.get_expert(layer, expert).await });

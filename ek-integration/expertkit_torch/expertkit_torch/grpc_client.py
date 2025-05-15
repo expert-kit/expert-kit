@@ -7,7 +7,7 @@ from expertkit_torch.pbpy.ek.worker.v1 import expert_pb2_grpc, expert_pb2
 from typing import List
 
 MAX_METADATA_SIZE = 20 * 1024  # 20 KB
-MAX_MESSAGE_LENGTH = 100 * 1024 * 1024  # 100 MB
+MAX_MESSAGE_LENGTH = 1024 * 1024 * 1024  # 100 MB
 
 
 class ExpertKitClient:

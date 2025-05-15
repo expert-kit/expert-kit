@@ -184,7 +184,10 @@ impl StateWriterImpl {
             .values(node)
             .on_conflict(schema::node::hostname)
             .do_update()
-            .set(schema::node::hostname.eq(excluded(schema::node::hostname)))
+            .set((
+                schema::node::hostname.eq(excluded(schema::node::hostname)),
+                schema::node::config.eq(excluded(schema::node::config)),
+            ))
             .returning(models::Node::as_returning())
             .get_result(&mut conn)
             .await?;

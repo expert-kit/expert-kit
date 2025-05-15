@@ -35,18 +35,24 @@ from expertkit_torch.grpc_client import ExpertKitClient
 
 set_verbosity_error()
 
+# default timeout interval for ek client, in seconds
+DEFAULT_TIMEOUT_INTVAL = 100
 layer_idx = 0
 
 
-def intercept_moe(with_ek: bool):
+def intercept_moe(
+    enable_ek: bool = True,
+    ek_addr: str = "localhost:5002",
+    ek_model_name: str = "qwen3",    
+):
     class Intercepted(nn.Module):
         client: ExpertKitClient = None
 
         def __init__(self, config):
             super().__init__()
             global layer_idx
-            if with_ek and Intercepted.client is None:
-                Intercepted.client = ExpertKitClient(config.ek_addr, 10)
+            if enable_ek and Intercepted.client is None:
+                Intercepted.client = ExpertKitClient(ek_addr, DEFAULT_TIMEOUT_INTVAL)
             self.layer_id = layer_idx
             layer_idx += 1
             layer_idx = layer_idx % config.num_hidden_layers
@@ -55,7 +61,7 @@ def intercept_moe(with_ek: bool):
             self.norm_topk_prob = config.norm_topk_prob
 
             self.gate = nn.Linear(config.hidden_size, config.num_experts, bias=False)
-            if not with_ek:
+            if not enable_ek:
                 self.experts = nn.ModuleList(
                     [
                         qwen3_moe.Qwen3MoeMLP(
@@ -82,12 +88,11 @@ def intercept_moe(with_ek: bool):
             for seq_idx in range(total_seq_len):
                 eids = selected_experts[seq_idx].tolist()
                 ids = [
-                    f"qwen3/l{self.layer_id}-e{expert_idx}"
+                    f"{ek_model_name}/l{self.layer_id}-e{expert_idx}"
                     for expert_idx in eids
                 ]
                 expert_ids.append(ids)
 
-            # TODO
             outputs = self.client.forward_expert(
                 expert_ids=expert_ids, hidden_state=hidden_states
             )
@@ -158,7 +163,7 @@ def intercept_moe(with_ek: bool):
                 selected_experts, num_classes=self.num_experts
             ).permute(2, 1, 0)
 
-            if with_ek:
+            if enable_ek:
                 final = self.ek_forward(
                     hidden_states=hidden_states,
                     routing_weights=routing_weights,
@@ -186,7 +191,15 @@ def intercept_moe(with_ek: bool):
 tokenizer:Optional[AutoTokenizer] = None
 model:Optional[AutoModelForCausalLM] = None
 
-def evaluate_batch(*, model_path="./", prompts=None, enable_ek=True):
+def evaluate_batch(
+    *, 
+    model_path="./", 
+    prompts="What is MoE Model?", 
+
+    enable_ek=True,
+    ek_addr="localhost:5002",
+    ek_model_name="qwen3"
+):
     """
     Batch inference version of the evaluate function.
     
@@ -205,7 +218,11 @@ def evaluate_batch(*, model_path="./", prompts=None, enable_ek=True):
     if isinstance(prompts, str):
         prompts = [prompts]
     
-    intercept_moe(enable_ek)
+    intercept_moe(
+        enable_ek=enable_ek,
+        ek_addr=ek_addr,
+        ek_model_name=ek_model_name,
+    )
 
     # Load the tokenizer and the model only once
     global tokenizer, model
@@ -277,19 +294,23 @@ def evaluate_batch(*, model_path="./", prompts=None, enable_ek=True):
         if tokenizer.pad_token_id is not None:
             output_ids = [token_id for token_id in output_ids if token_id != tokenizer.pad_token_id]
         
-        # Parse thinking content
+        thinking_finish = False
+        # parsing thinking content
         try:
-            # Find the last occurrence of 151668 (</think>)
+            # rindex finding 151668 (</think>)
             index = len(output_ids) - output_ids[::-1].index(151668)
+            thinking_finish = True
         except ValueError:
-            print(f"Value error for prompt {i}")
-            index = 0
-        
+            # thinking not finish
+            index = len(output_ids) - 1
+
         thinking_content = tokenizer.decode(
             output_ids[:index], skip_special_tokens=True
         ).strip("\n")
+
         content = tokenizer.decode(
-            output_ids[index:], skip_special_tokens=True
+            output_ids[index:], 
+            skip_special_tokens=True
         ).strip("\n")
         
         results.append({
@@ -304,7 +325,7 @@ def evaluate_batch(*, model_path="./", prompts=None, enable_ek=True):
     # if len(results) > 0:
     #     print(f"Output of first result")
     #     print(f"Prompt: {results[0]['prompt']}")
-    #     print(f"Input tokens: {results[0]['input_tokens']}, Output tokens: {result['output_tokens']}")
+    #     print(f"Input tokens: {results[0]['input_tokens']}, Output tokens: {results[0]['output_tokens']}")
     #     print(f"Thinking content: {results[0]['thinking_content']}")
     #     print(f"Content: {results[0]['content']}")
     #     print()
@@ -323,8 +344,6 @@ def evaluate_batch(*, model_path="./", prompts=None, enable_ek=True):
         }
     }
 
-
-# Example usage:
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -339,6 +358,18 @@ def main():
         action=argparse.BooleanOptionalAction,
         help="Enable ExpertKit.",
     )
+    parser.add_argument(
+        "--ek_model_name",
+        type=str,
+        default="qwen3",
+        help="The name of the model used in ExpertKit.",
+    )
+    parser.add_argument(
+        "--ek_addr",
+        type=str,
+        default="localhost:5002",
+        help="The address of the ExpertKit server.",
+    )
     args = parser.parse_args()
 
     test_prompts = [
@@ -350,7 +381,14 @@ def main():
     
     test_batch_sizes = [1, 2, 4, 8, 16, 32, 64, 128, 256]
     for batch_size in test_batch_sizes:
-        batch_result = evaluate_batch(prompts=test_prompts[:batch_size], model_path=args.model_path, enable_ek=args.enable_ek)
+        batch_result = evaluate_batch(
+            model_path=args.model_path, 
+            prompts=test_prompts[:batch_size], 
+            
+            enable_ek=args.enable_ek,
+            ek_addr=args.ek_addr,
+            ek_model_name=args.ek_model_name,
+        )
 
 if __name__ == "__main__":
     main()

@@ -141,7 +141,9 @@ impl NaiveExecutor {
                 let channel = self.registry.lock().await.select(exp_id).await?;
 
                 let mut cli =
-                    v1::computation_service_client::ComputationServiceClient::new(channel);
+                    v1::computation_service_client::ComputationServiceClient::new(channel)
+                        .max_decoding_message_size(1024 * 1024 * 1024)
+                        .max_encoding_message_size(1024 * 1024 * 1024);
 
                 let seq_gids = egress_req
                     .1

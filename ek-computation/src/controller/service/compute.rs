@@ -17,6 +17,8 @@ impl ComputationService for ComputationProxyServiceImpl {
         &self,
         request: tonic::Request<v1::ForwardReq>,
     ) -> Result<tonic::Response<v1::ForwardResp>, tonic::Status> {
+        log::info!("forward request: seq={}", request.get_ref().sequences.len());
+        let start = std::time::Instant::now();
         let mut rx = {
             let mut lg = self.executor.lock().await;
             lg.submit(request.get_ref()).await?
@@ -41,6 +43,7 @@ impl ComputationService for ComputationProxyServiceImpl {
                     continue
                 }
                 res = rx.recv() => {
+                    log::info!("forward request: elapsed_ms={:?}", start.elapsed().as_millis());
                     if let Some(resp) = res {
                         return Ok(tonic::Response::new(resp.as_ref().clone()));
                     } else {
