@@ -110,8 +110,7 @@ FROM base AS ek-runtime
 WORKDIR /ek
 
 # Copy binary from build stage
-COPY --from=ek-rust-build /app/target/release/controller /usr/local/bin/
-COPY --from=ek-rust-build /app/target/release/worker /usr/local/bin/
+COPY --from=ek-rust-build /root/.cargo/bin/diesel /usr/local/bin/
 COPY --from=ek-rust-build /app/target/release/ek-cli /usr/local/bin/
 
 # Prepare ek default config
@@ -129,10 +128,10 @@ db:
 
 weight:
   server:
-    addr: http://?
+    addr: http://localhost:6543
   cache:
     Fs:
-      path: /
+      path: /ek/weight_cache
 
 worker:
   id: local_test
