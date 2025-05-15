@@ -1,54 +1,66 @@
 ####################################
 # BASE STAGE
 ####################################
-FROM ubuntu:24.04 AS base
+FROM openeuler/openeuler:22.03-lts-sp4 AS base
 
-ARG PROXY
 ARG TORCH_VERSION
 
+# Env variables
+## Torch Related
+ENV TORCH_VERSION=${TORCH_VERSION:-2.5.1}
+ENV LIBTORCH_BASE_DIR=/opt/torch
+ENV LIBTORCH=${LIBTORCH_BASE_DIR}/libtorch
+ENV LIBTORCH_EXT_LIBS=${LIBTORCH_BASE_DIR}/torch.libs
+ENV LD_LIBRARY_PATH=${LIBTORCH}/lib:${LIBTORCH_EXT_LIBS}
+## Rust Related
+ENV PATH="/root/.cargo/bin:/root/.local/bin:${PATH}"
+
+# Install essential build dependencies
+RUN dnf install -y \
+    git \
+    python3 \
+    wget \
+    tar \
+    curl \
+    pkg-config  \
+    openssl-devel \
+    unzip  \
+    protobuf-compiler \
+    libpq-devel
+
+# Prepare libtorch
+RUN mkdir -p ${LIBTORCH} && mkdir -p ${LIBTORCH_EXT_LIBS}
+COPY --from=quay.io/ascend/vllm-ascend:v0.8.4rc1-openeuler /usr/local/python3.10/lib/python3.10/site-packages/torch ${LIBTORCH}
+COPY --from=quay.io/ascend/vllm-ascend:v0.8.4rc1-openeuler /usr/local/python3.10/lib/python3.10/site-packages/torch.libs ${LIBTORCH_EXT_LIBS}
+
+# # Prepare Ascend
+# COPY --from=quay.io/ascend/vllm-ascend:v0.8.4rc1-openeuler /usr/local/Ascend /usr/local/Ascend
+# RUN cat >> ~/.bashrc <<EOF
+# source /usr/local/Ascend/ascend-toolkit/set_env.sh
+# source /usr/local/Ascend/nnal/atb/set_env.sh
+# EOF
+
+####################################
+# rust build STAGE
+####################################
+FROM base AS ek-rust-build
+
+ARG PROXY
 # Env variables
 ## Proxy
 ENV HTTP_PROXY=${PROXY}
 ENV HTTPS_PROXY=${PROXY}
 ENV NO_PROXY=localhost,127.0.0.1
-## Torch Related
-ENV TORCH_VERSION=${TORCH_VERSION:-2.7.0}
+## Rust build related
+ENV RUSTFLAGS="-C link-args=-Wl,-rpath,${LIBTORCH}/lib"
+ENV CXXFLAGS="-D_GLIBCXX_USE_CXX11_ABI=0"
 
-ENV LIBTORCH_BASE_DIR=/opt/torch
-ENV LIBTORCH=${LIBTORCH_BASE_DIR}/libtorch
-ENV LD_LIBRARY_PATH=${LIBTORCH}/lib
-## Rust Related
-ENV PATH="/root/.cargo/bin:/root/.local/bin:${PATH}"
-ENV CXXFLAGS="-D_GLIBCXX_USE_CXX11_ABI=1"
-
-# Install essential build dependencies
-RUN apt-get update && apt-get install -y \
-    build-essential \
-    pkg-config  \
-    unzip  \
-    tar \
-    git \
-    wget \
-    curl \
-    libssl-dev \
-    libpq-dev\
-    protobuf-compiler
-
-# Prepare libtorch
-WORKDIR /
-RUN mkdir -p ${LIBTORCH_BASE_DIR} && \
-    wget -q https://download.pytorch.org/libtorch/cpu/libtorch-cxx11-abi-shared-with-deps-${TORCH_VERSION}%2Bcpu.zip && \
-    unzip /libtorch-cxx11-abi-shared-with-deps-${TORCH_VERSION}+cpu.zip -d ${LIBTORCH_BASE_DIR} && \
-    rm /libtorch-cxx11-abi-shared-with-deps-${TORCH_VERSION}+cpu.zip
-
-####################################
-# RUST BUILD STAGE
-####################################
-FROM base AS ek-rust-build
+# Prepare build env
+RUN dnf groupinstall -y 'Development Tools'
 
 # Prepare rust toolchain
 WORKDIR /app
-COPY rust-toolchain.toml /app/
+COPY rust-toolchain.toml /app
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain none && \
     rustup show
 
@@ -69,8 +81,9 @@ COPY ./ek-computation/Cargo.toml ./ek-computation/
 COPY ./ek-cli/Cargo.toml ./ek-cli/
 COPY ./ek-db/Cargo.toml ./ek-db/
 COPY ./Cargo.toml ./Cargo.lock ./
+# TODO: hard code for tch-rs, for only tch-rs==0.18.1 work for libtorch==2.5.1
+RUN sed -i 's/tch = "0.20.0"/tch = "0.18.1"\ntorch-sys = "0.18.1"/g' Cargo.toml
 RUN --mount=type=cache,target=/usr/local/cargo/registry cargo build --release --lib
-
 ## Build the rest of the project
 COPY ek-base/ ./ek-base/
 COPY ek-benchmark/ ./ek-benchmark/
@@ -78,6 +91,7 @@ COPY ek-computation/ ./ek-computation/
 COPY ek-cli/ ./ek-cli/
 COPY ek-db/ ./ek-db/
 COPY ek-proto/ ./ek-proto/
+
 RUN --mount=type=cache,target=/usr/local/cargo/registry  <<EOF
     touch ./ek-base/src/lib.rs
     touch ./ek-computation/src/lib.rs
@@ -94,12 +108,6 @@ FROM base AS ek-runtime
 
 # Set env
 WORKDIR /ek
-ENV LIBTORCH=/opt/torch/libtorch
-ENV LD_LIBRARY_PATH=$LIBTORCH/lib
-# Unset proxy
-ENV HTTP_PROXY=
-ENV HTTPS_PROXY=
-ENV NO_PROXY=
 
 # Copy binary from build stage
 COPY --from=ek-rust-build /root/.cargo/bin/diesel /usr/local/bin/
@@ -123,7 +131,7 @@ weight:
     addr: http://localhost:6543
   cache:
     Fs:
-      path: /ek/weight_cache/
+      path: /ek/weight_cache
 
 worker:
   id: local_test
