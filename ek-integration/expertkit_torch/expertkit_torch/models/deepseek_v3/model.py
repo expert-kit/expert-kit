@@ -243,13 +243,13 @@ if __name__ == "__main__":
         "--model_name",
         type=str,
         required=True,
-        help="ExpertKit address. like http://localhost:5002",
+        help="The name of the model used in ExpertKit. like qwen3",
     )
     parser.add_argument(
         "--seq",
         type=int,
         required=False,
-        help="ExpertKit address. like http://localhost:5002",
+        help="Batch size for evaluation.",
         default=1,
     )
     args = parser.parse_args()
