@@ -1,4 +1,2 @@
 [lfs]
-    auto = false ; Disable automatic LFS downloads by default
-    # Only automatically download these specific patterns
-    # fetchinclude = important_asset.bin, essential_textures/*
+   fetchexclude = *
