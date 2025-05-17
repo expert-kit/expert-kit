@@ -13,7 +13,7 @@ use once_cell::sync::OnceCell;
 use safetensors::tensor::TensorView;
 use tch::{
     self, Tensor,
-    nn::{self, Module, LinearConfig},
+    nn::{self, Module},
 };
 
 use super::{DType, Device, EkTensor, Expert, ExpertShape, ExpertWeight, FromSafeTensor};
@@ -197,48 +197,17 @@ impl TorchFFN {
     pub fn load_module(&self) -> Arc<Mutex<nn::Sequential>> {
         let m = self.module.get_or_init(|| {
             tch::no_grad(|| {
-                let dim = self.dim as i64;
-                let hidden_dim = self.intermediate_dim as i64;
-                let vs = nn::VarStore::new(tch::Device::Cpu);
-                let path = vs.root();
-                let mut w1 = nn::linear(&path / "up", dim, hidden_dim, LinearConfig{
-                    ws_init: nn::Init::Const(0.0),
-                    bs_init: None,
-                    bias: false,
+                let w1_tensor = self.weight.up_w.0.shallow_clone().to_kind(tch::Kind::BFloat16);
+                let w2_tensor = self.weight.down_w.0.shallow_clone().to_kind(tch::Kind::BFloat16);
+                let w3_tensor = self.weight.gate_w.0.shallow_clone().to_kind(tch::Kind::BFloat16);
+            
+                let module = nn::seq().add_fn(move |x| {
+                    let _up = x.matmul(&w1_tensor.transpose(0, 1));
+                    let _gate = x.matmul(&w3_tensor.transpose(0, 1));
+                    let _hidden = _up * _gate.silu();
+                    _hidden.matmul(&w2_tensor.transpose(0, 1))
                 });
-                let mut w2 = nn::linear(&path / "down", hidden_dim, dim, LinearConfig{
-                    ws_init: nn::Init::Const(0.0),
-                    bs_init: None,
-                    bias: false,
-                });
-                let mut w3 = nn::linear(&path / "gate", dim, hidden_dim, LinearConfig{
-                    ws_init: nn::Init::Const(0.0),
-                    bs_init: None,
-                    bias: false,
-                });
-                w1.ws = self
-                    .weight
-                    .up_w
-                    .0
-                    .shallow_clone()
-                    .to_kind(tch::Kind::BFloat16);
-                w2.ws = self
-                    .weight
-                    .down_w
-                    .0
-                    .shallow_clone()
-                    .to_kind(tch::Kind::BFloat16);
-                w3.ws = self
-                    .weight
-                    .gate_w
-                    .0
-                    .shallow_clone()
-                    .to_kind(tch::Kind::BFloat16);
-                w1.bs = None;
-                w2.bs = None;
-                w3.bs = None;
-                let module =
-                    nn::seq().add_fn(move |x| (x.apply(&w1) * x.apply(&w3).silu()).apply(&w2));
+
                 Arc::new(Mutex::new(module))
             })
         });
