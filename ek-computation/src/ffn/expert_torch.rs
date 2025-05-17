@@ -13,7 +13,7 @@ use once_cell::sync::OnceCell;
 use safetensors::tensor::TensorView;
 use tch::{
     self, Tensor,
-    nn::{self, Module},
+    nn::{self, Module, LinearConfig},
 };
 
 use super::{DType, Device, EkTensor, Expert, ExpertShape, ExpertWeight, FromSafeTensor};
@@ -201,9 +201,21 @@ impl TorchFFN {
                 let hidden_dim = self.intermediate_dim as i64;
                 let vs = nn::VarStore::new(tch::Device::Cpu);
                 let path = vs.root();
-                let mut w1 = nn::linear(&path / "up", dim, hidden_dim, Default::default());
-                let mut w2 = nn::linear(&path / "down", hidden_dim, dim, Default::default());
-                let mut w3 = nn::linear(&path / "gate", dim, hidden_dim, Default::default());
+                let mut w1 = nn::linear(&path / "up", dim, hidden_dim, LinearConfig{
+                    ws_init: nn::Init::Const(0.0),
+                    bs_init: None,
+                    bias: false,
+                });
+                let mut w2 = nn::linear(&path / "down", hidden_dim, dim, LinearConfig{
+                    ws_init: nn::Init::Const(0.0),
+                    bs_init: None,
+                    bias: false,
+                });
+                let mut w3 = nn::linear(&path / "gate", dim, hidden_dim, LinearConfig{
+                    ws_init: nn::Init::Const(0.0),
+                    bs_init: None,
+                    bias: false,
+                });
                 w1.ws = self
                     .weight
                     .up_w
