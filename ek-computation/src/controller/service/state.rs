@@ -1,7 +1,10 @@
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 use crate::{
-    controller::dispatcher::{DISPATCHER, Dispatcher},
+    controller::{
+        dispatcher::{DISPATCHER, Dispatcher},
+        registry::get_registry,
+    },
     proto::ek::{
         object::v1::ExpertSlice,
         worker::v1::{self, retrieve_state_resp::ExpertWithState},
@@ -13,7 +16,10 @@ use crate::{
     },
 };
 use ek_base::error::EKError;
-use tokio::sync::{RwLock, mpsc};
+use tokio::{
+    sync::{RwLock, mpsc},
+    time::timeout,
+};
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Response, Result, Status, Streaming};
 
@@ -28,27 +34,47 @@ impl StateServerImpl {
         id: String,
     ) {
         let w = StateWriterImpl {};
-        while let Some(msg) = req.get_mut().message().await.unwrap() {
-            let err = w
-                .node_upsert(NewNode {
-                    hostname: msg.id.clone(),
-                    device: msg.device.clone(),
-                    config: serde_json::json!({
-                        "addr": msg.addr.clone(),
-                        "channel": msg.channel.clone(),
-                    }),
-                })
-                .await;
-            if let Err(e) = err {
-                log::error!("worker ping error, can not upsert node: {}", e);
-            }
+        loop {
+            match timeout(Duration::from_secs(60), req.get_mut().message()).await {
+                Ok(Ok(Some(msg))) => {
+                    let err = w
+                        .node_upsert(NewNode {
+                            hostname: msg.id.clone(),
+                            device: msg.device.clone(),
+                            config: serde_json::json!({
+                                "addr": msg.addr.clone(),
+                                "channel": msg.channel.clone(),
+                            }),
+                        })
+                        .await;
 
-            let e = w.node_update_seen(&msg.id).await;
-            if let Err(e) = e {
-                log::error!("worker ping error: {}", e);
+                    if let Err(e) = err {
+                        log::error!("worker ping error, can not upsert node: {}", e);
+                    }
+
+                    let e = w.node_update_seen(&msg.id).await;
+                    if let Err(e) = e {
+                        log::error!("worker ping error: {}", e);
+                    }
+                    continue;
+                }
+                Ok(Ok(None)) => {
+                    log::warn!("worker ping stream closed for worker_id={}", id);
+                    get_registry().lock().await.deregister(&id).await;
+                    return;
+                }
+                Ok(Err(e)) => {
+                    log::error!("worker ping stream error for worker_id={}, {}", id, e);
+                    get_registry().lock().await.deregister(&id).await;
+                    return;
+                }
+                Err(e) => {
+                    log::error!("worker ping stream timeout for worker_id={}, {}", id, e);
+                    get_registry().lock().await.deregister(&id).await;
+                    return;
+                }
             }
         }
-        log::warn!("worker ping stream closed for worker_id={}", id);
     }
 }
 
