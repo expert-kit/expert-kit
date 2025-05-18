@@ -180,7 +180,6 @@ def intercept_moe(
                 selected_experts, num_classes=self.num_experts
             ).permute(2, 1, 0)
 
-            # Expert computation (profiled within these methods)
             if enable_ek:
                 final = self.ek_forward(
                     hidden_states=hidden_states,

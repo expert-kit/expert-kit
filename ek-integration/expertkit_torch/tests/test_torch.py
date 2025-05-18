@@ -14,7 +14,7 @@ from pathlib import Path
 
 sys.path.append(str(Path(__file__).parent.parent))
 
-from expertkit_torch.model import Transformer, ModelArgs
+from expertkit_torch.models.deepseek_v3.model import Transformer, ModelArgs
 
 DEFAULT_DEVICE = torch.device("cuda")
 

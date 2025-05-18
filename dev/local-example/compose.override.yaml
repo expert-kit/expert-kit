@@ -1,0 +1,34 @@
+version: "3"
+services:
+  ek-weight-server:
+    command: 
+      - "ek-cli"
+      - "weight-server"
+      - "--model"
+      - "/ek/qwen3"
+    ports:
+      - 6543:6543
+    volumes:
+      - ./local.inventory.yaml:/ek/local.inventory.yaml
+      - &config_path_map ./config.yaml:/etc/expert-kit/config.yaml
+      - &model_path_map ../../data/qwen3:/ek/qwen3
+    environment:
+      - RUST_LOG=info
+
+  ek-controller:
+    ports:
+      - 5001:5001
+      - 5002:5002
+    volumes:
+      - *config_path_map
+      - *model_path_map
+    environment:
+      - RUST_LOG=debug
+
+  ek-worker:
+    command: ["ek-cli", "worker"]
+    volumes:
+      - *config_path_map
+      - *model_path_map
+    environment:
+      - RUST_LOG=info
