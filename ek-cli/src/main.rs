@@ -84,10 +84,11 @@ async fn main() {
     }
     env_logger::init_from_env(env_logger::Env::default().default_filter_or("info"));
     let mut config_src = vec![];
-    let env_config = std::option_env!("EK_CONFIG");
-    if let Some(path) = env_config {
-        config_src.push(path.to_string());
+
+    if let Ok(path) = std::env::var("EK_CONFIG") {
+        config_src.push(path);
     }
+    
     if let Some(path) = cli.config {
         config_src.push(path.to_string());
     }
