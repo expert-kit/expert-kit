@@ -3,6 +3,7 @@
 
 pub mod controller;
 pub mod ffn;
+pub mod onnx;
 pub mod proto;
 mod schema;
 pub mod state;

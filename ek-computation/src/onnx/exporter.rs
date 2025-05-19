@@ -1,6 +1,6 @@
 use prost::Message;
 
-use crate::proto::pbonnx;
+use crate::{ffn::DType, proto::pbonnx};
 
 enum ActFn {
     SiLU,
@@ -8,12 +8,37 @@ enum ActFn {
 pub struct ExpertOnnxBuilder {
     pub intermediate_size: i64,
     pub hidden_size: i64,
+    pub data_type: DType,
+}
+
+impl From<pbonnx::tensor_proto::DataType> for DType {
+    fn from(value: pbonnx::tensor_proto::DataType) -> Self {
+        match value {
+            pbonnx::tensor_proto::DataType::Bfloat16 => DType::BFloat16,
+            pbonnx::tensor_proto::DataType::Float => DType::Float,
+            pbonnx::tensor_proto::DataType::Int8 => DType::Int8,
+            pbonnx::tensor_proto::DataType::Int16 => DType::Int16,
+            _ => unimplemented!(),
+        }
+    }
+}
+
+impl Into<pbonnx::tensor_proto::DataType> for DType {
+    fn into(self) -> pbonnx::tensor_proto::DataType {
+        match self {
+            DType::BFloat16 => pbonnx::tensor_proto::DataType::Bfloat16,
+            DType::Float => pbonnx::tensor_proto::DataType::Float,
+            DType::Int8 => pbonnx::tensor_proto::DataType::Int8,
+            DType::Int16 => pbonnx::tensor_proto::DataType::Int16,
+            _ => unimplemented!(),
+        }
+    }
 }
 
 impl ExpertOnnxBuilder {
     fn tensor_pv(&self, p1: &str, v2: i64) -> pbonnx::type_proto::Value {
         pbonnx::type_proto::Value::TensorType(pbonnx::type_proto::Tensor {
-            elem_type: 1,
+            elem_type: Into::<pbonnx::tensor_proto::DataType>::into(self.data_type) as i32,
             shape: Some(pbonnx::TensorShapeProto {
                 dim: vec![
                     pbonnx::tensor_shape_proto::Dimension {
@@ -33,7 +58,7 @@ impl ExpertOnnxBuilder {
 
     fn tensor_vv(&self, v1: i64, v2: i64) -> pbonnx::type_proto::Value {
         pbonnx::type_proto::Value::TensorType(pbonnx::type_proto::Tensor {
-            elem_type: 1,
+            elem_type: Into::<pbonnx::tensor_proto::DataType>::into(self.data_type) as i32,
             shape: Some(pbonnx::TensorShapeProto {
                 dim: vec![
                     pbonnx::tensor_shape_proto::Dimension {
@@ -194,12 +219,15 @@ mod test {
     use ort::session::Session;
     use prost::Message;
 
+    use crate::ffn::DType;
+
     #[test]
     fn test_basic_export() {
         ort::init().commit().unwrap();
         let builder = super::ExpertOnnxBuilder {
             intermediate_size: 7168,
             hidden_size: 2048,
+            data_type: DType::Float,
         };
         let model = builder.build();
         let raw = model.encode_to_vec();

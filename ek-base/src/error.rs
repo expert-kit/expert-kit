@@ -64,6 +64,9 @@ pub enum EKError {
 
     #[error("reqwest error {0}")]
     ReqwestError(#[from] reqwest::Error),
+
+    #[error("onnx error {0}")]
+    OnnxError(#[from] ort::Error),
 }
 
 pub type EKResult<T> = std::result::Result<T, EKError>;
