@@ -1,8 +1,14 @@
 mod core;
+use tokio::select;
+use tokio::signal;
+use tokio_util::sync::CancellationToken;
+
 mod manager;
 pub mod server;
 pub mod state;
 pub mod x;
+
+use crate::x::get_graceful_shutdown_ch;
 
 use super::{
     proto::ek::worker::v1::computation_service_server::ComputationServiceServer,
@@ -11,13 +17,15 @@ use super::{
 use ek_base::{config::get_ek_settings, error::EKResult};
 
 pub async fn worker_main() -> EKResult<()> {
+    let token = CancellationToken::new();
+    let cli_cancel = token.clone();
     let cli = tokio::task::spawn(async move {
         let worker_id = x::get_worker_id();
         log::info!("ek hostname: {:}", worker_id);
         let control_endpoint = x::get_controller_addr();
         log::info!("control endpoint {:}", control_endpoint.uri());
-        let mut state_client = StateClient::new( control_endpoint, &worker_id);
-        if let Err(e) = state_client.run().await {
+        let mut state_client = StateClient::new(control_endpoint, &worker_id);
+        if let Err(e) = state_client.run(cli_cancel).await {
             log::error!("state client error {:}", e);
         }
     });
@@ -41,7 +49,17 @@ pub async fn worker_main() -> EKResult<()> {
         }
     });
 
-    cli.await?;
-    srv.await?;
+    select! {
+        _ = cli => { },
+        _ = srv => { },
+        _ = signal::ctrl_c() => {
+            log::info!("ctrl-c signal received, shutting down");
+            token.clone().cancel();
+            let(_,rx) = get_graceful_shutdown_ch();
+            rx.lock().await.recv().await;
+            log::info!("graceful shutdown channel received, shutting down now");
+        }
+    };
+
     Ok(())
 }
