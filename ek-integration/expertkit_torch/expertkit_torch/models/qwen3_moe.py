@@ -20,16 +20,20 @@
 
 import argparse
 import time
+import torch
+import torch.nn.functional as F
+
+from typing import Optional, Dict, Any, List
 from transformers import (
     AutoTokenizer,
     AutoModelForCausalLM,
 )
 from transformers.utils.logging import set_verbosity_error
 from transformers.models.qwen3_moe import modeling_qwen3_moe as qwen3_moe
-import torch
 from torch import nn
-import torch.nn.functional as F
 from expertkit_torch.grpc_client import ExpertKitClient
+
+from expertkit_torch.utils.profiler_manager import ProfilerManager
 
 set_verbosity_error()
 
@@ -43,16 +47,17 @@ def intercept_moe(
     ek_addr: str = "localhost:5002",
     ek_model_name: str = "qwen3",    
 ):
-    class Intercepted(nn.Module):
+    class InterceptedMoE(nn.Module):
         client: ExpertKitClient = None
 
         def __init__(self, config):
             super().__init__()
             global layer_idx
-            if enable_ek and Intercepted.client is None:
-                Intercepted.client = ExpertKitClient(ek_addr, DEFAULT_TIMEOUT_INTVAL)
+            if enable_ek and InterceptedMoE.client is None:
+                InterceptedMoE.client = ExpertKitClient(ek_addr, DEFAULT_TIMEOUT_INTVAL)
             self.layer_id = layer_idx
             layer_idx += 1
+            layer_idx = layer_idx % config.num_hidden_layers
             self.num_experts = config.num_experts
             self.top_k = config.num_experts_per_tok
             self.norm_topk_prob = config.norm_topk_prob
@@ -68,8 +73,6 @@ def intercept_moe(
                     ]
                 )
 
-            # self.experts = ([idx for idx in range(self.num_experts)])
-
         def ek_forward(
             self,
             *,
@@ -80,6 +83,9 @@ def intercept_moe(
             sequence_length: int,
             hidden_dim: int,
         ):
+            # Start timing for expert computation
+            start_time = time.time()
+            
             expert_ids = []
             total_seq_len, _ = hidden_states.shape
             for seq_idx in range(total_seq_len):
@@ -100,6 +106,10 @@ def intercept_moe(
             final_hidden_states = output.reshape(
                 batch_size, sequence_length, hidden_dim
             )
+            
+            # Record expert computation time if profiler is available
+            end_time = time.time()
+
             return final_hidden_states
 
         def normal_forward(
@@ -113,6 +123,9 @@ def intercept_moe(
             sequence_length: int,
             hidden_dim: int,
         ):
+            # Start timing for expert computation
+            start_time = time.time()
+            
             final_hidden_states = torch.zeros(
                 (batch_size * sequence_length, hidden_dim),
                 dtype=hidden_states.dtype,
@@ -131,14 +144,21 @@ def intercept_moe(
             final_hidden_states = final_hidden_states.reshape(
                 batch_size, sequence_length, hidden_dim
             )
+            
+            # Record expert computation time if profiler is available
+            end_time = time.time()
+                
             return final_hidden_states
 
         def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-            """ """
+            # Timing overall MoE forward pass
+            forward_start = time.time()
+            
             batch_size, sequence_length, hidden_dim = hidden_states.shape
             hidden_states = hidden_states.view(-1, hidden_dim)
+            
+            # Process router logits (no need to time separately)
             router_logits = self.gate(hidden_states)
-
             routing_weights = F.softmax(router_logits, dim=1, dtype=torch.float)
             routing_weights, selected_experts = torch.topk(
                 routing_weights, self.top_k, dim=-1
@@ -180,77 +200,140 @@ def intercept_moe(
                     hidden_dim=hidden_dim,
                 )
 
+            # Record overall MoE time only if profiler is available
+            forward_end = time.time()
+
             return final, router_logits
 
     delattr(qwen3_moe, "Qwen3MoeSparseMoeBlock")
-    setattr(qwen3_moe, "Qwen3MoeSparseMoeBlock", Intercepted)
+    setattr(qwen3_moe, "Qwen3MoeSparseMoeBlock", InterceptedMoE)
 
+tokenizer: Optional[AutoTokenizer] = None
+model: Optional[AutoModelForCausalLM] = None
 
-def evaluate(
+def evaluate_batch(
     *, 
     model_path="./", 
-    prompt="What is MoE Model?", 
-
+    prompts="What is MoE Model?", 
     enable_ek=True,
     ek_addr="localhost:5002",
     ek_model_name="qwen3"
-):
+) -> Dict[str, Any]:
+    """
+    Batch inference with performance profiling.
+    
+    Args:
+        model_path: Path to the pretrained model
+        prompts: List of prompt strings for batch processing
+        enable_ek: Whether to enable expert knowledge
+    
+    Returns:
+        Dictionary containing results and performance metrics
+    """
+    if prompts is None:
+        prompts = ["What is MoE Model?"]
+    
+    # Convert str to list
+    if isinstance(prompts, str):
+        prompts = [prompts]
+    
+    # First intercept the MoE module - completely independent of profiling
     intercept_moe(
         enable_ek=enable_ek,
         ek_addr=ek_addr,
         ek_model_name=ek_model_name,
     )
-    # load the tokenizer and the model
-    tokenizer = AutoTokenizer.from_pretrained(
-        pretrained_model_name_or_path=model_path,
-    )
-    model = AutoModelForCausalLM.from_pretrained(
-        pretrained_model_name_or_path=model_path,
-        torch_dtype="auto",
-    )
 
-    # prepare the model input
-    messages = [{"role": "user", "content": prompt}]
-    text = tokenizer.apply_chat_template(
-        messages,
-        tokenize=False,
-        add_generation_prompt=True,
-        enable_thinking=True,  # Switches between thinking and non-thinking modes. Default is True.
-    )
-    model_inputs = tokenizer([text], return_tensors="pt").to(model.device)
+    # Load the tokenizer and the model only once
+    global tokenizer, model
+    if tokenizer is None:    
+        tokenizer = AutoTokenizer.from_pretrained(
+            pretrained_model_name_or_path=model_path,
+        )
+    if model is None:
+        model = AutoModelForCausalLM.from_pretrained(
+            pretrained_model_name_or_path=model_path,
+            torch_dtype="auto",
+        )
+    
+    # Initialize profiler manager with context manager
+    with ProfilerManager(batch_size=len(prompts)) as profiler:
+        # Wrap model with profiler - completely non-invasive
+        profiler.wrap_model(model)
+        
+        # Prepare batch messages
+        batch_messages = []
+        for prompt in prompts:
+            messages = [{"role": "user", "content": prompt}]
+            text = tokenizer.apply_chat_template(
+                messages,
+                tokenize=False,
+                add_generation_prompt=True,
+                enable_thinking=True,
+            )
+            batch_messages.append(text)
+        
+        # Tokenize batch inputs with padding
+        model_inputs = tokenizer(
+            batch_messages, 
+            return_tensors="pt", 
+            padding=True, 
+            truncation=True
+        ).to(model.device)
+        
+        # Generate responses - profiling happens automatically via hooks
+        generated_ids = model.generate(
+            **model_inputs, 
+            max_new_tokens=50,
+            pad_token_id=tokenizer.eos_token_id
+        )
+        
+        # Process generated sequences
+        results = []
+        for i in range(len(prompts)):
+            # Extract output tokens
+            input_length = len(model_inputs.input_ids[i])
+            output_ids = generated_ids[i][input_length:].tolist()
+            
+            # Remove padding tokens
+            if tokenizer.pad_token_id is not None:
+                output_ids = [token_id for token_id in output_ids if token_id != tokenizer.pad_token_id]
+            
+            # Extract thinking content
+            thinking_finish = False
+            try:
+                # Find </think> token (151668)
+                index = len(output_ids) - output_ids[::-1].index(151668)
+                thinking_finish = True
+            except ValueError:
+                # Thinking not finished
+                index = len(output_ids) - 1
 
-    # conduct text completion
-    now = time.time()
-    generated_ids = model.generate(**model_inputs, max_new_tokens=50)
-    end = time.time()
-    print("elapsed time:", end - now)
-    output_ids = generated_ids[0][len(model_inputs.input_ids[0]) :].tolist()
+            thinking_content = tokenizer.decode(
+                output_ids[:index], skip_special_tokens=True
+            ).strip("\n")
 
-    thinking_finish = False
-    # parsing thinking content
-    try:
-        # rindex finding 151668 (</think>)
-        index = len(output_ids) - output_ids[::-1].index(151668)
-        thinking_finish = True
-    except ValueError:
-        # thinking not finish
-        index = len(output_ids) - 1
-
-    thinking_content = tokenizer.decode(
-        output_ids[:index], skip_special_tokens=True
-    ).strip("\n")
-    content = tokenizer.decode(output_ids[index:], skip_special_tokens=True).strip("\n")
-
-    print("thinking content:", thinking_content)
-    if thinking_finish:
-        print("content:", content)
-    return {
-        "thinking_content": thinking_content,
-        "content": content,
-    }
+            content = tokenizer.decode(
+                output_ids[index:], 
+                skip_special_tokens=True
+            ).strip("\n")
+            
+            results.append({
+                "prompt": prompts[i],
+                "thinking_content": thinking_content,
+                "content": content,
+                "input_tokens": len(model_inputs.input_ids[i]),
+                "output_tokens": len(output_ids),
+            })
+        
+        # Context manager exit will automatically unwrap the model and print the report
+        return {
+            "results": results,
+            "performance": profiler.report()
+        }
 
 
-if __name__ == "__main__":
+def main():
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--model_path",
@@ -260,8 +343,8 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--enable_ek",
-        type=bool,
         action=argparse.BooleanOptionalAction,
+        default=True,
         help="Enable ExpertKit.",
     )
     parser.add_argument(
@@ -276,12 +359,29 @@ if __name__ == "__main__":
         default="localhost:5002",
         help="The address of the ExpertKit server.",
     )
-    args = parser.parse_args()
-    evaluate(
-        model_path=args.model_path,
-        prompt="What is MoE Model?", 
-
-        enable_ek=args.enable_ek,
-        ek_addr=args.ek_addr,
-        ek_model_name=args.ek_model_name,
+    parser.add_argument(
+        "--detail_profile",
+        action="store_true",
+        help="Enable detailed profiling of model components (attention vs expert).",
     )
+    args = parser.parse_args()
+
+    test_prompts = [
+        "What is MoE Model?",
+        "Explain the benefits of mixture of experts.",
+        "How does MoE improve model efficiency?",
+        "Compare MoE with dense models.",
+    ] * 512
+    
+    test_batch_sizes = [1, 2, 4, 8, 16, 32, 64, 128, 256]
+    for batch_size in test_batch_sizes:
+        batch_result = evaluate_batch(
+            model_path=args.model_path, 
+            prompts=test_prompts[:batch_size], 
+            enable_ek=args.enable_ek,
+            ek_addr=args.ek_addr,
+            ek_model_name=args.ek_model_name,
+        )
+
+if __name__ == "__main__":
+    main()
