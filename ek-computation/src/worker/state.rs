@@ -4,8 +4,7 @@ use crate::{
     proto::ek::{
         object::v1::Metadata,
         worker::v1::{
-            RetrieveStateReq, retrieve_state_resp::ExpertWithState,
-            state_service_client::StateServiceClient,
+            ExchangeReq, exchange_resp::ExpertWithState, state_service_client::StateServiceClient,
         },
     },
     x::EKInstance,
@@ -46,11 +45,11 @@ impl StateClient {
         }
     }
 
-    async fn get_request_stream(worker_id: String) -> impl Stream<Item = RetrieveStateReq> {
+    async fn get_request_stream(worker_id: String) -> impl Stream<Item = ExchangeReq> {
         let settings = get_ek_settings();
         let dev = settings.worker.device.clone();
         let dev = dev.unwrap_or("cpu".to_string());
-        tokio_stream::iter(1..usize::MAX).map(move |_| RetrieveStateReq {
+        tokio_stream::iter(1..usize::MAX).map(move |_| ExchangeReq {
             id: worker_id.clone(),
             addr: format!(
                 "http://{}:{}",
@@ -58,6 +57,7 @@ impl StateClient {
             ),
             channel: "grpc".to_string(),
             device: dev.clone(),
+            last_will: false,
         })
     }
 
@@ -66,7 +66,7 @@ impl StateClient {
         let req_stream = StateClient::get_request_stream(self.worker_id.to_owned())
             .await
             .throttle(std::time::Duration::from_secs(3));
-        let res = cli.retrieve(req_stream).await?;
+        let res = cli.exchange(req_stream).await?;
         let mut stream = res.into_inner();
         while let Some(msg) = stream.next().await {
             let msg = msg?;

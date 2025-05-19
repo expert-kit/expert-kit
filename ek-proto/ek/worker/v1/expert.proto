@@ -4,9 +4,7 @@ package ek.worker.v1;
 import "ek/object/v1/object.proto";
 
 message ForwardReq {
-  message SequenceInfo {
-    repeated string experts = 2;
-  }
+  message SequenceInfo { repeated string experts = 2; }
   string instance_id = 1;
   repeated SequenceInfo sequences = 2;
   // dimension: [seq,dim]
@@ -14,13 +12,13 @@ message ForwardReq {
 }
 
 message ForwardResp {
-  //dimension: [seq,expert,dim]
+  // dimension: [seq,expert,dim]
   bytes output_tensor = 1;
 }
 
 service ComputationService {
   rpc Forward(ForwardReq) returns (ForwardResp);
-  //TODO: Batch Forward
+  // TODO: Batch Forward
 }
 
 message ExpertState {
@@ -33,26 +31,19 @@ message ExpertState {
   Stage stage = 1;
 }
 
-message RetrieveStateReq {
+message ExchangeReq {
   string id = 1;
   string addr = 2;
   string channel = 3;
   string device = 4;
+  bool last_will = 5;
 }
 
-message RetrieveStateResp {
-  message ExpertWithState {
-    ek.object.v1.ExpertSlice target = 1;
-  }
+message ExchangeResp {
+  message ExpertWithState { ek.object.v1.ExpertSlice target = 1; }
   ExpertWithState state = 1;
 }
-message UpdateStateReq {
-  ek.object.v1.ExpertSlice target = 1;
-  string hostname = 2;
-}
-message UpdateStateResp {}
 
 service StateService {
-  rpc Retrieve(stream RetrieveStateReq) returns (stream RetrieveStateResp);
-  rpc Update(UpdateStateReq) returns (UpdateStateResp);
+  rpc Exchange(stream ExchangeReq) returns (stream ExchangeResp);
 }
