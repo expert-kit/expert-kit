@@ -11,11 +11,14 @@ use crate::state::io::{StateReader, StateReaderImpl};
 #[async_trait::async_trait]
 pub trait ExpertRegistry {
     async fn select(&mut self, eid: String) -> EKResult<Channel>;
+
+    async fn deregister(&mut self, host_id: &str);
 }
 
 type ExpertId = String;
 
 struct ChannelMeta {
+    host_id: String,
     ch: Channel,
 }
 
@@ -28,6 +31,9 @@ pub struct ExpertRegistryImpl {
 impl ExpertRegistry for ExpertRegistryImpl {
     async fn select(&mut self, eid: String) -> EKResult<Channel> {
         self.inner_select(eid).await
+    }
+    async fn deregister(&mut self, host_id: &str) {
+        self.inner_deregister(host_id).await;
     }
 }
 
@@ -64,7 +70,10 @@ impl ExpertRegistryImpl {
             let end = Channel::from_shared(addr)
                 .map_err(|e| EKError::InvalidInput(format!("invalid url for gRPC: {}", e)))?;
             let ch = end.connect().await?;
-            let meta = ChannelMeta { ch };
+            let meta = ChannelMeta {
+                ch,
+                host_id: node.hostname.clone(),
+            };
             self.channels.insert(eid.clone(), vec![meta]);
         }
         let res = self.channels.get(&eid).ok_or(EKError::NotFound(format!(
@@ -79,7 +88,13 @@ impl ExpertRegistryImpl {
         }
         Ok(res[0].ch.clone())
     }
-    pub fn update() {}
+
+    pub async fn inner_deregister(&mut self, host_id: &str) {
+        log::info!("deregister host_id {}", host_id);
+        for (_, channels) in self.channels.iter_mut() {
+            channels.retain(|meta| meta.host_id != host_id);
+        }
+    }
 }
 
 impl Default for ExpertRegistryImpl {

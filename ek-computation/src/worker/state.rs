@@ -4,19 +4,21 @@ use crate::{
     proto::ek::{
         object::v1::Metadata,
         worker::v1::{
-            RetrieveStateReq, retrieve_state_resp::ExpertWithState,
+            ExchangeReq, ExchangeResp, exchange_resp::ExpertWithState,
             state_service_client::StateServiceClient,
         },
     },
-    x::EKInstance,
+    x::{EKInstance, get_graceful_shutdown_ch},
 };
 use ek_base::{config::get_ek_settings, error::EKResult};
 use ek_db::safetensor::{ExpertKey, SafeTensorDB};
 use tokio::{
+    select,
     sync::{RwLock, Semaphore},
     task::JoinSet,
 };
 use tokio_stream::{Stream, StreamExt};
+use tokio_util::sync::CancellationToken;
 use tonic::transport::Endpoint;
 
 use super::{
@@ -46,11 +48,11 @@ impl StateClient {
         }
     }
 
-    async fn get_request_stream(worker_id: String) -> impl Stream<Item = RetrieveStateReq> {
+    async fn get_request_stream(worker_id: String) -> impl Stream<Item = ExchangeReq> {
         let settings = get_ek_settings();
         let dev = settings.worker.device.clone();
         let dev = dev.unwrap_or("cpu".to_string());
-        tokio_stream::iter(1..usize::MAX).map(move |_| RetrieveStateReq {
+        tokio_stream::iter(1..usize::MAX).map(move |_| ExchangeReq {
             id: worker_id.clone(),
             addr: format!(
                 "http://{}:{}",
@@ -58,18 +60,16 @@ impl StateClient {
             ),
             channel: "grpc".to_string(),
             device: dev.clone(),
+            last_will: false,
         })
     }
 
-    async fn run_inner(&mut self) -> EKResult<()> {
-        let mut cli = StateServiceClient::connect(self.controller_addr.clone()).await?;
-        let req_stream = StateClient::get_request_stream(self.worker_id.to_owned())
-            .await
-            .throttle(std::time::Duration::from_secs(3));
-        let res = cli.retrieve(req_stream).await?;
-        let mut stream = res.into_inner();
-        while let Some(msg) = stream.next().await {
-            let msg = msg?;
+    async fn handle_stream_msg(
+        &mut self,
+        msg: Option<Result<ExchangeResp, tonic::Status>>,
+    ) -> EKResult<()> {
+        if let Some(m) = msg {
+            let msg = m?;
             if let Some(state) = msg.state {
                 match self.handle_states(state).await {
                     Ok(_) => {}
@@ -82,15 +82,49 @@ impl StateClient {
         Ok(())
     }
 
-    pub async fn run(&mut self) -> EKResult<()> {
+    async fn run_inner(&mut self, token: CancellationToken) -> EKResult<()> {
+        let mut cli = StateServiceClient::connect(self.controller_addr.clone()).await?;
+        let req_stream = StateClient::get_request_stream(self.worker_id.to_owned())
+            .await
+            .throttle(std::time::Duration::from_secs(3));
+        let res = cli.exchange(req_stream).await?;
+        let mut stream = res.into_inner();
         loop {
-            log::info!("start sync remote state");
-            let e = self.run_inner().await;
-            if let Err(e) = e {
-                log::error!("state client error {:?}", e);
-                tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+            select! {
+                msg = stream.next() => {
+                    self.handle_stream_msg(msg).await?;
+                },
+                _ = token.cancelled() => {
+                    log::info!("state client cancelled");
+                    break;
+                }
             }
         }
+        Ok(())
+    }
+
+    pub async fn run(&mut self, token: CancellationToken) -> EKResult<()> {
+        loop {
+            log::info!("start sync remote state");
+            select! {
+                e= self.run_inner(token.clone()) =>{
+
+                    if let Err(e) = e {
+                        log::error!("state client error {:?}", e);
+                        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                    }
+                },
+                _ = token.cancelled() => {
+                    log::info!("state client cancelled");
+                    break;
+                }
+
+            }
+        }
+
+        let (rx, _) = get_graceful_shutdown_ch();
+        let _ = rx.send(()).await;
+        Ok(())
     }
 
     fn spawn_expert_loading_task(
