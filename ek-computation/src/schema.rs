@@ -41,5 +41,4 @@ diesel::table! {
 diesel::joinable!(expert -> instance (instance_id));
 diesel::joinable!(expert -> node (node_id));
 diesel::joinable!(instance -> model (model_id));
-
 diesel::allow_tables_to_appear_in_same_query!(expert, instance, model, node,);

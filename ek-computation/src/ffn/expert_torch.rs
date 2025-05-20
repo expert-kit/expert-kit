@@ -190,17 +190,33 @@ unsafe impl Sync for TorchFFN {}
 
 impl TorchFFN {
     pub fn new(inst: x::EKInstance) -> Self {
-        let weight = ExpertWeight::rand(inst.dim, inst.hidden, DType::Float, Device::CPU);
+        let weight =
+            ExpertWeight::from_rand(inst.hidden, inst.intermediate, DType::BFloat16, Device::CPU);
         Self::construct(inst, weight).unwrap()
     }
 
     pub fn load_module(&self) -> Arc<Mutex<nn::Sequential>> {
         let m = self.module.get_or_init(|| {
             tch::no_grad(|| {
-                let w1_tensor = self.weight.up_w.0.shallow_clone().to_kind(tch::Kind::BFloat16);
-                let w2_tensor = self.weight.down_w.0.shallow_clone().to_kind(tch::Kind::BFloat16);
-                let w3_tensor = self.weight.gate_w.0.shallow_clone().to_kind(tch::Kind::BFloat16);
-            
+                let w1_tensor = self
+                    .weight
+                    .up_w
+                    .0
+                    .shallow_clone()
+                    .to_kind(tch::Kind::BFloat16);
+                let w2_tensor = self
+                    .weight
+                    .down_w
+                    .0
+                    .shallow_clone()
+                    .to_kind(tch::Kind::BFloat16);
+                let w3_tensor = self
+                    .weight
+                    .gate_w
+                    .0
+                    .shallow_clone()
+                    .to_kind(tch::Kind::BFloat16);
+
                 let module = nn::seq().add_fn(move |x| {
                     let _up = x.matmul(&w1_tensor.transpose(0, 1));
                     let _gate = x.matmul(&w3_tensor.transpose(0, 1));
@@ -243,8 +259,8 @@ impl Expert<TchTensor> for TorchFFN {
     fn construct(x: crate::x::EKInstance, weight: ExpertWeight<TchTensor>) -> EKResult<Self> {
         let cell: OnceCell<Arc<Mutex<nn::Sequential>>> = OnceCell::new();
         let res = TorchFFN {
-            intermediate_dim: x.hidden,
-            dim: x.dim,
+            intermediate_dim: x.intermediate,
+            dim: x.hidden,
             module: cell,
             weight,
         };
@@ -291,8 +307,8 @@ mod test {
         let st = SafeTensors::deserialize(&st_bytes).unwrap();
         let weight = ExpertWeight::from_safetensor(&st).unwrap();
         let inst = x::EKInstance {
-            dim: 2048,
-            hidden: 768,
+            hidden: 2048,
+            intermediate: 768,
             backend: x::ExpertBackendType::Torch,
         };
         let ffn = TorchFFN::construct(inst, weight).unwrap();

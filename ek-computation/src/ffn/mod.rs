@@ -142,15 +142,15 @@ impl<T: EkTensor + FromSafeTensor> ExpertWeight<T> {
         })
     }
 
-    pub fn rand(dim: usize, hidden: usize, dtype: DType, dev: Device) -> Self {
+    pub fn from_rand(hidden: usize, intermediate: usize, dtype: DType, dev: Device) -> Self {
         Self {
-            down_w: T::rand(vec![dim, hidden], dtype, dev),
+            down_w: T::rand(vec![intermediate, hidden], dtype, dev),
             down_b: None,
             up_scale: None,
-            up_w: T::rand(vec![hidden, dim], dtype, dev),
+            up_w: T::rand(vec![hidden, intermediate], dtype, dev),
             up_b: None,
             down_scale: None,
-            gate_w: T::rand(vec![hidden, dim], dtype, dev),
+            gate_w: T::rand(vec![hidden, intermediate], dtype, dev),
             gate_b: None,
             gate_scale: None,
         }
@@ -170,7 +170,7 @@ where
 
 pub enum ExpertBackend {
     Torch(TorchFFN),
-    Onnx(OnnxFFN),
+    Onnx(OnnxFFN<f32>),
 }
 
 impl ExpertBackend {

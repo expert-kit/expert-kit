@@ -4,7 +4,7 @@ use polars::frame::DataFrame;
 use polars::frame::row::Row;
 use polars::prelude::*;
 
-use ek_computation::ffn::{Expert, ExpertBackend, ExpertShape};
+use ek_computation::ffn::{Expert, ExpertBackend, ExpertShape, expert_ort::NDArrayTensor};
 
 #[allow(dead_code)]
 pub struct Benchmarker {
@@ -20,14 +20,14 @@ impl ExpertBenchmark {
     fn backend(&self) -> std::string::String {
         match &self.0 {
             ExpertBackend::Torch(exp) => exp.backend(),
-            ExpertBackend::Onnx(_exp) => todo!(),
+            ExpertBackend::Onnx(onnx_exp) => onnx_exp.backend(),
         }
     }
     
     fn shape(&self) -> ExpertShape {
         match &self.0 {
             ExpertBackend::Torch(exp) => exp.shape(),
-            ExpertBackend::Onnx(_exp) => todo!(),
+            ExpertBackend::Onnx(onnx_exp) => onnx_exp.shape(),
         }
     }
     
@@ -39,7 +39,13 @@ impl ExpertBenchmark {
                 let _ = exp.forward(&input);
                 start
             }
-            ExpertBackend::Onnx(_exp) => todo!(),
+            ExpertBackend::Onnx(onnx_exp) => {
+                let input: NDArrayTensor<f32> = onnx_exp.rand_input(batch);
+
+                let start = Instant::now();
+                let _ = onnx_exp.forward(&input);
+                start
+            }
         }
     }
 }

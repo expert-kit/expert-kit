@@ -16,4 +16,7 @@ clap = { workspace = true }
 pretty_env_logger = { workspace = true }
 sysinfo = "0.33.1"
 log = { workspace = true }
+half = { workspace = true }
+rand = { workspace = true }
+rand_distr = { workspace = true }
 ek_computation = { path = "../ek-computation" }
