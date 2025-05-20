@@ -3,7 +3,12 @@
 tch = "0.20.0"
 ndarray = { version = "0.16.1", features = ["serde"] }
 ndarray-rand = "0.15.0"
-ort = { version = "2.0.0-rc.9", features = ["ndarray", "load-dynamic"] }
+ort = { version = "2.0.0-rc.9", features = [
+    "ndarray",
+    "load-dynamic",
+    "copy-dylibs",
+    "half",
+] }
 polars = { version = "0.46.0", features = [
     "simd",
     "sql",
@@ -49,6 +54,9 @@ config = "0.15.11"
 memmap2 = "0.9.5"
 actix-web = "4.10.2"
 reqwest = "0.12.15"
+half = { version = "2.6.0", features = ["rand_distr", "num-traits"] }
+rand = "0.9.1"
+rand_distr = "0.5.1"
 
 [workspace]
 resolver = "2"

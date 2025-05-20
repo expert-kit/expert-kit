@@ -6,6 +6,7 @@ mod model;
 mod pretrain;
 mod schedule;
 
+mod onnx;
 use db::execute_db;
 use doctor::doctor_main;
 use ek_base::config::get_ek_settings_base;
@@ -62,6 +63,12 @@ enum Command {
         #[command(subcommand)]
         command: schedule::ScheduleCommand,
     },
+
+    #[command(about = "onnx operations")]
+    Onnx {
+        #[command(subcommand)]
+        command: onnx::OnnxCommand,
+    },
 }
 
 /// Expert Kit is an efficient foundation of Expert Parallelism (EP) for MoE model Inference on heterogenous hardware
@@ -88,7 +95,7 @@ async fn main() {
     if let Ok(path) = std::env::var("EK_CONFIG") {
         config_src.push(path);
     }
-    
+
     if let Some(path) = cli.config {
         config_src.push(path.to_string());
     }
@@ -100,6 +107,7 @@ async fn main() {
             .collect::<Vec<_>>(),
     );
     let res = match cli.command {
+        Command::Onnx { command } => onnx::execute_onnx(command).await,
         Command::Pretrain { command } => execute_pretrain(command).await,
         Command::Worker {} => worker_main().await,
         Command::Controller {} => controller_main().await,
