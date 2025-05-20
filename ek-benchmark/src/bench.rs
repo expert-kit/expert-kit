@@ -7,30 +7,34 @@ use polars::prelude::*;
 use ek_computation::ffn::{Expert, ExpertBackend, ExpertShape};
 
 #[allow(dead_code)]
-pub struct BenchmarkerImpl {
-    iterations: usize,
-    experts: Vec<BenchmarkExpert>,
+pub struct Benchmarker {
+    run_iterations: usize,
+    experiment_repeats: usize,
+    experts: Vec<ExpertBenchmark>,
 }
-#[allow(dead_code)]
-pub struct BenchmarkExpert(pub ExpertBackend);
 
-impl BenchmarkExpert {
+#[allow(dead_code)]
+pub struct ExpertBenchmark(pub ExpertBackend);
+
+impl ExpertBenchmark {
     fn backend(&self) -> std::string::String {
         match &self.0 {
             ExpertBackend::Torch(exp) => exp.backend(),
             ExpertBackend::Onnx(_exp) => todo!(),
         }
     }
+    
     fn shape(&self) -> ExpertShape {
         match &self.0 {
             ExpertBackend::Torch(exp) => exp.shape(),
             ExpertBackend::Onnx(_exp) => todo!(),
         }
     }
-    fn forward(&self, batch: usize) -> Instant {
+    
+    fn forward(&self, batch_size: usize) -> Instant {
         match &self.0 {
             ExpertBackend::Torch(exp) => {
-                let input = exp.rand_input(batch);
+                let input = exp.rand_input(batch_size);
                 let start = Instant::now();
                 let _ = exp.forward(&input);
                 start
@@ -41,53 +45,66 @@ impl BenchmarkExpert {
 }
 
 #[allow(dead_code)]
-impl BenchmarkerImpl {
-    pub fn new(experts: Vec<BenchmarkExpert>) -> Self {
-        BenchmarkerImpl {
+impl Benchmarker {
+    pub fn new(experts: Vec<ExpertBenchmark>) -> Self {
+        Benchmarker {
             experts,
-            iterations: 10,
+            run_iterations: 10,
+            experiment_repeats: 1,
         }
     }
 
-    pub fn iterations(&mut self, iterations: usize) -> &mut BenchmarkerImpl {
-        self.iterations = iterations;
+    pub fn iterations(&mut self, iterations: usize) -> &mut Benchmarker {
+        self.run_iterations = iterations;
+        self
+    }
+    
+    pub fn repeats(&mut self, repeats: usize) -> &mut Benchmarker {
+        self.experiment_repeats = repeats;
         self
     }
 
-    pub fn scan_batch(&self, size: &[usize]) -> DataFrame {
+    pub fn scan_batch(&self, batch_sizes: &[usize]) -> DataFrame {
         let mut rows: Vec<Row> = Vec::new();
-        let b = sysinfo::System::new_all();
-        let brand = b.cpus()[0].brand();
-        info!("scan batch in cpu: {}", brand);
+        let system_info = sysinfo::System::new_all();
+        let cpu_brand = system_info.cpus()[0].brand();
+        info!("Running batch scan on CPU: {}", cpu_brand);
+        
+        // Warm up all experts
         for expert in self.experts.iter() {
-            // warm up
             expert.forward(1);
         }
 
-        for iter in 0..self.iterations {
-            for batch in size.iter() {
-                for (eidx, expert) in self.experts.iter().enumerate() {
-                    let start = expert.forward(*batch);
-                    let shape = expert.shape();
-                    let backend = expert.backend();
-                    let row = vec![
-                        AnyValue::UInt64(iter as u64),
-                        AnyValue::UInt64(*batch as u64),
-                        AnyValue::UInt64(eidx as u64),
-                        AnyValue::UInt64(start.elapsed().as_micros() as u64),
-                        AnyValue::UInt64(shape.dim as u64),
-                        AnyValue::UInt64(shape.hidden as u64),
-                        AnyValue::StringOwned(backend.into()),
-                    ];
-                    rows.push(Row(row));
+        // Run the experiments multiple times if requested
+        for experiment_id in 0..self.experiment_repeats {
+            for iter_idx in 0..self.run_iterations {
+                for current_batch in batch_sizes.iter() {
+                    for (expert_idx, expert) in self.experts.iter().enumerate() {
+                        let start = expert.forward(*current_batch);
+                        let shape = expert.shape();
+                        let backend = expert.backend();
+                        let row = vec![
+                            AnyValue::UInt64(experiment_id as u64),
+                            AnyValue::UInt64(iter_idx as u64),
+                            AnyValue::UInt64(*current_batch as u64),
+                            AnyValue::UInt64(expert_idx as u64),
+                            AnyValue::UInt64(start.elapsed().as_micros() as u64),
+                            AnyValue::UInt64(shape.dim as u64),
+                            AnyValue::UInt64(shape.hidden as u64),
+                            AnyValue::StringOwned(backend.into()),
+                        ];
+                        rows.push(Row(row));
+                    }
                 }
             }
         }
+        
         let schema = Schema::from_iter(vec![
-            Field::new("iter".into(), DataType::UInt64),
-            Field::new("batch".into(), DataType::Int32),
+            Field::new("experiment_id".into(), DataType::UInt64),
+            Field::new("iteration".into(), DataType::UInt64),
+            Field::new("batch_size".into(), DataType::UInt64),
             Field::new("expert_id".into(), DataType::UInt64),
-            Field::new("elapsed".into(), DataType::Float64),
+            Field::new("elapsed_micros".into(), DataType::UInt64),
             Field::new("input_dim".into(), DataType::UInt64),
             Field::new("hidden_dim".into(), DataType::UInt64),
             Field::new("backend".into(), DataType::String),
@@ -95,13 +112,37 @@ impl BenchmarkerImpl {
 
         let df = DataFrame::from_rows_and_schema(rows.as_slice(), &schema).unwrap();
 
-        let cur_ts = SystemTime::now()
+        let timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_secs();
-        let hardware = Series::new("hardware".into(), vec![brand; df.height()]);
-        let ts = Series::new("time".into(), vec![cur_ts; df.height()]);
+        let hardware_col = Series::new("hardware".into(), vec![cpu_brand; df.height()]);
+        let timestamp_col = Series::new("timestamp".into(), vec![timestamp; df.height()]);
 
-        df.hstack(&[hardware.into(), ts.into()]).unwrap()
+        df.hstack(&[hardware_col.into(), timestamp_col.into()]).unwrap()
+    }
+    
+    pub fn calculate_summary(&self, df: &DataFrame) -> DataFrame {
+        // Group by batch_size and experiment_id, then calculate average elapsed time
+        df.clone().lazy()
+            .group_by([col("batch_size"), col("experiment_id")])
+            .agg([col("elapsed_micros").mean().alias("avg_elapsed_micros")])
+            .collect()
+            .unwrap()
+    }
+    
+    pub fn calculate_final_summary(&self, df: &DataFrame) -> DataFrame {
+        // Group by batch_size only, averaging across all experiments
+        df.clone().lazy()
+            .group_by([col("batch_size")])
+            .agg([
+                col("elapsed_micros").mean().alias("avg_elapsed_micros"),
+                col("elapsed_micros").std(1).alias("std_elapsed_micros"),
+                col("elapsed_micros").min().alias("min_elapsed_micros"),
+                col("elapsed_micros").max().alias("max_elapsed_micros"),
+            ])
+            .sort_by_exprs([col("batch_size")], Default::default())
+            .collect()
+            .unwrap()
     }
 }

@@ -7,30 +7,31 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use bench::{BenchmarkExpert, BenchmarkerImpl};
+use bench::{ExpertBenchmark, Benchmarker};
 use clap::{Parser, ValueEnum};
 use ek_computation::{ffn::ExpertBackend, x};
 use ek_computation::{ffn::expert_torch::TorchFFN, x::ExpertBackendType};
-use polars::prelude::{IntoLazy, ParquetWriter, col};
+use polars::prelude::ParquetWriter;
 extern crate pretty_env_logger;
 #[macro_use]
 extern crate log;
 
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, ValueEnum, Debug)]
-enum Mode {
+enum BenchmarkMode {
     ScanBatch,
 }
+
 #[derive(Parser)]
 #[command(version, about, long_about = None)]
 struct Cli {
-    #[clap(short, long, value_enum, default_value_t=Mode::ScanBatch)]
-    mode: Mode,
+    #[clap(short, long, value_enum, default_value_t=BenchmarkMode::ScanBatch)]
+    mode: BenchmarkMode,
 
-    #[clap(value_enum, short, long,default_value_t=x::ExpertBackendType::Torch)]
+    #[clap(value_enum, short, long, default_value_t=x::ExpertBackendType::Torch)]
     backend: x::ExpertBackendType,
 
-    #[clap(short, long, value_delimiter = ',',default_values_t=vec![1,2,4,8])]
-    range: Vec<usize>,
+    #[clap(short, long, value_delimiter = ',', default_values_t=vec![1,2,4,8,16,32,64,128,256])]
+    batch_sizes: Vec<usize>,
 
     #[clap(short, long, default_value_t = 2048)]
     dim: usize,
@@ -38,13 +39,19 @@ struct Cli {
     #[clap(long, default_value_t = 7168)]
     hidden: usize,
 
-    #[clap(short, long, value_delimiter = ',', default_value_t = 10)]
+    #[clap(short, long, default_value_t = 8)]
     experts: usize,
+    
+    #[clap(short = 'i', long, default_value_t = 4)]
+    iterations: usize,
+    
+    #[clap(short = 'r', long, default_value_t = 1)]
+    repeats: usize,
 
     #[arg(long, value_name = "FILE")]
     onnx: Option<PathBuf>,
 
-    #[arg(short, long, value_name = "FILE",default_value_t= ("./data/benchmark").to_string())]
+    #[arg(short, long, value_name = "FILE", default_value_t = ("./output").to_string())]
     output_dir: String,
 }
 
@@ -55,57 +62,75 @@ fn main() {
         }
     }
     pretty_env_logger::init();
-    let m = Cli::parse();
+    let cli_args = Cli::parse();
 
-    let expert_count = m.experts;
-    let mut experts: Vec<BenchmarkExpert> = vec![];
+    let expert_count = cli_args.experts;
+    let mut experts: Vec<ExpertBenchmark> = vec![];
     let instance = ek_computation::x::EKInstance {
-        dim: m.dim,
-        hidden: m.hidden,
-        backend: m.backend,
+        dim: cli_args.dim,
+        hidden: cli_args.hidden,
+        backend: cli_args.backend,
     };
+    
+    info!("Creating {} expert models...", expert_count);
     for i in 0..expert_count {
-        match m.backend {
+        match cli_args.backend {
             ExpertBackendType::Torch => {
-                info!("create torch expert {}", i);
+                info!("Creating Torch expert {}", i);
                 let exp = TorchFFN::new(instance);
-                experts.push(BenchmarkExpert(ExpertBackend::Torch(exp)));
+                experts.push(ExpertBenchmark(ExpertBackend::Torch(exp)));
             }
             _ => todo!(),
             // ::Ort => {
-            //     if m.onnx.is_none() {
+            //     if cli_args.onnx.is_none() {
             //         panic!("Ort backend requires an onnx file");
             //     }
-            //     let exp = expert_ort::OnnxFFN::new(m.onnx.clone().unwrap(), m.dim, m.hidden);
+            //     let exp = expert_ort::OnnxFFN::new(cli_args.onnx.clone().unwrap(), cli_args.dim, cli_args.hidden);
             //     experts.push(GenericExpert::Ort(exp));
             // }
         }
     }
-    let mut bencher = BenchmarkerImpl::new(experts);
-    let mut df = bencher.iterations(1).scan_batch(&m.range);
-    let ts = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
-    let name = format!(
-        "{:?}_{}_{}_{}_{}.parquet",
-        m.backend,
-        m.dim,
-        m.hidden,
-        m.experts,
-        ts.as_secs()
+    
+    info!("Setting up benchmark with {} iterations and {} experiment repeats", 
+          cli_args.iterations, cli_args.repeats);
+    
+    let mut benchmarker = Benchmarker::new(experts);
+    let mut results = benchmarker
+        .iterations(cli_args.iterations)
+        .repeats(cli_args.repeats)
+        .scan_batch(&cli_args.batch_sizes);
+    
+    // Generate timestamp for file naming
+    let timestamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
+    let output_filename = format!(
+        "{:?}_{}_{}_{}_{}_r{}.parquet",
+        cli_args.backend,
+        cli_args.dim,
+        cli_args.hidden,
+        cli_args.experts,
+        timestamp.as_secs(),
+        cli_args.repeats
     );
-    let full_fp = std::path::Path::new(&m.output_dir).join(name);
-    info!("write to: {}", full_fp.to_str().unwrap());
-    let file = File::create(full_fp).unwrap();
+    
+    let output_path = std::path::Path::new(&cli_args.output_dir).join(output_filename);
+    info!("Writing results to: {}", output_path.to_str().unwrap());
+    
+    // Save detailed results to Parquet file
+    let file = File::create(output_path).unwrap();
     ParquetWriter::new(file)
         .with_compression(polars::prelude::ParquetCompression::Snappy)
-        .finish(&mut df)
+        .finish(&mut results)
         .unwrap();
-    let glance = df
-        .lazy()
-        .group_by([col("batch")])
-        .agg([col("elapsed").mean()])
-        .sort_by_exprs([col("batch")], Default::default())
-        .collect()
-        .unwrap();
-
-    println!("{}", glance);
+    
+    // Calculate and display summary statistics
+    if cli_args.repeats > 1 {
+        let summary_by_experiment = benchmarker.calculate_summary(&results);
+        println!("Per-experiment summary:");
+        println!("{}", summary_by_experiment);
+    }
+    
+    // Calculate and display final summary with statistics across all experiments
+    let final_summary = benchmarker.calculate_final_summary(&results);
+    println!("Final summary (across all experiments):");
+    println!("{}", final_summary);
 }
