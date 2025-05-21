@@ -4,6 +4,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         &[
             "../ek-proto/ek/worker/v1/expert.proto",
             "../ek-proto/ek/object/v1/object.proto",
+            "../ek-proto/onnx/onnx.proto",
         ],
         &["../ek-proto"],
     )?;

@@ -24,3 +24,5 @@ serde_yaml = "0.9.34"
 indicatif = "0.17.11"
 
 safetensors = { workspace = true }
+prost = { workspace = true }
+ort = { workspace = true }

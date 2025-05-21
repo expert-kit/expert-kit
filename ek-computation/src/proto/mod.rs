@@ -10,3 +10,7 @@ pub mod ek {
         }
     }
 }
+
+pub mod pbonnx {
+    tonic::include_proto!("onnx");
+}

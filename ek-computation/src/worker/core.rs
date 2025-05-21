@@ -1,7 +1,6 @@
 use super::manager::{ExpertDB, get_expert_db};
 use crate::{
-    ffn::{EkTensor, expert_torch::TchTensor},
-    proto::ek,
+    backend::{torch::TchTensor, EkTensor}, proto::ek
 };
 use core::fmt;
 use ek_base::error::EKResult;

@@ -26,8 +26,8 @@ impl From<&str> for ExpertBackendType {
 
 #[derive(Clone, Copy)]
 pub struct EKInstance {
-    pub dim: usize,
     pub hidden: usize,
+    pub intermediate: usize,
     pub backend: ExpertBackendType,
 }
 
@@ -35,8 +35,8 @@ impl Default for EKInstance {
     fn default() -> Self {
         let settings = get_ek_settings();
         Self {
-            dim: settings.inference.hidden_dim,
-            hidden: settings.inference.intermediate_dim,
+            hidden: settings.inference.hidden_dim,
+            intermediate: settings.inference.intermediate_dim,
             backend: ExpertBackendType::Torch,
         }
     }
@@ -47,11 +47,13 @@ pub fn test_root() -> PathBuf {
     PathBuf::from(root.to_owned())
 }
 
-pub fn get_graceful_shutdown_ch() -> (Sender<()>, Arc<Mutex<Receiver<()>>>) {
-    static GRACEFUL_SHUTDOWN: OnceCell<(Sender<()>, Arc<Mutex<Receiver<()>>>)> = OnceCell::new();
+type GracefulChannelPair = (Sender<()>, Arc<Mutex<Receiver<()>>>);
+
+pub fn get_graceful_shutdown_ch() -> GracefulChannelPair {
+    static GRACEFUL_SHUTDOWN: OnceCell<GracefulChannelPair> = OnceCell::new();
     let res = GRACEFUL_SHUTDOWN.get_or_init(|| {
         let (tx, rx) = tokio::sync::mpsc::channel(1);
-        return (tx, Arc::new(Mutex::new(rx)));
+        (tx, Arc::new(Mutex::new(rx)))
     });
     (res.0.clone(), res.1.clone())
 }

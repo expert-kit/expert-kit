@@ -20,3 +20,4 @@ actix-web = { workspace = true }
 reqwest = { workspace = true }
 serde_derive = { workspace = true }
 serde = { workspace = true }
+ort = { workspace = true }

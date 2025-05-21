@@ -31,6 +31,16 @@
         "vendor/**/*": true,
         "target/**/*": true
     },
+    "rust-analyzer.runnables.extraEnv": {
+        "LIBTORCH": "${workspaceFolder}/vendor/libtorch",
+        "ORT_LIB_LOCATION": "${workspaceFolder}/vendor/onnxruntime",
+        "ORT_DYLIB_PATH": "${workspaceFolder}/vendor/onnxruntime/lib/libonnxruntime.dylib",
+        "DYLD_FALLBACK_LIBRARY_PATH": "${workspaceFolder}/vendor/libtorch/lib"
+    },
+    "rust-analyzer.cargo.extraEnv": {
+        "LIBTORCH": "${workspaceFolder}/vendor/libtorch",
+        "ORT_LIB_LOCATION": "${workspaceFolder}/vendor/onnxruntime"
+    },
     "rust-analyzer.server.extraEnv": {
         "LIBTORCH": "${workspaceFolder}/vendor/libtorch",
         "ORT_LIB_LOCATION": "${workspaceFolder}/vendor/onnxruntime"

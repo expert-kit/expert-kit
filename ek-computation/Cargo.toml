@@ -19,7 +19,7 @@ polars-io = { workspace = true }
 clap = { workspace = true }
 pretty_env_logger = { workspace = true }
 log = { workspace = true }
-env_logger = {workspace = true}
+env_logger = { workspace = true }
 safetensors.workspace = true
 async-trait = { workspace = true }
 opendal = { workspace = true }
@@ -27,18 +27,20 @@ sysinfo = { workspace = true }
 bytes = { workspace = true }
 ek_base = { path = "../ek-base" }
 ek_db = { path = "../ek-db" }
-rand = "0.9.0"
 diesel = { workspace = true }
 serde_json = { workspace = true }
 tokio-stream = { workspace = true }
 async-channel = { workspace = true }
 diesel-async = { workspace = true }
 once_cell = { workspace = true }
-tokio-util = {workspace = true}
+tokio-util = { workspace = true }
 object_store = "0.12.0"
 object_store_opendal = "0.51.0"
 gethostname = "1.0.1"
 float8 = "0.2.1"
+half = { workspace = true }
+rand_distr = { workspace = true }
+rand = { workspace = true }
 
 
 [build-dependencies]

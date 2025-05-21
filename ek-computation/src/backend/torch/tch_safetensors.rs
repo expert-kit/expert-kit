@@ -45,6 +45,7 @@ pub fn dtype_to_tch_kind(dtype: Dtype) -> Result<Kind, TchError> {
     Ok(kind)
 }
 
+#[allow(dead_code)]
 pub fn read_safetensors(data: &[u8]) -> Result<Vec<(String, Tensor)>, EKError> {
     let safetensors = SafeTensors::deserialize(data)?;
     safetensors
