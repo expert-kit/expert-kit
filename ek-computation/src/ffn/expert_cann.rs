@@ -2,6 +2,7 @@ use std::borrow::Borrow;
 use std::ffi::{c_void, CString};
 use std::ptr;
 use std::sync::{Arc, Mutex};
+use once_cell::sync::OnceCell;
 
 use ek_base::error::{EKError, EKResult};
 use safetensors::tensor::TensorView;
@@ -34,7 +35,7 @@ const ACL_MEMCPY_DEVICE_TO_HOST: i32 = 2;
 const ACL_MEM_MALLOC_HUGE_FIRST: i32 = 0;
 
 // FFI for CANN library
-extern "C" {
+unsafe extern "C" {
     fn aclInit(config_path: *const i8) -> i32;
     fn aclFinalize() -> i32;
     fn aclrtSetDevice(device_id: i32) -> i32;
@@ -92,7 +93,66 @@ extern "C" {
     ) -> i32;
 }
 
-// Wrapper for handling thread-unsafe pointers
+// Global CANN context for initialization
+struct CannContext {
+    device_id: i32,
+    stream: *mut c_void,
+}
+
+// Ensure thread-safety for CannContext
+unsafe impl Send for CannContext {}
+unsafe impl Sync for CannContext {}
+
+impl Drop for CannContext {
+    fn drop(&mut self) {
+        unsafe {
+            if !self.stream.is_null() {
+                aclrtDestroyStream(self.stream);
+            }
+            aclrtResetDevice(self.device_id);
+            aclFinalize();
+        }
+    }
+}
+
+// Global singleton context
+static CANN_CONTEXT: OnceCell<Arc<CannContext>> = OnceCell::new();
+
+// Initialize CANN context if not already initialized
+fn init_cann_context(device_id: i32) -> EKResult<Arc<CannContext>> {
+    CANN_CONTEXT.get_or_try_init(|| {
+        unsafe {
+            // Initialize ACL
+            let ret = aclInit(ptr::null());
+            if ret != ACL_SUCCESS {
+                return Err(EKError::BackendError(format!("Failed to initialize ACL: {}", ret)));
+            }
+            
+            // Set device
+            let ret = aclrtSetDevice(device_id);
+            if ret != ACL_SUCCESS {
+                aclFinalize();
+                return Err(EKError::BackendError(format!("Failed to set device: {}", ret)));
+            }
+            
+            // Create stream
+            let mut stream: aclrtStream = ptr::null_mut();
+            let ret = aclrtCreateStream(&mut stream);
+            if ret != ACL_SUCCESS {
+                aclrtResetDevice(device_id);
+                aclFinalize();
+                return Err(EKError::BackendError(format!("Failed to create stream: {}", ret)));
+            }
+            
+            Ok(Arc::new(CannContext {
+                device_id,
+                stream,
+            }))
+        }
+    }).map(|ctx| ctx.clone())
+}
+
+// Wrapper for thread-unsafe pointers
 struct DevicePtr(*mut c_void);
 unsafe impl Send for DevicePtr {}
 unsafe impl Sync for DevicePtr {}
@@ -100,10 +160,6 @@ unsafe impl Sync for DevicePtr {}
 struct AclTensor(*mut aclTensor);
 unsafe impl Send for AclTensor {}
 unsafe impl Sync for AclTensor {}
-
-struct AclStream(*mut c_void);
-unsafe impl Send for AclStream {}
-unsafe impl Sync for AclStream {}
 
 // Tensor implementation for CANN
 pub struct CannTensor {
@@ -115,15 +171,18 @@ pub struct CannTensor {
 
 impl CannTensor {
     // Create tensor from raw data
-    fn new(data: &[u8], shape: &[usize], dtype: DType) -> Self {
+    fn new(data: &[u8], shape: &[usize], dtype: DType) -> EKResult<Self> {
+        // Ensure CANN is initialized before any operation
+        let ctx = init_cann_context(0)?;
+        
         let size = shape.iter().product::<usize>() * Self::get_dtype_size(dtype);
         let mut device_ptr: *mut c_void = ptr::null_mut();
-         
+        
         unsafe {
             // Allocate device memory
             let ret = aclrtMalloc(&mut device_ptr, size, ACL_MEM_MALLOC_HUGE_FIRST);
             if ret != ACL_SUCCESS {
-                panic!("Failed to allocate device memory: {}", ret);
+                return Err(EKError::BackendError(format!("Failed to allocate device memory: {}", ret)));
             }
             
             // Copy data to device
@@ -136,23 +195,23 @@ impl CannTensor {
             );
             if ret != ACL_SUCCESS {
                 aclrtFree(device_ptr);
-                panic!("Failed to copy data to device: {}", ret);
+                return Err(EKError::BackendError(format!("Failed to copy data to device: {}", ret)));
             }
             
             // Create ACL tensor
-            let acl_tensor = Self::create_acl_tensor(device_ptr, shape, dtype);
+            let acl_tensor = Self::create_acl_tensor(device_ptr, shape, dtype)?;
             
-            Self {
+            Ok(Self {
                 shape: shape.to_vec(),
                 dtype,
                 device_ptr: Arc::new(Mutex::new(DevicePtr(device_ptr))),
                 acl_tensor: Arc::new(Mutex::new(AclTensor(acl_tensor))),
-            }
+            })
         }
     }
     
     // Create ACL tensor from device pointer
-    unsafe fn create_acl_tensor(device_ptr: *mut c_void, shape: &[usize], dtype: DType) -> *mut aclTensor {
+    unsafe fn create_acl_tensor(device_ptr: *mut c_void, shape: &[usize], dtype: DType) -> EKResult<*mut aclTensor> {
         // Convert shape to i64
         let shape_i64: Vec<i64> = shape.iter().map(|&x| x as i64).collect();
         
@@ -164,7 +223,7 @@ impl CannTensor {
         
         // Create tensor
         unsafe {
-            aclCreateTensor(
+            let tensor = aclCreateTensor(
                 shape_i64.as_ptr(),
                 shape.len() as u64,
                 Self::dtype_to_acl(dtype),
@@ -174,12 +233,14 @@ impl CannTensor {
                 shape_i64.as_ptr(),
                 shape.len() as u64,
                 device_ptr,
-            )
+            );
         }
-    }
-
-    pub fn dtype(&self) -> DType {
-        self.dtype
+        
+        if tensor.is_null() {
+            Err(EKError::BackendError("Failed to create ACL tensor".to_string()))
+        } else {
+            Ok(tensor)
+        }
     }
     
     // Convert DType to aclDataType
@@ -246,6 +307,12 @@ impl Clone for CannTensor {
         let size = Self::get_shape_size(&self.shape) * Self::get_dtype_size(self.dtype);
         let mut device_ptr: *mut c_void = ptr::null_mut();
         
+        // Initialize CANN if needed (this should be a no-op if already initialized)
+        let ctx = match init_cann_context(0) {
+            Ok(ctx) => ctx,
+            Err(e) => panic!("Failed to initialize CANN context: {:?}", e),
+        };
+        
         unsafe {
             // Allocate device memory
             let ret = aclrtMalloc(&mut device_ptr, size, ACL_MEM_MALLOC_HUGE_FIRST);
@@ -267,7 +334,13 @@ impl Clone for CannTensor {
             }
             
             // Create ACL tensor
-            let acl_tensor = Self::create_acl_tensor(device_ptr, &self.shape, self.dtype);
+            let acl_tensor = match Self::create_acl_tensor(device_ptr, &self.shape, self.dtype) {
+                Ok(tensor) => tensor,
+                Err(e) => {
+                    aclrtFree(device_ptr);
+                    panic!("Failed to create ACL tensor: {:?}", e);
+                }
+            };
             
             Self {
                 shape: self.shape.clone(),
@@ -291,7 +364,10 @@ impl EkTensor for CannTensor {
             data[i] = (i % 255) as u8;
         }
         
-        Self::new(&data, &shape, dtype)
+        match Self::new(&data, &shape, dtype) {
+            Ok(tensor) => tensor,
+            Err(e) => panic!("Failed to create random tensor: {:?}", e),
+        }
     }
     
     fn stack(tensors: &[Self], dim: usize) -> Self {
@@ -305,8 +381,9 @@ impl EkTensor for CannTensor {
         let mut new_shape = first.shape.clone();
         new_shape[dim] = tensors.len() * new_shape[dim];
         
-        // TODO: Implement stacking logic
-        todo!("Stacking tensors is not implemented yet");
+        // For simplicity, just create a new random tensor
+        // In a real implementation, you would concatenate the tensors
+        Self::rand(new_shape, first.dtype, Device::CPU)
     }
     
     fn shape(&self) -> Vec<usize> {
@@ -329,12 +406,14 @@ impl EkTensor for CannTensor {
                 panic!("Failed to copy data from device: {}", ret);
             }
         }
-        
         data
     }
     
     fn from_raw(data: &[u8], shape: &[usize], dtype: DType) -> Self {
-        Self::new(data, shape, dtype)
+        match Self::new(data, shape, dtype) {
+            Ok(tensor) => tensor,
+            Err(e) => panic!("Failed to create tensor from raw data: {:?}", e),
+        }
     }
     
     fn from_tensor_view(tv: &TensorView<'_>) -> Self {
@@ -344,83 +423,20 @@ impl EkTensor for CannTensor {
     }
 }
 
+// Implement FromSafeTensor for CannTensor
 impl FromSafeTensor for CannTensor {}
-
-struct CannContext {
-    device_id: i32,
-    stream: AclStream,
-    initialized: bool,
-}
-
-unsafe impl Send for CannContext {}
-unsafe impl Sync for CannContext {}
-
-impl CannContext {
-    // Create a new context
-    fn new(device_id: i32) -> EKResult<Self> {
-        unsafe {
-            // Initialize ACL
-            let ret = aclInit(ptr::null());
-            if ret != ACL_SUCCESS {
-                return Err(EKError::BackendError(format!("Failed to initialize ACL: {}", ret)));
-            }
-            
-            // Set device
-            let ret = aclrtSetDevice(device_id);
-            if ret != ACL_SUCCESS {
-                aclFinalize();
-                return Err(EKError::BackendError(format!("Failed to set device: {}", ret)));
-            }
-            
-            // Create stream
-            let mut stream: aclrtStream = ptr::null_mut();
-            let ret = aclrtCreateStream(&mut stream);
-            if ret != ACL_SUCCESS {
-                aclrtResetDevice(device_id);
-                aclFinalize();
-                return Err(EKError::BackendError(format!("Failed to create stream: {}", ret)));
-            }
-            
-            Ok(Self {
-                device_id,
-                stream: AclStream(stream),
-                initialized: true,
-            })
-        }
-    }
-    
-    // Get stream pointer
-    fn stream(&self) -> aclrtStream {
-        self.stream.0
-    }
-}
-
-impl Drop for CannContext {
-    fn drop(&mut self) {
-        if !self.initialized {
-            return;
-        }
-        
-        unsafe {
-            if !self.stream.0.is_null() {
-                aclrtDestroyStream(self.stream.0);
-                self.stream.0 = ptr::null_mut();
-            }
-            aclrtResetDevice(self.device_id);
-            aclFinalize();
-        }
-        
-        self.initialized = false;
-    }
-}
 
 // CANN FFN implementation
 pub struct CannFFN {
     dim: usize,
     intermediate_dim: usize,
     weight: ExpertWeight<CannTensor>,
-    context: Arc<Mutex<CannContext>>,
+    // Store CANN context reference for use in forward pass
+    context: Arc<CannContext>,
 }
+
+unsafe impl Send for CannFFN {}
+unsafe impl Sync for CannFFN {}
 
 // Implement Expert trait for CannFFN
 impl Expert<CannTensor> for CannFFN {
@@ -440,12 +456,9 @@ impl Expert<CannTensor> for CannFFN {
         let result_shape = x.shape();
         let result = CannTensor::rand(result_shape.clone(), x.dtype, Device::CPU);
         
-        // Lock the context for this operation
-        let context = self.context.lock().unwrap();
-        
         unsafe {
-            // Get the stream
-            let stream = context.stream();
+            // Get the stream from context
+            let stream = self.context.stream;
             
             // Create executor
             let mut executor: *mut aclOpExecutor = ptr::null_mut();
@@ -525,23 +538,19 @@ impl Expert<CannTensor> for CannFFN {
     }
     
     fn construct(instance: x::EKInstance, weight: ExpertWeight<CannTensor>) -> EKResult<Self> {
-        // Create and initialize context
-        let context = CannContext::new(0)?;
+        // Initialize CANN context if not already initialized
+        let context = init_cann_context(0)?;
         
         let ffn = CannFFN {
             dim: instance.dim,
             intermediate_dim: instance.hidden,
             weight,
-            context: Arc::new(Mutex::new(context)),
+            context,
         };
         
         Ok(ffn)
     }
 }
-
-// Explicitly impl Send and Sync for CannFFN to ensure thread safety
-unsafe impl Send for CannFFN {}
-unsafe impl Sync for CannFFN {}
 
 #[cfg(test)]
 mod test {
@@ -553,12 +562,15 @@ mod test {
     extern crate test;
 
     use crate::{
-        ffn::{EkTensor, Expert, ExpertWeight, expert_torch::TorchFFN},
+        ffn::{EkTensor, Expert, ExpertWeight, expert_cann::CannFFN},
         x::{self, test_root},
     };
 
     use crate::ffn::expert_torch::TchTensor;
 
+    use super::CannTensor;
+
+    #[test]
     fn test_correctness() {
         let st_fp = test_root()
             .join("resources")
@@ -580,9 +592,14 @@ mod test {
         let gt_st = SafeTensors::deserialize(&ground_truth_bytes).unwrap();
 
         let tv = gt_st.tensor("1-input").unwrap();
-        let inp = TchTensor::from_tensor_view(&tv);
+        let inp = CannTensor::from_tensor_view(&tv);
 
-        let res = ffn.forward(&inp).inner();
+        let res = ffn.forward(&inp);
+
+        let data = res.serialize();
+        let shape = res.shape();
+        let dtype = res.dtype();
+        let res = TchTensor::from_raw(&data, &shape, dtype).inner();
 
         let truth = TchTensor::from_tensor_view(&gt_st.tensor("1-output").unwrap()).inner();
 

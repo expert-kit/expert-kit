@@ -64,6 +64,9 @@ pub enum EKError {
 
     #[error("reqwest error {0}")]
     ReqwestError(#[from] reqwest::Error),
+
+    #[error("expert backend error: {0}")]
+    BackendError(string::String),
 }
 
 pub type EKResult<T> = std::result::Result<T, EKError>;
