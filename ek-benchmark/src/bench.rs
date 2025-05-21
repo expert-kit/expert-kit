@@ -25,14 +25,14 @@ impl ExpertBenchmark {
             ExpertBackend::OnnxF32(onnx_exp) => onnx_exp.backend(),
         }
     }
-    
+
     fn shape(&self) -> ExpertShape {
         match &self.0 {
             ExpertBackend::Torch(exp) => exp.shape(),
             ExpertBackend::OnnxF32(onnx_exp) => onnx_exp.shape(),
         }
     }
-    
+
     fn forward(&self, batch_size: usize) -> Instant {
         match &self.0 {
             ExpertBackend::Torch(exp) => {
@@ -42,7 +42,7 @@ impl ExpertBenchmark {
                 start
             }
             ExpertBackend::OnnxF32(onnx_exp) => {
-                let input: NDArrayTensor<f32> = onnx_exp.rand_input(batch);
+                let input: NDArrayTensor<f32> = onnx_exp.rand_input(batch_size);
 
                 let start = Instant::now();
                 let _ = onnx_exp.forward(&input);
@@ -66,7 +66,7 @@ impl Benchmarker {
         self.run_iterations = iterations;
         self
     }
-    
+
     pub fn repeats(&mut self, repeats: usize) -> &mut Benchmarker {
         self.experiment_repeats = repeats;
         self
@@ -77,32 +77,35 @@ impl Benchmarker {
         let system_info = sysinfo::System::new_all();
         let cpu_brand = system_info.cpus()[0].brand();
         info!("Running batch scan on CPU: {}", cpu_brand);
-        
+
         // Warm up all experts
         for expert in self.experts.iter() {
             expert.forward(1);
         }
 
-        for iter in 0..self.iterations {
-            for batch in size.iter() {
-                for (eidx, expert) in self.experts.iter().enumerate() {
-                    let start = expert.forward(*batch);
-                    let shape = expert.shape();
-                    let backend = expert.backend();
-                    let row = vec![
-                        AnyValue::UInt64(iter as u64),
-                        AnyValue::UInt64(*batch as u64),
-                        AnyValue::UInt64(eidx as u64),
-                        AnyValue::UInt64(start.elapsed().as_micros() as u64),
-                        AnyValue::UInt64(shape.hidden as u64),
-                        AnyValue::UInt64(shape.intermediate as u64),
-                        AnyValue::StringOwned(backend.into()),
-                    ];
-                    rows.push(Row(row));
+        for experiment_id in 0..self.experiment_repeats {
+            for iter in 0..self.run_iterations {
+                for batch in batch_sizes {
+                    for (eidx, expert) in self.experts.iter().enumerate() {
+                        let start = expert.forward(*batch);
+                        let shape = expert.shape();
+                        let backend = expert.backend();
+                        let row = vec![
+                            AnyValue::UInt64(experiment_id as u64),
+                            AnyValue::UInt64(iter as u64),
+                            AnyValue::UInt64(*batch as u64),
+                            AnyValue::UInt64(eidx as u64),
+                            AnyValue::UInt64(start.elapsed().as_micros() as u64),
+                            AnyValue::UInt64(shape.hidden as u64),
+                            AnyValue::UInt64(shape.intermediate as u64),
+                            AnyValue::StringOwned(backend.into()),
+                        ];
+                        rows.push(Row(row));
+                    }
                 }
             }
         }
-        
+
         let schema = Schema::from_iter(vec![
             Field::new("experiment_id".into(), DataType::UInt64),
             Field::new("iteration".into(), DataType::UInt64),
@@ -123,21 +126,24 @@ impl Benchmarker {
         let hardware_col = Series::new("hardware".into(), vec![cpu_brand; df.height()]);
         let timestamp_col = Series::new("timestamp".into(), vec![timestamp; df.height()]);
 
-        df.hstack(&[hardware_col.into(), timestamp_col.into()]).unwrap()
+        df.hstack(&[hardware_col.into(), timestamp_col.into()])
+            .unwrap()
     }
-    
+
     pub fn calculate_summary(&self, df: &DataFrame) -> DataFrame {
         // Group by batch_size and experiment_id, then calculate average elapsed time
-        df.clone().lazy()
+        df.clone()
+            .lazy()
             .group_by([col("batch_size"), col("experiment_id")])
             .agg([col("elapsed_micros").mean().alias("avg_elapsed_micros")])
             .collect()
             .unwrap()
     }
-    
+
     pub fn calculate_final_summary(&self, df: &DataFrame) -> DataFrame {
         // Group by batch_size only, averaging across all experiments
-        df.clone().lazy()
+        df.clone()
+            .lazy()
             .group_by([col("batch_size")])
             .agg([
                 col("elapsed_micros").mean().alias("avg_elapsed_micros"),
