@@ -10,7 +10,7 @@ use tch::{IndexOp, Tensor};
 use tokio::sync::{Mutex, mpsc};
 
 use crate::{
-    ffn::{EkTensor, expert_torch::TchTensor},
+    backend::{EkTensor, torch::TchTensor},
     proto::ek::worker::v1,
 };
 

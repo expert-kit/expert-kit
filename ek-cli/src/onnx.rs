@@ -2,7 +2,7 @@ use std::io::Write;
 
 use clap::Subcommand;
 use ek_base::error::EKResult;
-use ek_computation::ffn::DType;
+use ek_computation::backend::DType;
 use ort::session::Session;
 use prost::Message;
 

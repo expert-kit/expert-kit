@@ -1,6 +1,6 @@
 use prost::Message;
 
-use crate::{ffn::DType, proto::pbonnx};
+use crate::{backend::DType, proto::pbonnx};
 
 #[allow(dead_code)]
 enum ActFn {
@@ -232,7 +232,10 @@ mod test {
     use ort::session::Session;
     use prost::Message;
 
-    use crate::ffn::{DType, Device, ExpertWeight, expert_ort::NDArrayTensor};
+    use crate::{
+        backend::{DType, Device, ort::NDArrayTensor},
+        ffn::meta::ExpertWeight,
+    };
 
     #[test]
     fn test_basic_export() {
@@ -246,7 +249,7 @@ mod test {
         let raw = model.encode_to_vec();
 
         let rand_weight: ExpertWeight<NDArrayTensor<f32>> =
-            ExpertWeight::from_rand(2048, 7168, DType::Float, Device::CPU);
+            ExpertWeight::from_rand_matmul(2048, 7168, DType::Float, Device::CPU);
 
         let session = Session::builder()
             .expect("failed to create session")

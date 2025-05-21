@@ -1,10 +1,12 @@
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
+use ek_computation::backend::ort::NDArrayTensor;
+use ek_computation::ffn::meta::{Expert, ExpertShape};
 use polars::frame::DataFrame;
 use polars::frame::row::Row;
 use polars::prelude::*;
 
-use ek_computation::ffn::{Expert, ExpertBackend, ExpertShape, expert_ort::NDArrayTensor};
+use ek_computation::ffn::ExpertBackend;
 
 #[allow(dead_code)]
 pub struct Benchmarker {
@@ -20,14 +22,14 @@ impl ExpertBenchmark {
     fn backend(&self) -> std::string::String {
         match &self.0 {
             ExpertBackend::Torch(exp) => exp.backend(),
-            ExpertBackend::Onnx(onnx_exp) => onnx_exp.backend(),
+            ExpertBackend::OnnxF32(onnx_exp) => onnx_exp.backend(),
         }
     }
     
     fn shape(&self) -> ExpertShape {
         match &self.0 {
             ExpertBackend::Torch(exp) => exp.shape(),
-            ExpertBackend::Onnx(onnx_exp) => onnx_exp.shape(),
+            ExpertBackend::OnnxF32(onnx_exp) => onnx_exp.shape(),
         }
     }
     
@@ -39,7 +41,7 @@ impl ExpertBenchmark {
                 let _ = exp.forward(&input);
                 start
             }
-            ExpertBackend::Onnx(onnx_exp) => {
+            ExpertBackend::OnnxF32(onnx_exp) => {
                 let input: NDArrayTensor<f32> = onnx_exp.rand_input(batch);
 
                 let start = Instant::now();
@@ -81,26 +83,22 @@ impl Benchmarker {
             expert.forward(1);
         }
 
-        // Run the experiments multiple times if requested
-        for experiment_id in 0..self.experiment_repeats {
-            for iter_idx in 0..self.run_iterations {
-                for current_batch in batch_sizes.iter() {
-                    for (expert_idx, expert) in self.experts.iter().enumerate() {
-                        let start = expert.forward(*current_batch);
-                        let shape = expert.shape();
-                        let backend = expert.backend();
-                        let row = vec![
-                            AnyValue::UInt64(experiment_id as u64),
-                            AnyValue::UInt64(iter_idx as u64),
-                            AnyValue::UInt64(*current_batch as u64),
-                            AnyValue::UInt64(expert_idx as u64),
-                            AnyValue::UInt64(start.elapsed().as_micros() as u64),
-                            AnyValue::UInt64(shape.dim as u64),
-                            AnyValue::UInt64(shape.hidden as u64),
-                            AnyValue::StringOwned(backend.into()),
-                        ];
-                        rows.push(Row(row));
-                    }
+        for iter in 0..self.iterations {
+            for batch in size.iter() {
+                for (eidx, expert) in self.experts.iter().enumerate() {
+                    let start = expert.forward(*batch);
+                    let shape = expert.shape();
+                    let backend = expert.backend();
+                    let row = vec![
+                        AnyValue::UInt64(iter as u64),
+                        AnyValue::UInt64(*batch as u64),
+                        AnyValue::UInt64(eidx as u64),
+                        AnyValue::UInt64(start.elapsed().as_micros() as u64),
+                        AnyValue::UInt64(shape.hidden as u64),
+                        AnyValue::UInt64(shape.intermediate as u64),
+                        AnyValue::StringOwned(backend.into()),
+                    ];
+                    rows.push(Row(row));
                 }
             }
         }

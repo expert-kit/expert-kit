@@ -10,7 +10,11 @@ use std::{
 use bench::{Benchmarker, ExpertBenchmark};
 use clap::{Parser, ValueEnum};
 use ek_computation::{
-    ffn::{DType, Device, ExpertWeight, expert_ort::NDArrayTensor, expert_torch::TorchFFN},
+    backend::{DType, Device, ort::NDArrayTensor, torch::TchTensor},
+    ffn::{
+        expert_torch::TorchFFN,
+        meta::{Expert, ExpertWeight},
+    },
     x::ExpertBackendType,
 };
 use ek_computation::{
@@ -103,7 +107,7 @@ fn main() {
                     rand_weight,
                 )
                 .unwrap();
-                experts.push(BenchmarkExpert(ExpertBackend::Onnx(exp)));
+                experts.push(BenchmarkExpert(ExpertBackend::OnnxF32(exp)));
             }
         }
     }

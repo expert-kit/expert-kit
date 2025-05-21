@@ -1,118 +1,31 @@
-use std::fmt::Debug;
+use std::marker::PhantomData;
 
 use ek_base::error::EKResult;
-use ndarray::{Array, ArrayD, IxDyn};
+use ndarray::ArrayD;
 
-use ndarray_rand::rand_distr::num_traits::{self};
 use ort::{
     session::{Session, builder::GraphOptimizationLevel},
-    tensor::PrimitiveTensorElementType,
-    value::{Tensor, Value},
+    value::Tensor,
 };
-use safetensors::tensor::TensorView;
 
-use crate::onnx::exporter::ExpertOnnxBuilder;
+use crate::{
+    backend::{
+        DType,
+        ort::{NDArrayTensor, OrtDType},
+    },
+    onnx::exporter::ExpertOnnxBuilder,
+};
 
-use super::{DType, EkTensor, Expert, ExpertShape, ExpertWeight, FromSafeTensor};
+use super::{
+    ExpertWeight,
+    meta::{Expert, ExpertShape},
+};
 
-pub struct OnnxFFN<D: OrtDType> {
+pub struct OnnxFFN<T: OrtDType> {
     dim: i64,
     hidden: i64,
     sess: Session,
-    _phantom: std::marker::PhantomData<D>,
-}
-pub trait OrtDType:
-    PrimitiveTensorElementType + num_traits::Num + Clone + Debug + Copy + 'static
-{
-}
-impl OrtDType for f32 {}
-impl OrtDType for half::bf16 {}
-
-#[derive(Clone, Debug)]
-pub struct NDArrayTensor<D: OrtDType>(ArrayD<D>);
-
-impl<D> From<TensorView<'_>> for NDArrayTensor<D>
-where
-    D: OrtDType,
-{
-    fn from(view: TensorView<'_>) -> Self {
-        let raw = view.data();
-        unsafe {
-            let (_, d_slice, _) = raw.align_to::<D>();
-            let copied = d_slice.to_vec();
-
-            let v = Array::from_vec(copied)
-                .into_dimensionality::<IxDyn>()
-                .unwrap();
-
-            NDArrayTensor(v)
-        }
-    }
-}
-
-impl<D> From<ArrayD<D>> for NDArrayTensor<D>
-where
-    D: OrtDType,
-{
-    fn from(value: ArrayD<D>) -> Self {
-        NDArrayTensor(value)
-    }
-}
-
-impl<D> FromSafeTensor for NDArrayTensor<D>
-where
-    D: OrtDType,
-{
-    fn lookup_suffix(_st: &safetensors::SafeTensors, _name: &[&str]) -> Option<Self> {
-        todo!()
-    }
-}
-
-impl<D> EkTensor for NDArrayTensor<D>
-where
-    D: OrtDType,
-{
-    fn rand(shape: Vec<usize>, _dtype: super::DType, _dev: super::Device) -> Self {
-        let res = ArrayD::zeros(shape);
-        Self(res)
-    }
-
-    fn stack(tensors: &[Self], dim: usize) -> Self {
-        let views = tensors.iter().map(|x| x.0.view()).collect::<Vec<_>>();
-        let res = ndarray::stack(ndarray::Axis(dim), &views)
-            .unwrap()
-            .into_dimensionality::<IxDyn>()
-            .unwrap();
-        NDArrayTensor(res)
-    }
-
-    fn shape(&self) -> Vec<usize> {
-        self.0.shape().to_vec()
-    }
-
-    fn serialize(&self) -> Vec<u8> {
-        todo!()
-    }
-
-    fn from_raw(data: &[u8], shape: &[usize], _dtype: super::DType) -> Self {
-        let raw = data;
-        unsafe {
-            let (_, d_slice, _) = raw.align_to::<D>();
-            let copied = d_slice.to_vec();
-
-            let v = Array::from_vec(copied)
-                .into_dimensionality::<IxDyn>()
-                .unwrap()
-                .into_shape_with_order(shape)
-                .unwrap();
-            NDArrayTensor(v)
-        }
-    }
-
-    fn from_tensor_view(tv: &TensorView<'_>) -> Self {
-        let raw = tv.data();
-        Self::from_raw(raw, tv.shape(), tv.dtype().into())
-    }
+    phantom: PhantomData<T>,
 }
 
 impl<D: OrtDType> OnnxFFN<D> {
@@ -136,8 +49,6 @@ impl<D: OrtDType> OnnxFFN<D> {
             .with_external_initializer("onnx::MatMul_15", weight.down_w.into())
             .expect("should loadgate")
             .with_optimization_level(GraphOptimizationLevel::Level1)?
-            // .with_execution_providers([OneDNNExecutionProvider::default().build()])
-            // .unwrap()
             .with_intra_threads(std::thread::available_parallelism().unwrap().into())?
             .with_parallel_execution(true)?
             .commit_from_memory(raw.as_slice())?;
@@ -146,18 +57,8 @@ impl<D: OrtDType> OnnxFFN<D> {
             sess: model,
             dim: hidden_dim,
             hidden: intermediate_dim,
-            _phantom: std::marker::PhantomData,
+            phantom: PhantomData,
         })
-    }
-}
-
-impl<D> From<NDArrayTensor<D>> for Value
-where
-    D: OrtDType,
-{
-    fn from(val: NDArrayTensor<D>) -> Self {
-        let v = Tensor::from_array(val.0.view()).unwrap().into_dyn();
-        v
     }
 }
 
@@ -191,10 +92,10 @@ where
         vals.to_owned().into()
     }
 
-    fn shape(&self) -> super::ExpertShape {
+    fn shape(&self) -> ExpertShape {
         ExpertShape {
-            dim: self.dim as usize,
-            hidden: self.hidden as usize,
+            hidden: self.dim as usize,
+            intermediate: self.hidden as usize,
         }
     }
 
