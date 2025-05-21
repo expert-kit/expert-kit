@@ -21,7 +21,7 @@ use ek_computation::{
     ffn::{ExpertBackend, expert_ort},
     x,
 };
-use polars::prelude::{IntoLazy, ParquetWriter, col};
+use polars::prelude::ParquetWriter;
 extern crate pretty_env_logger;
 #[macro_use]
 extern crate log;
