@@ -3,6 +3,8 @@ use std::fmt::Display;
 use ek_base::error::{EKError, EKResult};
 use expert_ort::OnnxFFN;
 use expert_torch::{TchTensor, TorchFFN};
+#[cfg(feature = "npu")]
+use expert_cann::{CannTensor, CannFFN};
 use safetensors::tensor::TensorView;
 
 use crate::{
@@ -13,6 +15,8 @@ use crate::{
 #[allow(dead_code)]
 pub mod expert_ort;
 pub mod expert_torch;
+#[cfg(feature = "npu")]
+pub mod expert_cann;
 
 pub struct ExpertShape {
     pub dim: usize,
@@ -171,6 +175,8 @@ where
 pub enum ExpertBackend {
     Torch(TorchFFN),
     Onnx(OnnxFFN),
+    #[cfg(feature = "npu")]
+    Cann(CannFFN),
 }
 
 impl ExpertBackend {
@@ -184,6 +190,11 @@ impl ExpertBackend {
                 ExpertBackend::Torch(TorchFFN::construct(instance, weight)?)
             }
             x::ExpertBackendType::Onnx => todo!(),
+            #[cfg(feature = "npu")]
+            x::ExpertBackendType::Cann => {
+                let weight = ExpertWeight::<CannTensor>::from_safetensor(tensor)?;
+                ExpertBackend::Cann(CannFFN::construct(instance, weight)?)
+            },
         };
         Ok(backend)
     }
@@ -201,6 +212,22 @@ impl ExpertBackend {
             }
             ExpertBackend::Onnx(_exp) => {
                 todo!()
+            }
+            #[cfg(feature = "npu")]
+            ExpertBackend::Cann(exp) => {
+                let inp = CannTensor::from_tensor_view(view);
+                let shape = inp.shape();
+                log::debug!("input shape {:?}", shape);
+                assert!(shape.len() == 2);
+                let result = exp.forward(&inp);
+                
+                // Convert CannTensor to TchTensor for uniformity
+                let data = result.serialize();
+                let shape = result.shape();
+                let dtype = result.dtype();
+                
+                // Create TchTensor from raw data
+                Ok(TchTensor::from_raw(&data, &shape, dtype))
             }
         }
     }

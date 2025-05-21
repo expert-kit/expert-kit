@@ -12,6 +12,8 @@ use tokio::sync::{
 pub enum ExpertBackendType {
     Torch,
     Onnx,
+    #[cfg(feature = "npu")]
+    Cann,
 }
 
 impl From<&str> for ExpertBackendType {
