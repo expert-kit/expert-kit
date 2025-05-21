@@ -227,7 +227,7 @@ impl Expert<TchTensor> for TorchFFN {
     }
 
     fn rand_input(&self, batch: usize) -> TchTensor {
-        TchTensor::rand(vec![batch, self.dim], DType::Float, Device::CPU)
+        TchTensor::rand(vec![batch, self.dim], DType::BFloat16, Device::CPU)
     }
     fn shape(&self) -> ExpertShape {
         ExpertShape {
