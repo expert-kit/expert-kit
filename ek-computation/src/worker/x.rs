@@ -1,4 +1,3 @@
-use gethostname::gethostname;
 use tonic::transport::Endpoint;
 
 use std::{str::FromStr, sync::Arc};
@@ -36,12 +35,8 @@ pub async fn load_expert_task(
 
 pub fn get_worker_id() -> String {
     let settings = get_ek_settings();
-    let ek_worker_id = settings.worker.id.clone();
-    if let Some(wid) = ek_worker_id {
-        return wid;
-    }
-    let hn = gethostname();
-    hn.into_string().unwrap()
+
+    settings.worker.id.clone()
 }
 
 pub fn get_controller_addr() -> Endpoint {

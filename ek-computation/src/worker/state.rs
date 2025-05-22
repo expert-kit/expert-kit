@@ -1,6 +1,7 @@
 use std::{sync::Arc, time};
 
 use crate::{
+    metrics::METRIC_WORKER_EXPERT_LOADING,
     proto::ek::{
         object::v1::Metadata,
         worker::v1::{
@@ -15,7 +16,7 @@ use ek_db::safetensor::{ExpertKey, SafeTensorDB};
 use tokio::{
     select,
     sync::{RwLock, Semaphore},
-    task::JoinSet,
+    task::{JoinHandle, JoinSet},
 };
 use tokio_stream::{Stream, StreamExt};
 use tokio_util::sync::CancellationToken;
@@ -186,27 +187,7 @@ impl StateClient {
             self.spawn_expert_loading_task(&mut js, expert, token.clone());
         }
 
-        let edb = self.expert_db.clone();
-        let v = tokio::spawn(async move {
-            let start = time::Instant::now();
-            loop {
-                tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-                {
-                    let rg = edb.read().await;
-                    let loaded = rg.loaded();
-                    let loading = rg.loading();
-                    log::info!(
-                        "loading progress: loaded={} loading={} elapsed_ms={},",
-                        loaded,
-                        loading,
-                        start.elapsed().as_millis()
-                    );
-                }
-            }
-        });
-
         js.join_all().await;
-        v.abort();
         log::info!(
             "experts is loaded. elapsed_ms={}",
             now.elapsed().as_millis()
@@ -226,5 +207,49 @@ impl StateClient {
         let exp_current = self.gate.read().await.current_experts().await?;
         self.remove_stale_experts(&exp_incoming, &exp_current).await;
         Ok(())
+    }
+}
+
+pub struct StateInspector {
+    edb: Arc<RwLock<dyn ExpertDB + Sync + Send + 'static>>,
+}
+
+impl StateInspector {
+    async fn inspect(&self) {
+        let settings = get_ek_settings();
+        let rg = self.edb.read().await;
+        let loaded = rg.loaded();
+        let loading = rg.loading();
+        log::info!("loading progress: loaded={} loading={} ", loaded, loading,);
+        METRIC_WORKER_EXPERT_LOADING
+            .with_label_values(&[
+                settings.worker.id.as_str(),
+                settings.inference.model_name.as_str(),
+                "loaded",
+            ])
+            .set(loaded as i64);
+
+        METRIC_WORKER_EXPERT_LOADING
+            .with_label_values(&[
+                settings.worker.id.as_str(),
+                settings.inference.model_name.as_str(),
+                "loading",
+            ])
+            .set(loading as i64);
+    }
+
+    pub async fn run(&self) {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+            self.inspect().await;
+        }
+    }
+
+    pub fn spawn() -> JoinHandle<()> {
+        let si = StateInspector {
+            edb: get_expert_db(),
+        };
+
+        tokio::task::spawn(async move { si.run().await })
     }
 }

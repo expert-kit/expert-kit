@@ -1,4 +1,4 @@
-use std::{clone, sync::Arc};
+use std::sync::Arc;
 
 use ek_base::{config::get_ek_settings, utils::Defers};
 use tokio::sync::{Mutex, mpsc};
@@ -25,7 +25,7 @@ impl ComputationService for ComputationProxyServiceImpl {
         let start = std::time::Instant::now();
         let settings = get_ek_settings();
 
-        let cloned_start = start.clone();
+        let cloned_start = start;
         let _d = Defers::defer(Box::new(move || {
             let elapsed = cloned_start.elapsed();
             // TODO: hardcode model name in metric

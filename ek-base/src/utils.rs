@@ -1,6 +1,5 @@
 use std::{collections::HashMap, path::PathBuf, time};
 
-use once_cell::sync::OnceCell;
 
 pub struct PerfTimer {
     start: time::Instant,

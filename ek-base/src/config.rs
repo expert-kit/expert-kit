@@ -57,11 +57,23 @@ pub struct WorkerPorts {
 #[derive(Debug, Deserialize, Clone)]
 #[allow(unused)]
 pub struct WorkerSettings {
-    pub id: Option<String>,
+    #[serde(default = "default_worker_id")]
+    pub id: String,
     pub listen: String,
     pub broadcast: String,
     pub ports: WorkerPorts,
     pub device: Option<String>,
+    #[serde(default = "default_worker_metrics")]
+    pub metrics: String,
+}
+
+fn default_worker_metrics() -> String {
+    "0.0.0.0:9091".to_string()
+}
+
+fn default_worker_id() -> String {
+    use gethostname::gethostname;
+    gethostname().into_string().unwrap()
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -194,6 +206,7 @@ controller:
             .unwrap();
         let res = config.try_deserialize::<Settings>().unwrap();
         assert_eq!(res.inference.hidden_dim, 2048);
+        assert_eq!(res.worker.metrics, "0.0.0.0:9091");
     }
 
     #[test]
@@ -206,6 +219,6 @@ controller:
             .build()
             .unwrap();
         let res = config.try_deserialize::<Settings>().unwrap();
-        assert_eq!(res.worker.id.unwrap(), "override_test");
+        assert_eq!(res.worker.id, "override_test");
     }
 }

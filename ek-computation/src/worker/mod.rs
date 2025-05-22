@@ -1,4 +1,6 @@
 mod core;
+
+use state::StateInspector;
 use tokio::select;
 use tokio::signal;
 use tokio_util::sync::CancellationToken;
@@ -8,6 +10,7 @@ pub mod server;
 pub mod state;
 pub mod x;
 
+use crate::metrics::spawn_metrics_server;
 use crate::x::get_graceful_shutdown_ch;
 
 use super::{
@@ -17,6 +20,10 @@ use super::{
 use ek_base::{config::get_ek_settings, error::EKResult};
 
 pub async fn worker_main() -> EKResult<()> {
+    let settings = get_ek_settings();
+
+    spawn_metrics_server(&settings.worker.metrics);
+
     let token = CancellationToken::new();
     let cli_cancel = token.clone();
     let cli = tokio::task::spawn(async move {
@@ -49,9 +56,12 @@ pub async fn worker_main() -> EKResult<()> {
         }
     });
 
+    let state_inspect = StateInspector::spawn();
+
     select! {
         _ = cli => { },
         _ = srv => { },
+        _ = state_inspect => { },
         _ = signal::ctrl_c() => {
             log::info!("ctrl-c signal received, shutting down");
             token.clone().cancel();

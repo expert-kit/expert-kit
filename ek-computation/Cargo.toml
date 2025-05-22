@@ -36,7 +36,6 @@ once_cell = { workspace = true }
 tokio-util = { workspace = true }
 object_store = "0.12.0"
 object_store_opendal = "0.51.0"
-gethostname = "1.0.1"
 float8 = "0.2.1"
 half = { workspace = true }
 rand_distr = { workspace = true }

@@ -1,19 +1,16 @@
-use std::collections::HashMap;
 use std::net::ToSocketAddrs;
 use std::thread;
 
-use actix_http::header::CONTENT_TYPE;
-use actix_http::{ContentEncoding, Response};
-use actix_web::{App, HttpRequest, HttpResponse, HttpServer, Responder, get, middleware, rt, web};
+use actix_web::{App, HttpRequest, HttpResponse, HttpServer, get, middleware, rt};
 use ek_base::error::{EKError, EKResult};
 use lazy_static::lazy_static;
 use prometheus::{
-    self, CounterVec, Encoder, Histogram, HistogramVec, IntCounter, IntCounterVec, IntGauge,
+    self, HistogramVec, IntCounterVec,
     IntGaugeVec, TextEncoder, histogram_opts, labels,
 };
 use prometheus::{
-    register_counter_vec, register_histogram, register_histogram_vec, register_int_counter,
-    register_int_counter_vec, register_int_gauge, register_int_gauge_vec,
+    register_histogram_vec,
+    register_int_counter_vec, register_int_gauge_vec,
 };
 
 macro_rules! controller_const_opts {
