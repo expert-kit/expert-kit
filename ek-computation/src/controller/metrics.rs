@@ -1,0 +1,100 @@
+use std::collections::HashMap;
+use std::net::ToSocketAddrs;
+
+use actix_http::Response;
+use actix_http::header::CONTENT_TYPE;
+use actix_web::{App, HttpRequest, HttpResponse, HttpServer, Responder, get, web};
+use ek_base::error::{EKError, EKResult};
+use lazy_static::lazy_static;
+use prometheus::{
+    self, CounterVec, Encoder, Histogram, HistogramVec, IntCounter, IntCounterVec, IntGauge,
+    IntGaugeVec, TextEncoder, histogram_opts, labels,
+};
+use prometheus::{
+    register_counter_vec, register_histogram, register_histogram_vec, register_int_counter,
+    register_int_counter_vec, register_int_gauge, register_int_gauge_vec,
+};
+
+macro_rules! controller_const_opts {
+    () => {
+        labels! {"component".to_string() => "controller".to_string()}
+    };
+}
+
+lazy_static! {
+
+    // Histogram of end-to-end request duration
+    pub static ref METRIC_CONTROLLER_LAYER: HistogramVec = register_histogram_vec!(
+        histogram_opts!(
+            "controller_layer",
+            "elapsed time of inferring one layer",
+            (1..10).map(|x| (x * 8 * 1000) as f64).collect::<Vec<_>>(),
+            controller_const_opts!()
+        ),
+        &["model"]
+    )
+    .unwrap();
+
+    // Histogram of intra-request (a.k.a controller to worker) duration.
+    pub static ref METRIC_CONTROLLER_INTRA_REQ: HistogramVec = register_histogram_vec!(
+        histogram_opts!(
+            "controller_intra_request",
+            "elapsed time of dispatching one request to worker",
+            (0..10).map(|x| (x * 4 * 1000) as f64).collect::<Vec<_>>(),
+            controller_const_opts!()
+        ),
+        &["model"]
+    )
+    .unwrap();
+
+
+    // Histogram of expert forward duration.
+    pub static ref METRIC_WORKER_FORWARD: HistogramVec = register_histogram_vec!(
+        histogram_opts!(
+            "worker_forward",
+            "elapsed time of dispatching one request to worker",
+            (0..10).map(|x| (x * 4 * 1000) as f64).collect::<Vec<_>>()
+        ),
+        &["model"]
+    )
+    .unwrap();
+
+    // COunter of expert forward activation.
+    pub static ref METRIC_WORKER_EXPERT_ACTIVATION: CounterVec = register_counter_vec!(
+        "worker_expert_activation",
+        "activation count of expert",
+        &["model", "expert"]
+    )
+    .unwrap();
+
+
+
+
+
+
+
+
+}
+
+#[get("/metrics")]
+async fn export_metrics(_req: HttpRequest) -> HttpResponse {
+    let encoder = TextEncoder::new();
+    log::info!("export metrics");
+    let m = prometheus::gather();
+    let body = encoder
+        .encode_to_string(&m)
+        .map_err(|e| EKError::InvalidInput(e.to_string()))
+        .unwrap();
+
+    HttpResponse::Ok().content_type("text/plain").body(body)
+}
+
+pub async fn metrics_listen(addr: &str) -> EKResult<()> {
+    let addr = addr.to_socket_addrs().unwrap().collect::<Vec<_>>();
+    HttpServer::new(move || App::new().service(export_metrics))
+        .disable_signals()
+        .bind(addr.as_slice())?
+        .run()
+        .await
+        .map_err(EKError::from)
+}

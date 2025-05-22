@@ -40,7 +40,11 @@ gethostname = "1.0.1"
 float8 = "0.2.1"
 half = { workspace = true }
 rand_distr = { workspace = true }
+prometheus = { workspace = true }
 rand = { workspace = true }
+lazy_static = { workspace = true }
+actix-web = { workspace = true }
+actix-http = { workspace = true }
 
 
 [build-dependencies]

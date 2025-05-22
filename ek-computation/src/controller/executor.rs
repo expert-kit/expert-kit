@@ -1,8 +1,9 @@
-use std::{collections::BTreeMap, sync::Arc};
+use std::{collections::BTreeMap, sync::Arc, time};
 
 use ek_base::{
+    config::get_ek_settings,
     error::{EKError, EKResult},
-    utils::PerfTimer,
+    utils::{Defers, PerfTimer},
 };
 use once_cell::sync::OnceCell;
 use safetensors::SafeTensors;
@@ -11,6 +12,7 @@ use tokio::sync::{Mutex, mpsc};
 
 use crate::{
     backend::{EkTensor, torch::TchTensor},
+    controller::metrics::METRIC_CONTROLLER_INTRA_REQ,
     proto::ek::worker::v1,
 };
 
@@ -134,6 +136,7 @@ impl NaiveExecutor {
         let mut tit = PerfTimer::new("inner_execute");
         let mut handles = vec![];
         let mut chips = vec![];
+        let settings = get_ek_settings();
         {
             for egress_req in self.pending_egress.iter() {
                 chips.push((egress_req.0.clone(), (egress_req.1.to_owned())));
@@ -164,17 +167,29 @@ impl NaiveExecutor {
 
                 let f = tokio::spawn(async move {
                     let req = v1::ForwardReq {
+                        // TODO: hardcode instance id.
                         instance_id: "0".into(),
                         tensor: serialized_tensor,
                         sequences: seqs,
                     };
-                    cli.forward(req)
-                        .await
-                        .map(|resp| resp.into_inner())
-                        .map_err(|e| {
-                            log::error!("forward error: {}", e);
-                            e
-                        })
+                    {
+                        let start = time::Instant::now();
+                        let _d = Defers::defer(Box::new(move || {
+                            let elapsed = start.elapsed();
+
+                            // TODO: hardcode metric name
+                            METRIC_CONTROLLER_INTRA_REQ
+                                .with_label_values(&[settings.inference.model_name.as_str()])
+                                .observe(elapsed.as_micros() as f64);
+                        }));
+                        cli.forward(req)
+                            .await
+                            .map(|resp| resp.into_inner())
+                            .map_err(|e| {
+                                log::error!("forward error: {}", e);
+                                e
+                            })
+                    }
                 });
                 handles.push(f);
             }

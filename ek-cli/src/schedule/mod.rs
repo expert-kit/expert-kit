@@ -74,7 +74,7 @@ async fn upsert_nodes(inventory: PathBuf) -> EKResult<Vec<i32>> {
 }
 
 async fn execute_static_schedule(inventory: PathBuf) -> EKResult<()> {
-    // mplement the static scheduling logic here
+    // implement the static scheduling logic here
     let settings = get_ek_settings();
     let model_name = settings.inference.model_name.clone();
     let instance_name = settings.inference.instance_name.clone();
@@ -85,6 +85,7 @@ async fn execute_static_schedule(inventory: PathBuf) -> EKResult<()> {
     );
     let cli = WeightSrvClient::new(ws_addr);
     let vital = cli.load_meta_vital(&model_name).await?;
+    info!("model info : {:?}", &vital);
 
     let reader = StateReaderImpl::new();
     let model = reader

@@ -1,10 +1,15 @@
 pub mod dispatcher;
 pub mod executor;
+pub mod metrics;
 pub mod poller;
 pub mod registry;
 pub mod service;
 
+use std::thread;
+
+use actix_web::rt;
 use ek_base::error::EKResult;
+use metrics::metrics_listen;
 
 use super::{
     controller::{self, poller::start_poll},
@@ -16,6 +21,11 @@ use super::{
 
 pub async fn controller_main() -> EKResult<()> {
     let settings = ek_base::config::get_ek_settings();
+
+    thread::spawn(move || {
+        let server_future = metrics_listen("0.0.0.0:9090");
+        rt::System::new().block_on(server_future)
+    });
 
     let state_srv = tokio::task::spawn(async {
         let srv = controller::service::state::StateServerImpl::new();

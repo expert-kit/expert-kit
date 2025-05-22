@@ -1,9 +1,13 @@
-use std::sync::Arc;
+use std::{clone, sync::Arc};
 
+use ek_base::{config::get_ek_settings, utils::Defers};
 use tokio::sync::{Mutex, mpsc};
 
 use crate::{
-    controller::executor::{Executor, get_executor},
+    controller::{
+        executor::{Executor, get_executor},
+        metrics::METRIC_CONTROLLER_LAYER,
+    },
     proto::ek::worker::v1::{self, computation_service_server::ComputationService},
 };
 
@@ -19,6 +23,17 @@ impl ComputationService for ComputationProxyServiceImpl {
     ) -> Result<tonic::Response<v1::ForwardResp>, tonic::Status> {
         log::info!("forward request: seq={}", request.get_ref().sequences.len());
         let start = std::time::Instant::now();
+        let settings = get_ek_settings();
+
+        let cloned_start = start.clone();
+        let _d = Defers::defer(Box::new(move || {
+            let elapsed = cloned_start.elapsed();
+            // TODO: hardcode model name in metric
+            METRIC_CONTROLLER_LAYER
+                .with_label_values(&[settings.inference.model_name.as_str()])
+                .observe(elapsed.as_micros() as f64);
+        }));
+
         let mut rx = {
             let mut lg = self.executor.lock().await;
             lg.submit(request.get_ref()).await?

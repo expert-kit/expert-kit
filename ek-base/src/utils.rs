@@ -1,5 +1,7 @@
 use std::{collections::HashMap, path::PathBuf, time};
 
+use once_cell::sync::OnceCell;
+
 pub struct PerfTimer {
     start: time::Instant,
     name: String,
@@ -45,5 +47,30 @@ impl Drop for PerfTimer {
 
 pub fn workspace_root() -> PathBuf {
     let root = env!("CARGO_MANIFEST_DIR");
-    PathBuf::from(root.to_owned()).parent().unwrap().to_path_buf()
+    PathBuf::from(root.to_owned())
+        .parent()
+        .unwrap()
+        .to_path_buf()
 }
+
+pub struct Defers {
+    cb: Box<dyn Fn()>,
+}
+
+impl Defers {
+    pub fn defer(f: Box<dyn Fn()>) -> Self {
+        // self.stack.set(f);
+        Self { cb: f }
+    }
+}
+
+impl Drop for Defers {
+    fn drop(&mut self) {
+        let v = self.cb.as_mut();
+        v()
+    }
+}
+
+
+unsafe impl Send for Defers {}
+unsafe impl Sync for Defers {}

@@ -53,10 +53,16 @@ once_cell = "1.21.3"
 config = "0.15.11"
 memmap2 = "0.9.5"
 actix-web = "4.10.2"
+actix-http = "3.10.0"
 reqwest = "0.12.15"
 half = { version = "2.6.0", features = ["rand_distr", "num-traits"] }
 rand = "0.9.1"
 rand_distr = "0.5.1"
+fastrace = "0.7"
+prometheus = "0.14.0"
+lazy_static = "1.5.0"
+
+
 
 [workspace]
 resolver = "2"
