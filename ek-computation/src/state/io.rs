@@ -44,6 +44,16 @@ impl StateReaderImpl {
     pub fn new() -> Self {
         Self {}
     }
+    pub async fn experts_by_instance(&self, instance_id: i32) -> EKResult<Vec<Expert>> {
+        let mut conn = POOL.get().await?;
+        use schema::expert::dsl;
+        let res = schema::expert::table
+            .filter(dsl::instance_id.eq(instance_id))
+            .select(models::Expert::as_select())
+            .load(&mut conn)
+            .await?;
+        Ok(res)
+    }
 
     pub async fn active_nodes(&self) -> EKResult<Vec<Node>> {
         let mut conn = POOL.get().await?;
@@ -107,6 +117,7 @@ impl StateReader for StateReaderImpl {
             .await?;
         Ok(Some(res))
     }
+
     async fn instance_by_id(&self, id: i32) -> EKResult<Option<Instance>> {
         let mut conn = POOL.get().await?;
         use schema::instance::dsl;

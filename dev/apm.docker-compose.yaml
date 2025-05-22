@@ -11,9 +11,7 @@ services:
       - --web.enable-lifecycle
     network_mode: host
   clickhouse:
-    build:
-      context: .
-      dockerfile: clickhouse.dockerfile
+    image: clickhouse:25.4
     environment:
       CLICKHOUSE_DB: dev
       CLICKHOUSE_USER: dev
@@ -34,3 +32,4 @@ services:
     network_mode: host
     volumes:
       - ../data/grafana:/var/lib/grafana
+

@@ -4,10 +4,10 @@ pub mod poller;
 pub mod registry;
 pub mod service;
 
-
-use crate::metrics;
+use crate::{metrics, proto::ek::control::v1::plan_service_server::PlanServiceServer};
 use ek_base::error::EKResult;
 use metrics::spawn_metrics_server;
+use service::control::PlanServiceImpl;
 
 use super::{
     controller::{self, poller::start_poll},
@@ -49,12 +49,14 @@ pub async fn controller_main() -> EKResult<()> {
         .parse()
         .unwrap();
         log::info!("computation server listening on {}", inter_addr);
+        let plan_srv = PlanServiceImpl::new();
         let err = tonic::transport::Server::builder()
             .add_service(
                 ComputationServiceServer::new(srv)
                     .max_decoding_message_size(1024 * 1024 * 1024)
                     .max_encoding_message_size(1024 * 1024 * 1024),
             )
+            .add_service(PlanServiceServer::new(plan_srv))
             .serve(inter_addr)
             .await;
         if let Err(e) = err {

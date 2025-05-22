@@ -1,4 +1,5 @@
 #![feature(pattern)]
+#![feature(random)]
 #![feature(test)]
 
 pub mod backend;

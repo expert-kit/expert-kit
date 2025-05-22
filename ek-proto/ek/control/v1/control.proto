@@ -1,28 +1,14 @@
 syntax = "proto3";
 package ek.control.v1;
-import "ek/object/v1/object.proto";
 
-message CreatePlanReq {
-  ek.object.v1.SchedulePlan plan = 2;
+message RebalanceReq {
 }
-message CreatePlanResp {
-  ek.object.v1.SchedulePlan plan = 2;
+message RebalanceResp {
 }
 
-message DeletePlanReq {
-  string plan_id = 1;
-}
-message DeletePlanResp {}
-
-message InspectPlanReq {}
-message InspectPlanResp {
-  repeated ek.object.v1.SchedulePlan plan = 1;
-}
 
 service PlanService {
-  rpc Create(CreatePlanReq) returns (CreatePlanResp);
-  rpc Delete(DeletePlanReq) returns (DeletePlanResp);
-  rpc Inspect(InspectPlanReq) returns (InspectPlanResp);
+  rpc Rebalance(RebalanceReq) returns (RebalanceResp);
 }
 
 message ResolveRequest {

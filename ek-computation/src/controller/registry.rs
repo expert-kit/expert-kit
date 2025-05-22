@@ -11,7 +11,7 @@ use crate::state::io::{StateReader, StateReaderImpl};
 #[async_trait::async_trait]
 pub trait ExpertRegistry {
     async fn select(&mut self, eid: String) -> EKResult<Channel>;
-
+    async fn reset(&mut self) -> EKResult<()>;
     async fn deregister(&mut self, host_id: &str);
 }
 
@@ -29,6 +29,9 @@ pub struct ExpertRegistryImpl {
 
 #[async_trait::async_trait]
 impl ExpertRegistry for ExpertRegistryImpl {
+    async fn reset(&mut self) -> EKResult<()> {
+        self.inner_reset().await
+    }
     async fn select(&mut self, eid: String) -> EKResult<Channel> {
         self.inner_select(eid).await
     }
@@ -38,6 +41,11 @@ impl ExpertRegistry for ExpertRegistryImpl {
 }
 
 impl ExpertRegistryImpl {
+    async fn inner_reset(&mut self) -> EKResult<()> {
+        self.channels.clear();
+        Ok(())
+    }
+
     async fn inner_select(&mut self, eid: String) -> EKResult<Channel> {
         let channels = self.channels.get(&eid);
         if let Some(channels) = channels {

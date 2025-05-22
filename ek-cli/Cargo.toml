@@ -26,3 +26,5 @@ indicatif = "0.17.11"
 safetensors = { workspace = true }
 prost = { workspace = true }
 ort = { workspace = true }
+
+tonic = {workspace = true}
