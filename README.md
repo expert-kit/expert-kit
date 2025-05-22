@@ -24,12 +24,12 @@ By decoupling expert modules and deploying them across distributed GPUs and CPUs
 
 Here are some tutorials to help you quickly start with Expert Kit.
 
-1. [DeepSeek-tiny](./doc/tutorial/deepseek-tiny.md): A tailored MoE model with DeepSeek-V3 architecture and small parameter count, designed for quick evaluation and testing of the Expert Kit framework.
-2. [Qwen3-30B-A3B](./doc//tutorial/qwen3-moe-a3b-demo.md): A demo for running the Qwen3-30B-A3B model with Expert Kit, showcasing the framework's capabilities in handling real-world MoE models.
+1. [DeepSeek-tiny](./doc/tutorial/standalone/deepseek-tiny.md): A tailored MoE model with DeepSeek-V3 architecture and small parameter count, designed for quick evaluation and testing of the Expert Kit framework.
+2. [Qwen3-30B-A3B](./doc/tutorial/standalone/qwen3-moe-a3b-demo.md): A demo for running the Qwen3-30B-A3B model with Expert Kit, showcasing the framework's capabilities in handling real-world MoE models.
 
 ## Key Features
 
-- **Low-Cost Deployment**: supports distributed and mixtured GPU and CPUs.
+- **Low-Cost Deployment**: supports distributed and mixed GPUs and CPUs.
 - **Fine-Grained Expert-Level Scalability**: provides independent scaling of attention and experts, with dynamic scaling of hot experts on demand
 
 ## Performance
