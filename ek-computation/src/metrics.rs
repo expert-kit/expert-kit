@@ -1,17 +1,14 @@
 use std::net::ToSocketAddrs;
 use std::thread;
 
+use actix_web::http::header::ContentType;
 use actix_web::{App, HttpRequest, HttpResponse, HttpServer, get, middleware, rt};
 use ek_base::error::{EKError, EKResult};
 use lazy_static::lazy_static;
 use prometheus::{
-    self, HistogramVec, IntCounterVec,
-    IntGaugeVec, TextEncoder, histogram_opts, labels,
+    self, HistogramVec, IntCounterVec, IntGaugeVec, TextEncoder, histogram_opts, labels,
 };
-use prometheus::{
-    register_histogram_vec,
-    register_int_counter_vec, register_int_gauge_vec,
-};
+use prometheus::{register_histogram_vec, register_int_counter_vec, register_int_gauge_vec};
 
 macro_rules! controller_const_opts {
     () => {
@@ -86,7 +83,9 @@ async fn export_metrics(_req: HttpRequest) -> HttpResponse {
         .map_err(|e| EKError::InvalidInput(e.to_string()))
         .unwrap();
 
-    HttpResponse::Ok().body(body)
+    HttpResponse::Ok()
+        .insert_header(ContentType(mime::TEXT_PLAIN))
+        .body(body)
 }
 
 async fn metrics_listen(addr: &str) -> EKResult<()> {

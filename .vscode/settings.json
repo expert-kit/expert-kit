@@ -56,6 +56,7 @@
         "ORT_LIB_LOCATION": "${workspaceFolder}/vendor/onnxruntime"
     },
     "cSpell.words": [
+        "clickhouse",
         "dtype",
         "ekproto",
         "expertkit",

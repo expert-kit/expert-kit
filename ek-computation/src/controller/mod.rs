@@ -20,7 +20,7 @@ use super::{
 pub async fn controller_main() -> EKResult<()> {
     let settings = ek_base::config::get_ek_settings();
 
-    spawn_metrics_server("0.0.0.0:9090");
+    spawn_metrics_server("0.0.0.0:9080");
 
     let state_srv = tokio::task::spawn(async {
         let srv = controller::service::state::StateServerImpl::new();

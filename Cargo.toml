@@ -61,6 +61,7 @@ rand_distr = "0.5.1"
 fastrace = "0.7"
 prometheus = "0.14.0"
 lazy_static = "1.5.0"
+mime = "0.3.17"
 
 
 
