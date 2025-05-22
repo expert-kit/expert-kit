@@ -48,7 +48,7 @@ impl StateReaderImpl {
     pub async fn active_nodes(&self) -> EKResult<Vec<Node>> {
         let mut conn = POOL.get().await?;
         use schema::node::dsl;
-        let th = std::time::SystemTime::now() - std::time::Duration::from_secs(60);
+        let th = std::time::SystemTime::now() - std::time::Duration::from_secs(20);
         let res = schema::node::table
             .filter(dsl::last_seen_at.gt(th))
             .select(models::Node::as_select())

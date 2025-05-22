@@ -90,6 +90,7 @@ impl StateWriter for StateWriterImpl {
             .await?;
         Ok(())
     }
+
     async fn del_expert(&mut self, id: i32) -> EKResult<()> {
         let mut conn = POOL.get().await?;
         use schema::expert::dsl;
@@ -139,6 +140,15 @@ impl StateWriter for StateWriterImpl {
 }
 
 impl StateWriterImpl {
+    pub async fn expert_del_by_instance(&self, instance: i32) -> EKResult<()> {
+        let mut conn = POOL.get().await?;
+        use schema::expert::dsl;
+        diesel::delete(schema::expert::table)
+            .filter(dsl::instance_id.eq(instance))
+            .execute(&mut conn)
+            .await?;
+        Ok(())
+    }
     pub async fn node_update_seen(&self, hostname: &str) -> EKResult<()> {
         let mut conn = POOL.get().await?;
         use schema::node::dsl;

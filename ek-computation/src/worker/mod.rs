@@ -21,7 +21,6 @@ use ek_base::{config::get_ek_settings, error::EKResult};
 
 pub async fn worker_main() -> EKResult<()> {
     let settings = get_ek_settings();
-
     spawn_metrics_server(&settings.worker.metrics);
 
     let token = CancellationToken::new();
@@ -43,6 +42,7 @@ pub async fn worker_main() -> EKResult<()> {
         let addr = format!("{}:{}", settings.listen, settings.ports.main)
             .parse()
             .unwrap();
+        log::info!("worker server listening on {}", addr);
         let err = tonic::transport::Server::builder()
             .add_service(
                 ComputationServiceServer::new(server)

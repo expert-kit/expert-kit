@@ -1,0 +1,31 @@
+inference:
+  hidden_dim: 16
+  intermediate_dim: 8
+  instance_name: local-test
+  model_name: ds-tiny
+
+db:
+  db_dsn: postgres://dev:dev@localhost:5432/dev
+  max_conn_size: 32
+
+weight:
+  server:
+    addr: http://localhost:6543
+  cache:
+    Fs:
+      path: /tmp/expert-kit/cache
+
+worker:
+  id: local-dev-2
+  listen: 0.0.0.0
+  broadcast: 127.0.0.1
+  metrics: 0.0.0.0:9092
+  ports:
+    main: 51235
+
+controller:
+  listen: 0.0.0.0
+  broadcast: localhost
+  ports:
+    intra: 5001
+    inter: 5002

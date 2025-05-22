@@ -99,6 +99,8 @@ async fn main() {
     if let Some(path) = cli.config {
         config_src.push(path.to_string());
     }
+    log::info!("config source: {:?}", config_src);
+
     get_ek_settings_base(
         &config_src
             .as_slice()

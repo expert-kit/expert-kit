@@ -6,10 +6,10 @@ use ek_base::{
     error::{EKError, EKResult},
 };
 use ek_computation::state::{
-    io::StateReaderImpl,
-    models::{NewExpert, NewInstance, NewNode},
-    writer::StateWriterImpl,
-};
+        io::StateReaderImpl,
+        models::{NewExpert, NewInstance, NewNode},
+        writer::StateWriterImpl,
+    };
 use ek_db::{safetensor::ExpertKey, weight_srv::client::WeightSrvClient};
 use indicatif::ProgressBar;
 use log::info;
@@ -22,12 +22,18 @@ pub enum ScheduleCommand {
         #[arg(long, short, help = "file that contains worker nodes information")]
         inventory: PathBuf,
     },
+    Rebalance,
 }
 
 pub async fn execute_schedule(cmd: ScheduleCommand) -> EKResult<()> {
     match cmd {
         ScheduleCommand::Static { inventory } => {
             execute_static_schedule(inventory).await?;
+            Ok(())
+        }
+
+        ScheduleCommand::Rebalance => {
+            execute_rebalance().await?;
             Ok(())
         }
     }
@@ -95,6 +101,7 @@ async fn execute_static_schedule(inventory: PathBuf) -> EKResult<()> {
 
     let writer = StateWriterImpl::new();
     let node_ids = upsert_nodes(inventory).await?;
+
     let instance_obj = writer
         .instance_upsert(NewInstance {
             model_id: model.id,
@@ -111,6 +118,83 @@ async fn execute_static_schedule(inventory: PathBuf) -> EKResult<()> {
     log::info!("total experts to schedule {}", experts.len());
 
     let pb = ProgressBar::new(experts.len() as u64);
+
+    writer.expert_del_by_instance(instance_obj.id).await?;
+
+    let mut js = JoinSet::new();
+    for e in experts {
+        let e = e.clone();
+        let node_ids = node_ids.clone();
+        let p = pb.clone();
+        js.spawn(async move {
+            let writer = StateWriterImpl::new();
+            let rand = random::<u16>();
+            writer
+                .expert_upsert(NewExpert {
+                    instance_id: instance_obj.id,
+                    node_id: node_ids[(rand % node_ids.len() as u16) as usize],
+                    expert_id: e.as_object_key(),
+                    replica: 1,
+                    state: serde_json::json!({}),
+                })
+                .await
+                .unwrap();
+            p.inc(1);
+        });
+    }
+    js.join_all().await;
+    pb.finish();
+    log::info!("all experts scheduled");
+
+    Ok(())
+}
+
+async fn execute_rebalance() -> EKResult<()> {
+    // implement the static scheduling logic here
+    let settings = get_ek_settings();
+    let model_name = settings.inference.model_name.clone();
+    let instance_name = settings.inference.instance_name.clone();
+    let ws_addr = settings.weight.server.as_ref().unwrap().addr.clone();
+    info!(
+        "Running static schedule for model: {}, instance: {}, weight server: {}",
+        model_name, instance_name, ws_addr
+    );
+    let cli = WeightSrvClient::new(ws_addr);
+    let vital = cli.load_meta_vital(&model_name).await?;
+    info!("model info : {:?}", &vital);
+
+    let reader = StateReaderImpl::new();
+    let model = reader
+        .model_by_name(&model_name)
+        .await?
+        .ok_or(EKError::NotFound("model not found".to_string()))?;
+
+    let writer = StateWriterImpl::new();
+    let node_ids = reader
+        .active_nodes()
+        .await?
+        .into_iter()
+        .map(|x| x.id)
+        .collect::<Vec<_>>();
+
+    let instance_obj = writer
+        .instance_upsert(NewInstance {
+            model_id: model.id,
+            name: instance_name,
+        })
+        .await?;
+
+    let mut experts = vec![];
+    for layer in vital.moe_layers.0..vital.moe_layers.1 {
+        for expert in 0..vital.routed_experts {
+            experts.push(ExpertKey::new(model_name.clone(), layer, expert));
+        }
+    }
+    log::info!("total experts to schedule {}", experts.len());
+
+    let pb = ProgressBar::new(experts.len() as u64);
+
+    writer.expert_del_by_instance(instance_obj.id).await?;
 
     let mut js = JoinSet::new();
     for e in experts {

@@ -156,8 +156,9 @@ impl StateClient {
 
     async fn remove_stale_experts(&mut self, incoming: &[Metadata], current: &[String]) {
         let mut lg = self.expert_db.write().await;
-        for e in incoming.iter().filter(|e| !current.contains(&e.id)) {
-            if let Err(e) = lg.remove(&e.id).await {
+        let incoming_ids: Vec<String> = incoming.iter().map(|e| e.id.clone()).collect();
+        for e in current.iter().filter(|e| !incoming_ids.contains(e)) {
+            if let Err(e) = lg.remove(e).await {
                 log::error!("remove expert error {:?}", e);
             }
         }
@@ -249,7 +250,6 @@ impl StateInspector {
         let si = StateInspector {
             edb: get_expert_db(),
         };
-
         tokio::task::spawn(async move { si.run().await })
     }
 }
