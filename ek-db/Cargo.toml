@@ -16,9 +16,9 @@ serde_json = { workspace = true }
 serde = { workspace = true }
 memmap2 = { workspace = true }
 moka = { version = "0.12.10", features = ["future"] }
-actix-web = { workspace = true }
 reqwest = { workspace = true }
-actix-http = "3.10.0"
+actix-web = { workspace = true }
+actix-http = { workspace = true }
 pretty_env_logger = { workspace = true }
 log = { workspace = true }
 dashmap = "6.1.0"

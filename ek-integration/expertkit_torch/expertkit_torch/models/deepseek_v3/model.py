@@ -8,6 +8,7 @@ from expertkit_torch.grpc_client import ExpertKitClient
 from transformers import modeling_utils as mu
 
 layer_idx = 3
+device = "mps"
 
 
 def intercept_missing():
@@ -187,7 +188,7 @@ def evaluate(model_path=str, ek_addr: str | None = None, model_name: str = "", b
         model_path,
         config=model_config,
         local_files_only=True,
-        device_map="cuda",
+        device_map=device,
     )
     inputs = tokenizer.apply_chat_template(
         chat, tokenize=True, add_generation_prompt=True, return_tensors="pt"
@@ -200,6 +201,7 @@ def evaluate(model_path=str, ek_addr: str | None = None, model_name: str = "", b
     model_inputs = tokenizer(
         batch_messages, return_tensors="pt", padding=True, truncation=True
     ).to(model.device)
+    print(f"123, {model_inputs}")
     generated_ids = model.generate(
         **model_inputs, max_new_tokens=1, pad_token_id=tokenizer.eos_token_id
     )

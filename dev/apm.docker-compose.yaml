@@ -1,0 +1,36 @@
+version: "3"
+services:
+  prometheus:
+    image: prom/prometheus:latest
+    volumes:
+      - ../data/prometheus/:/opt/prom/data
+      - ./prometheus/prometheus.yml:/opt/prom/data/conf/prometheus.yml
+    command:
+      - --config.file=/opt/prom/data/conf/prometheus.yml
+      - --web.listen-address=0.0.0.0:8080
+      - --web.enable-lifecycle
+    network_mode: host
+  clickhouse:
+    build:
+      context: .
+      dockerfile: clickhouse.dockerfile
+    environment:
+      CLICKHOUSE_DB: dev
+      CLICKHOUSE_USER: dev
+      CLICKHOUSE_PASSWORD: dev
+    network_mode: host
+    volumes:
+      - ../data/clickhouse:/var/lib/clickhouse/
+      - ./clickhouse/config.xml:/etc/clickhouse-server/config.d/config.xml
+  vector:
+    image: timberio/vector:0.47.0-debian
+    network_mode: host
+    environment:
+      VECTOR_LOG: debug
+    volumes:
+      - ./vector/vector.yml:/etc/vector/vector.yaml:ro
+  grafana:
+    image: grafana/grafana:latest
+    network_mode: host
+    volumes:
+      - ../data/grafana:/var/lib/grafana

@@ -1,0 +1,81 @@
+api:
+  enabled: true
+  address: 0.0.0.0:8686
+
+sources:
+  # https://vector.dev/docs/reference/configuration/sources/prometheus_scrape/
+  scrape_controller:
+    type: prometheus_scrape
+    endpoints:
+      - http://host.docker.internal:9080/metrics
+    scrape_interval_secs: 5
+  scrape_worker:
+    type: prometheus_scrape
+    endpoints:
+      - http://host.docker.internal:9091/metrics
+    scrape_interval_secs: 5
+transforms:
+  wo_expert_activation:
+    type: remap
+    inputs:
+      - scrape_worker
+    source: |-
+      if contains(string!(.name),"worker_expert_activation") {
+        abort
+      }
+  expert_activation:
+    type: filter
+    inputs:
+      - scrape_worker
+    condition: '.name == "worker_expert_activation"'
+
+  activation_log:
+    type: metric_to_log
+    inputs:
+      - expert_activation
+
+  trail_activation_log:
+    type: remap
+    inputs:
+      - activation_log
+    source: |-
+      row = {}
+      row.worker = .tags.worker
+      row.model= .tags.model
+      exp = parse_regex!(.tags.expert, r'.*l(?P<layer>\d+)-e(?P<idx>\d+)')
+      row.layer = exp.layer
+      row.idx = exp.idx
+      row.count = to_int!(.counter.value)
+      . = row
+
+sinks:
+  # https://vector.dev/docs/reference/configuration/sinks/clickhouse/
+  clickhouse:
+    type: clickhouse
+    auth:
+      strategy: basic
+      user: dev
+      password: dev
+    batch:
+      max_bytes: 10000000
+      timeout_secs: 5
+    inputs:
+      - trail_activation_log
+    endpoint: host.docker.internal:8123
+    table: expert_activate
+    database: dev
+  # https://vector.dev/docs/reference/configuration/sinks/prometheus_exporter/
+  prometheus_exp:
+    inputs:
+      # - scrape_controller
+      - wo_expert_activation
+    type: prometheus_exporter
+    address: 0.0.0.0:32122
+  console:
+    type: console
+    encoding:
+      codec: "json"
+      json:
+        pretty: false
+    inputs:
+      - trail_activation_log

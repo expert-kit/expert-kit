@@ -21,3 +21,5 @@ reqwest = { workspace = true }
 serde_derive = { workspace = true }
 serde = { workspace = true }
 ort = { workspace = true }
+
+gethostname = "1.0.1"

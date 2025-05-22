@@ -4,6 +4,7 @@
 pub mod backend;
 pub mod controller;
 pub mod ffn;
+pub mod metrics;
 pub mod onnx;
 pub mod proto;
 mod schema;

@@ -13,7 +13,7 @@ pub struct ModelConfig {
     map: std::collections::HashMap<String, serde_json::Value>,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Debug)]
 pub struct VitalMeta {
     pub moe_layers: (usize, usize),
     pub routed_experts: usize,
