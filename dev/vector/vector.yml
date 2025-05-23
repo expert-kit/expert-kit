@@ -3,6 +3,13 @@ api:
   address: 0.0.0.0:8686
 
 sources:
+  # https://vector.dev/docs/reference/configuration/sources/file/
+  scrape_worker_log:
+    type: file
+    line_delimiter: "\n"
+    include:
+      - /log/*.log
+    data_dir: /data/
   # https://vector.dev/docs/reference/configuration/sources/prometheus_scrape/
   scrape_controller:
     type: prometheus_scrape
@@ -25,6 +32,29 @@ transforms:
       if contains(string!(.name),"worker_expert_activation") {
         abort
       }
+  filter_expert_detail_activation:
+    type: filter
+    inputs:
+      - scrape_worker_log
+    condition: 'contains(string!(.message),"expert activation")'
+
+  activation_detail_log:
+    type: remap
+    inputs:
+      - filter_expert_detail_activation
+    source: |-
+      l = parse_regex!(.message, r'.*worker_id=(?P<worker>.*) model_name=(?P<model>.*) expert=(?P<expert>.*) count=(?P<count>.*)')
+      exp = parse_regex!(l.expert, r'.*l(?P<layer>\d+)-e(?P<idx>\d+)')
+
+      row = {}
+      row.worker = l.worker
+      row.model = l.model
+      row.layer = exp.layer
+      row.idx = exp.idx
+      row.count = l.count
+      . = row
+      row
+
   expert_activation:
     type: filter
     inputs:
@@ -66,6 +96,21 @@ sinks:
     endpoint: host.docker.internal:8123
     table: expert_activate
     database: dev
+
+  clickhouse_detail:
+    type: clickhouse
+    auth:
+      strategy: basic
+      user: dev
+      password: dev
+    batch:
+      max_bytes: 10000000
+      timeout_secs: 5
+    inputs:
+      - activation_detail_log
+    endpoint: host.docker.internal:8123
+    table: expert_activate_detail
+    database: dev
   # https://vector.dev/docs/reference/configuration/sinks/prometheus_exporter/
   prometheus_exp:
     inputs:
@@ -73,11 +118,11 @@ sinks:
       - wo_expert_activation
     type: prometheus_exporter
     address: 0.0.0.0:32122
-  console:
-    type: console
-    encoding:
-      codec: "json"
-      json:
-        pretty: false
-    inputs:
-      - trail_activation_log
+  # console:
+  #   type: console
+  #   encoding:
+  #     codec: "json"
+  #     json:
+  #       pretty: true
+  #   inputs:
+  #     - activation_detail_log

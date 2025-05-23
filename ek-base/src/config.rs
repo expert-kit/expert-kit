@@ -1,4 +1,8 @@
-use std::{net::SocketAddr, path::Path, sync::LazyLock};
+use std::{
+    net::SocketAddr,
+    path::{Path, PathBuf},
+    sync::LazyLock,
+};
 
 use config::{Config, Environment};
 use once_cell::sync::OnceCell;
@@ -109,6 +113,23 @@ pub struct FSConfig {
 pub enum OpenDALStorage {
     Fs(FSConfig),
     S3(S3Config),
+}
+
+#[derive(Debug, Deserialize, Clone)]
+#[allow(unused)]
+pub struct LogSettings {
+    #[serde(default = "default_log_enable")]
+    pub enable: bool,
+    #[serde(default = "default_log_root")]
+    pub root: String,
+}
+fn default_log_enable() -> bool {
+    false
+}
+
+fn default_log_root() -> String {
+    let path = "/var/log/expert-kit".to_string();
+    path
 }
 
 #[derive(Debug, Deserialize, Clone)]

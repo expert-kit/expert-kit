@@ -44,6 +44,14 @@ impl ComputationService for BasicExpertImpl {
             ])
             .inc_by(request.get_ref().sequences.len() as u64);
 
+        log::info!(
+            "expert activation: worker_id={} model_name={} expert={} count={}",
+            settings.worker.id,
+            settings.inference.model_name,
+            request.get_ref().sequences[0].experts[0],
+            request.get_ref().sequences.len()
+        );
+
         Defers::defer(Box::new(move || {
             let elapsed = start_cloned.elapsed();
             METRIC_WORKER_FORWARD

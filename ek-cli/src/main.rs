@@ -1,5 +1,5 @@
 #![feature(random)]
-use std::{mem::transmute, path::PathBuf};
+use std::{fmt::format, fs::File, mem::transmute, path::PathBuf};
 mod db;
 mod doctor;
 mod model;
@@ -9,7 +9,7 @@ mod schedule;
 mod onnx;
 use db::execute_db;
 use doctor::doctor_main;
-use ek_base::config::get_ek_settings_base;
+use ek_base::config::{get_ek_settings, get_ek_settings_base};
 use ek_computation::{controller::controller_main, worker::worker_main};
 use ek_db::weight_srv;
 
@@ -83,15 +83,19 @@ struct RootCli {
     command: Command,
 }
 
+fn init_log() {
+    let mut builder =
+        env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"));
+    builder.target(env_logger::Target::Stderr).init();
+}
+
 #[tokio::main(flavor = "multi_thread", worker_threads = 48)]
 async fn main() {
     let cli = RootCli::parse();
     if cli.debug {
         unsafe { std::env::set_var("RUST_LOG", "debug") };
     }
-    env_logger::init_from_env(env_logger::Env::default().default_filter_or("info"));
     let mut config_src = vec![];
-
     if let Ok(path) = std::env::var("EK_CONFIG") {
         config_src.push(path);
     }
@@ -99,8 +103,6 @@ async fn main() {
     if let Some(path) = cli.config {
         config_src.push(path.to_string());
     }
-    log::info!("config source: {:?}", config_src);
-
     get_ek_settings_base(
         &config_src
             .as_slice()
@@ -108,6 +110,8 @@ async fn main() {
             .map(|x| x.as_str())
             .collect::<Vec<_>>(),
     );
+    init_log();
+    log::info!("config source: {:?}", config_src);
     let res = match cli.command {
         Command::Onnx { command } => onnx::execute_onnx(command).await,
         Command::Pretrain { command } => execute_pretrain(command).await,
