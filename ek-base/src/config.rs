@@ -1,8 +1,4 @@
-use std::{
-    net::SocketAddr,
-    path::{Path, PathBuf},
-    sync::LazyLock,
-};
+use std::{net::SocketAddr, path::Path, sync::LazyLock};
 
 use config::{Config, Environment};
 use once_cell::sync::OnceCell;

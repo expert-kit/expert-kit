@@ -8,6 +8,10 @@ use tokio::sync::{
     mpsc::{Receiver, Sender},
 };
 
+use super::backend::Device;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+static INSTANCE_COUNTER: AtomicUsize = AtomicUsize::new(0);
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, ValueEnum, Debug)]
 pub enum ExpertBackendType {
     Torch,
@@ -29,15 +33,26 @@ pub struct EKInstance {
     pub hidden: usize,
     pub intermediate: usize,
     pub backend: ExpertBackendType,
+    pub device: Device,
 }
 
 impl Default for EKInstance {
     fn default() -> Self {
         let settings = get_ek_settings();
+        let count = INSTANCE_COUNTER.fetch_add(1, Ordering::SeqCst);
+        let device = if count < 2048 {
+            Device::CUDA(1)
+        } else if count < 4096 {
+            Device::CUDA(2)
+        } else {
+            Device::CUDA(3)
+        };
+        // let device = Device::CPU;
         Self {
             hidden: settings.inference.hidden_dim,
             intermediate: settings.inference.intermediate_dim,
             backend: ExpertBackendType::Torch,
+            device: device,
         }
     }
 }
@@ -56,4 +71,20 @@ pub fn get_graceful_shutdown_ch() -> GracefulChannelPair {
         (tx, Arc::new(Mutex::new(rx)))
     });
     (res.0.clone(), res.1.clone())
+}
+
+#[cfg(test)]
+mod test {
+    use tch::Cuda;
+    #[test]
+    fn test_env() {
+        println!("CUDA Device Count: {}", Cuda::device_count());
+        println!("CUDA available: {}", Cuda::is_available());
+    }
+
+    #[test]
+    fn test_force_cuda() {
+        let _ = tch::Tensor::zeros(&[1, 2], (tch::Kind::Float, tch::Device::Cuda(0)));
+        println!("Tensor on CUDA successfully created.");
+    }
 }

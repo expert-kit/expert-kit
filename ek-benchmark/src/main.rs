@@ -82,6 +82,7 @@ fn main() {
         hidden: m.hidden_dim,
         intermediate: m.intermediate_dim,
         backend: m.backend,
+        device: Device::CPU,
     };
 
     info!("Creating {} expert models...", expert_count);

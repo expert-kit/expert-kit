@@ -2,6 +2,10 @@ use std::sync::{Arc, Mutex};
 
 use crate::backend::{DType, Device, EkTensor, torch::TchTensor};
 
+use super::{
+    ExpertWeight,
+    meta::{Expert, ExpertShape},
+};
 use ek_base::error::EKResult;
 use once_cell::sync::OnceCell;
 use tch::{
@@ -9,16 +13,12 @@ use tch::{
     nn::{self, Module},
 };
 
-use super::{
-    ExpertWeight,
-    meta::{Expert, ExpertShape},
-};
-
 pub struct TorchFFN {
     dim: usize,
     intermediate_dim: usize,
     module: OnceCell<Arc<Mutex<nn::Sequential>>>,
     weight: ExpertWeight<TchTensor>,
+    device: Device,
 }
 
 pub fn w8a16_activate(x: &tch::Tensor, s: &tch::Tensor, block_size: i64) -> tch::Tensor {
@@ -63,20 +63,22 @@ impl TorchFFN {
                     .up_w
                     .inner()
                     .shallow_clone()
-                    .to_kind(tch::Kind::BFloat16);
+                    .to_kind(tch::Kind::BFloat16)
+                    .to_device(self.device.into());
                 let w2_tensor = self
                     .weight
                     .down_w
                     .inner()
                     .shallow_clone()
-                    .to_kind(tch::Kind::BFloat16);
+                    .to_kind(tch::Kind::BFloat16)
+                    .to_device(self.device.into());
                 let w3_tensor = self
                     .weight
                     .gate_w
                     .inner()
                     .shallow_clone()
-                    .to_kind(tch::Kind::BFloat16);
-
+                    .to_kind(tch::Kind::BFloat16)
+                    .to_device(self.device.into());
                 let module = nn::seq().add_fn(move |x| {
                     let _up = x.matmul(&w1_tensor.transpose(0, 1));
                     let _gate = x.matmul(&w3_tensor.transpose(0, 1));
@@ -88,6 +90,10 @@ impl TorchFFN {
             })
         });
         m.clone()
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 }
 
@@ -121,6 +127,7 @@ impl Expert<TchTensor> for TorchFFN {
             dim: x.hidden,
             module: cell,
             weight,
+            device: x.device,
         };
         // res.load_module();
 
@@ -139,7 +146,7 @@ mod test {
     extern crate test;
 
     use crate::{
-        backend::EkTensor,
+        backend::{Device, EkTensor},
         ffn::{Expert, ExpertWeight, expert_torch::TorchFFN},
         x::{self, test_root},
     };
@@ -164,11 +171,12 @@ mod test {
             .join("qwen3-l0e1.weight.safetensors");
         let st_bytes = fs::read(st_fp).unwrap();
         let st = SafeTensors::deserialize(&st_bytes).unwrap();
-        let weight = ExpertWeight::from_safetensor(&st).unwrap();
+        let weight = ExpertWeight::from_safetensor(&st, Device::CPU).unwrap();
         let inst = x::EKInstance {
             hidden: 2048,
             intermediate: 768,
             backend: x::ExpertBackendType::Torch,
+            device: Device::CPU,
         };
         let ffn = TorchFFN::construct(inst, weight).unwrap();
 

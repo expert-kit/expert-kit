@@ -5,7 +5,7 @@ use ort::{tensor::PrimitiveTensorElementType, value::Value};
 use rand_distr::num_traits;
 use safetensors::tensor::TensorView;
 
-use super::{EkTensor, FromSafeTensor};
+use super::{Device, EkTensor, FromSafeTensor};
 
 pub trait OrtDType:
     PrimitiveTensorElementType + num_traits::Num + Clone + Debug + Copy + 'static
@@ -49,7 +49,11 @@ impl<D> FromSafeTensor for NDArrayTensor<D>
 where
     D: OrtDType,
 {
-    fn lookup_suffix(_st: &safetensors::SafeTensors, _name: &[&str]) -> Option<Self> {
+    fn lookup_suffix(
+        _st: &safetensors::SafeTensors,
+        _name: &[&str],
+        _device: Device,
+    ) -> Option<Self> {
         todo!()
     }
 }
@@ -98,6 +102,14 @@ where
     fn from_tensor_view(tv: &TensorView<'_>) -> Self {
         let raw = tv.data();
         Self::from_raw(raw, tv.shape(), tv.dtype().into())
+    }
+
+    fn device(&self) -> super::Device {
+        todo!()
+    }
+
+    fn to_device(&self, _dev: super::Device) -> Self {
+        todo!()
     }
 }
 
