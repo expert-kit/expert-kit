@@ -30,9 +30,19 @@ pub enum DType {
     Float8e4m3fnuz,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub enum Device {
     CPU,
+    CUDA(usize),
+}
+
+impl std::fmt::Display for Device {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Device::CPU => write!(f, "CPU"),
+            Device::CUDA(idx) => write!(f, "CUDA({})", idx),
+        }
+    }
 }
 impl From<tch::Kind> for DType {
     fn from(k: tch::Kind) -> Self {
@@ -65,16 +75,18 @@ pub trait EkTensor: Sized {
     fn rand(shape: Vec<usize>, dtype: DType, dev: Device) -> Self;
     fn stack(tensors: &[Self], dim: usize) -> Self;
     fn shape(&self) -> Vec<usize>;
+    fn device(&self) -> Device;
     fn serialize(&self) -> Vec<u8>;
-    fn from_raw(data: &[u8], shape: &[usize], dtype: DType) -> Self;
+    fn from_raw(data: &[u8], shape: &[usize], dtype: DType, device: Device) -> Self;
     fn from_tensor_view(tv: &TensorView<'_>) -> Self;
+    fn to_device(&self, dev: Device) -> Self;
 }
 
 pub trait FromSafeTensor
 where
     Self: Sized + EkTensor,
 {
-    fn lookup_suffix(st: &safetensors::SafeTensors, name: &[&str]) -> Option<Self> {
+    fn lookup_suffix(st: &safetensors::SafeTensors, name: &[&str], dev: Device) -> Option<Self> {
         let idx = st
             .names()
             .iter()
@@ -84,7 +96,7 @@ where
             let (_name, view) = tensors.get(x).unwrap();
             let size: Vec<usize> = view.shape().to_vec();
             let kind: DType = DType::from(dtype_to_tch_kind(view.dtype()).unwrap());
-            Some(Self::from_raw(view.data(), &size, kind))
+            Some(Self::from_raw(view.data(), &size, kind, dev))
         } else {
             None
         }
@@ -113,21 +125,24 @@ where
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "ExpertWeight(up_w: {:?}, down_w: {:?}, gate_w: {:?})",
+            "ExpertWeight(up_w: {:?} {:?}, down_w: {:?} {:?}, gate_w: {:?} {:?})",
             self.up_w.shape(),
+            self.up_w.device(),
             self.down_w.shape(),
-            self.gate_w.shape()
+            self.up_w.device(),
+            self.gate_w.shape(),
+            self.up_w.device()
         )
     }
 }
 
 impl<T: EkTensor + FromSafeTensor> ExpertWeight<T> {
-    pub fn from_safetensor(st: &safetensors::SafeTensors) -> EKResult<Self> {
-        let up_w = T::lookup_suffix(st, &["w1.weight", "up_proj.weight"])
+    pub fn from_safetensor(st: &safetensors::SafeTensors, dev: Device) -> EKResult<Self> {
+        let up_w = T::lookup_suffix(st, &["w1.weight", "up_proj.weight"], dev)
             .ok_or(EKError::ExpertWeightNotFound("w1/up_w".to_owned()))?;
-        let down_w = T::lookup_suffix(st, &["w2.weight", "down_proj.weight"])
+        let down_w = T::lookup_suffix(st, &["w2.weight", "down_proj.weight"], dev)
             .ok_or(EKError::ExpertWeightNotFound("w2/down_w".to_owned()))?;
-        let gate_w = T::lookup_suffix(st, &["w3.weight", "gate_proj.weight"])
+        let gate_w = T::lookup_suffix(st, &["w3.weight", "gate_proj.weight"], dev)
             .ok_or(EKError::ExpertWeightNotFound("w3/gate_w".to_owned()))?;
         Ok(Self {
             up_w,
@@ -180,7 +195,7 @@ impl ExpertBackend {
     ) -> EKResult<ExpertBackend> {
         let backend = match instance.backend {
             x::ExpertBackendType::Torch => {
-                let weight = ExpertWeight::<TchTensor>::from_safetensor(tensor)?;
+                let weight = ExpertWeight::<TchTensor>::from_safetensor(tensor, instance.device)?;
                 ExpertBackend::Torch(TorchFFN::construct(instance, weight)?)
             }
             x::ExpertBackendType::Onnx => todo!(),
@@ -195,9 +210,14 @@ impl ExpertBackend {
             ExpertBackend::Torch(exp) => {
                 let inp = TchTensor::from_tensor_view(view);
                 let shape = inp.inner().size();
-                log::debug!("input shape {:?}", shape);
                 assert!(shape.len() == 2);
-                Ok(exp.forward(&inp))
+                let inp_ = inp.to_device(exp.device());
+                log::debug!(
+                    "input shape {:?} device {}",
+                    inp_.inner().size(),
+                    inp_.device()
+                );
+                Ok(exp.forward(&inp_))
             }
             ExpertBackend::Onnx(_exp) => {
                 todo!()

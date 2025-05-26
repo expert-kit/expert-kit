@@ -17,7 +17,7 @@ use ort::{
 };
 use safetensors::tensor::TensorView;
 
-use super::{EkTensor, Expert, ExpertShape};
+use super::{Device, EkTensor, Expert, ExpertShape};
 
 pub struct OnnxFFN {
     dim: usize,
@@ -82,11 +82,23 @@ where
         self.0.shape().to_vec()
     }
 
+    fn device(&self) -> Device {
+        todo!()
+    }
+
+    fn to_device(&self, _dev: Device) -> Self {
+        todo!()
+    }
     fn serialize(&self) -> Vec<u8> {
         todo!()
     }
 
-    fn from_raw(data: &[u8], shape: &[usize], _dtype: super::DType) -> Self {
+    fn from_raw(
+        data: &[u8],
+        shape: &[usize],
+        _dtype: super::DType,
+        _device: super::Device,
+    ) -> Self {
         let raw = data;
         unsafe {
             let (_, d_slice, _) = raw.align_to::<D>();
@@ -103,7 +115,7 @@ where
 
     fn from_tensor_view(tv: &TensorView<'_>) -> Self {
         let raw = tv.data();
-        Self::from_raw(raw, tv.shape(), tv.dtype().into())
+        Self::from_raw(raw, tv.shape(), tv.dtype().into(), Device::CPU)
     }
 }
 

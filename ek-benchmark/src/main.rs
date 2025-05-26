@@ -9,6 +9,7 @@ use std::{
 
 use bench::{BenchmarkExpert, BenchmarkerImpl};
 use clap::{Parser, ValueEnum};
+use ek_computation::ffn::Device;
 use ek_computation::{ffn::ExpertBackend, x};
 use ek_computation::{ffn::expert_torch::TorchFFN, x::ExpertBackendType};
 use polars::prelude::{IntoLazy, ParquetWriter, col};
@@ -63,6 +64,7 @@ fn main() {
         dim: m.dim,
         hidden: m.hidden,
         backend: m.backend,
+        device: Device::CPU,
     };
     for i in 0..expert_count {
         match m.backend {

@@ -50,6 +50,7 @@ impl From<Device> for tch::Device {
     fn from(val: Device) -> Self {
         match val {
             Device::CPU => tch::Device::Cpu,
+            Device::CUDA(i) => tch::Device::Cuda(i as usize),
         }
     }
 }
@@ -109,20 +110,33 @@ impl EkTensor for TchTensor {
         self.0.size().iter().map(|&x| x as usize).collect()
     }
 
+    fn device(&self) -> Device {
+        match self.inner().device() {
+            tch::Device::Cpu => Device::CPU,
+            tch::Device::Cuda(idx) => Device::CUDA(idx),
+            d => unimplemented!("Unsupported device {:?}", d),
+        }
+    }
+
+    fn to_device(&self, dev: Device) -> Self {
+        let t: tch::Tensor = self.inner().to(dev.into());
+        TchTensor(t)
+    }
+
     fn serialize(&self) -> Vec<u8> {
         write_safetensors(&[("data", &self.0)]).unwrap()
     }
 
-    fn from_raw(data: &[u8], shape: &[usize], dtype: DType) -> Self {
+    fn from_raw(data: &[u8], shape: &[usize], dtype: DType, dev: Device) -> Self {
         unsafe {
-            Tensor::from_blob(
+            let t = Tensor::from_blob(
                 data.as_ptr(),
                 &shape.iter().map(|x| *x as i64).collect::<Vec<i64>>(),
                 &[],
                 dtype.into(),
                 tch::Device::Cpu,
-            )
-            .into()
+            );
+            TchTensor(t.to_device(dev.into()))
         }
     }
 
@@ -153,6 +167,7 @@ pub struct TorchFFN {
     intermediate_dim: usize,
     module: OnceCell<Arc<Mutex<nn::Sequential>>>,
     weight: ExpertWeight<TchTensor>,
+    device: Device,
 }
 
 pub fn w8a16_activate(x: &tch::Tensor, s: &tch::Tensor, block_size: i64) -> tch::Tensor {
@@ -190,17 +205,40 @@ unsafe impl Sync for TorchFFN {}
 
 impl TorchFFN {
     pub fn new(inst: x::EKInstance) -> Self {
-        let weight = ExpertWeight::rand(inst.dim, inst.hidden, DType::Float, Device::CPU);
+        let weight = ExpertWeight::rand(inst.dim, inst.hidden, DType::Float, inst.device);
         Self::construct(inst, weight).unwrap()
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 
     pub fn load_module(&self) -> Arc<Mutex<nn::Sequential>> {
         let m = self.module.get_or_init(|| {
             tch::no_grad(|| {
-                let w1_tensor = self.weight.up_w.0.shallow_clone().to_kind(tch::Kind::BFloat16);
-                let w2_tensor = self.weight.down_w.0.shallow_clone().to_kind(tch::Kind::BFloat16);
-                let w3_tensor = self.weight.gate_w.0.shallow_clone().to_kind(tch::Kind::BFloat16);
-            
+                let device = self.device.into();
+                let w1_tensor = self
+                    .weight
+                    .up_w
+                    .0
+                    .shallow_clone()
+                    .to_kind(tch::Kind::BFloat16)
+                    .to_device(device);
+                let w2_tensor = self
+                    .weight
+                    .down_w
+                    .0
+                    .shallow_clone()
+                    .to_kind(tch::Kind::BFloat16)
+                    .to_device(device);
+                let w3_tensor = self
+                    .weight
+                    .gate_w
+                    .0
+                    .shallow_clone()
+                    .to_kind(tch::Kind::BFloat16)
+                    .to_device(device);
+
                 let module = nn::seq().add_fn(move |x| {
                     let _up = x.matmul(&w1_tensor.transpose(0, 1));
                     let _gate = x.matmul(&w3_tensor.transpose(0, 1));
@@ -227,7 +265,7 @@ impl Expert<TchTensor> for TorchFFN {
     }
 
     fn rand_input(&self, batch: usize) -> TchTensor {
-        TchTensor::rand(vec![batch, self.dim], DType::Float, Device::CPU)
+        TchTensor::rand(vec![batch, self.dim], DType::Float, self.device)
     }
     fn shape(&self) -> ExpertShape {
         ExpertShape {
@@ -247,6 +285,7 @@ impl Expert<TchTensor> for TorchFFN {
             dim: x.dim,
             module: cell,
             weight,
+            device: x.device,
         };
         // res.load_module();
 
@@ -265,7 +304,7 @@ mod test {
     extern crate test;
 
     use crate::{
-        ffn::{EkTensor, Expert, ExpertWeight, expert_torch::TorchFFN},
+        ffn::{self, EkTensor, Expert, ExpertWeight, expert_torch::TorchFFN},
         x::{self, test_root},
     };
 
@@ -287,13 +326,17 @@ mod test {
         let st_fp = test_root()
             .join("resources")
             .join("qwen3-l0e1.weight.safetensors");
+        println!("Loading weight from {:?}", st_fp);
         let st_bytes = fs::read(st_fp).unwrap();
         let st = SafeTensors::deserialize(&st_bytes).unwrap();
-        let weight = ExpertWeight::from_safetensor(&st).unwrap();
+        let dev = ffn::Device::CUDA(1);
+        let weight = ExpertWeight::from_safetensor(&st, dev).unwrap();
         let inst = x::EKInstance {
             dim: 2048,
             hidden: 768,
             backend: x::ExpertBackendType::Torch,
+            // device: ffn::Device::CPU,
+            device: dev,
         };
         let ffn = TorchFFN::construct(inst, weight).unwrap();
 
@@ -305,10 +348,11 @@ mod test {
 
         let tv = gt_st.tensor("1-input").unwrap();
         let inp = TchTensor::from_tensor_view(&tv);
-
-        let res = ffn.forward(&inp).inner();
+        let inp_ = inp.to_device(dev);
+        let res = ffn.forward(&inp_).inner();
         let truth = TchTensor::from_tensor_view(&gt_st.tensor("1-output").unwrap()).inner();
-
+        // let res = res.to_device(tch::Device::Cpu);
+        let truth = truth.to_device(tch::Device::Cuda(1));
         let _vec1 = Vec::<f32>::try_from(res.i((0, 0..100))).unwrap();
         let _vec2 = Vec::<f32>::try_from(truth.i((0, 0..100))).unwrap();
         (res - truth).sum(tch::Kind::BFloat16).print();

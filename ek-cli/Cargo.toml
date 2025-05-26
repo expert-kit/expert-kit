@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-
+tch = "0.20.0"
 clap = { workspace = true }
 ek_db = { path = "../ek-db" }
 ek_computation = { path = "../ek-computation" }
