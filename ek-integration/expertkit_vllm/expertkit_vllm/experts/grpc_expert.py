@@ -1,14 +1,17 @@
 import torch
 import logging
 from torch import nn
+from torch.nn import Parameter
 from typing import Optional, List, Callable
-from transformers import PretrainedConfig
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from expertkit_vllm.grpc_client import ExpertKitClient
+from expertkit_vllm.utils.config import collect_ek_client_cfg
+from vllm.model_executor.layers.fused_moe import FusedMoE
+from vllm.model_executor.models.utils import PPMissingLayer
 
 logger = logging.getLogger(__name__)
 
-class GrpcExpert(nn.Module):
+class GrpcExpert(PPMissingLayer):
     """GrpcExpert Expert layer that handles remote expert computation.
     
     This layer handles the remote expert computation via gRPC and is designed
@@ -27,9 +30,6 @@ class GrpcExpert(nn.Module):
         prefix: str = "",
         *args,
 
-        expertkit_addr: Optional[str] = None,
-        expertkit_timeout_sec: float = 2.0,
-        debug_mode: bool = False,
         params_dtype: Optional[torch.dtype] = None,
         reduce_results: bool = False,
         renormalize: bool = True,
@@ -73,13 +73,28 @@ class GrpcExpert(nn.Module):
             debug_mode: Whether to enable debug logging
         """
         super().__init__()
-        
+        # collect ek config
+        ek_cfg = collect_ek_client_cfg()
+
         # Store necessary parameters
         self.num_experts = num_experts
         self.top_k = top_k
         self.hidden_size = hidden_size
+        self.intermediate_size = intermediate_size
         self.prefix = prefix
-        self.debug_mode = debug_mode
+        self.ek_model_name = ek_cfg.ek_model_name
+        self.debug_mode = ek_cfg.ek_debug_mode
+
+        # essential params for expert_select
+        self.renormalize=renormalize
+        self.topk_group=topk_group
+        self.num_expert_group=num_expert_group
+        self.custom_routing_function = custom_routing_function
+        self.scoring_func = scoring_func
+        self.e_score_correction_bias = e_score_correction_bias
+
+        if self.debug_mode:
+            print(f"🚀 GrpcExpert initialized with prefix: {prefix}, num_experts: {num_experts}, top_k: {top_k}, hidden_size: {hidden_size}")
         
         # Extract layer ID from prefix for gRPC call
         try:
@@ -89,14 +104,33 @@ class GrpcExpert(nn.Module):
         except (IndexError, ValueError):
             self.layer_idx = 0
             logger.warning(f"Could not extract layer index from prefix '{prefix}', using default 0")
-        
-        # Initialize gRPC client if not already initialized
-        if expertkit_addr is None:
-            raise RuntimeError("Missing expertkit_addr in config")
             
         if GrpcExpert.client is None:
-            logger.info(f"🚀 GrpcExpert {prefix} creating new gRPC client, with addr: {expertkit_addr}")
-            GrpcExpert.client = ExpertKitClient(expertkit_addr, expertkit_timeout_sec)
+            logger.info(f"🚀 GrpcExpert {prefix} creating new gRPC client, with addr: {ek_cfg.ek_addr}")
+            GrpcExpert.client = ExpertKitClient(ek_cfg.ek_addr, ek_cfg.ek_client_timeout)
+
+        # self._create_mock_parameters()
+
+    def _create_mock_parameters(self):
+        """create mock parameters for the expert layer."""
+
+        with torch.device('meta'):
+            # Create parameters on meta device (does not occupy actual memory)
+            self.w13_weight = Parameter(torch.empty(
+                    self.num_experts, 
+                    2 * self.intermediate_size, 
+                    self.hidden_size
+                ),
+                requires_grad=False
+            )
+            self.w2_weight = Parameter(torch.empty(
+                    self.num_experts, 
+                    self.hidden_size, 
+                    self.intermediate_size,
+                ),
+                requires_grad=False
+            )
+
     
     def forward(self, hidden_states: torch.Tensor, router_logits: torch.Tensor) -> torch.Tensor:
         """Forward pass using remote expert computation.
@@ -117,6 +151,21 @@ class GrpcExpert(nn.Module):
             logger.debug(f"🚀 Router logits shape: {router_logits.shape}")
             
         # Get top-k experts for each token based on router_logits
+        
+        # TODO: use vllm original select_experts
+        # routing_weights, routing_indices = self.select_experts(
+        #     hidden_states=hidden_states,
+        #     router_logits=router_logits,
+        #     use_grouped_topk=False,
+        #     top_k=self.top_k,
+        #     renormalize=self.renormalize,
+        #     topk_group=self.topk_group,
+        #     num_expert_group=self.num_expert_group,
+        #     custom_routing_function=self.custom_routing_function,
+        #     scoring_func=self.scoring_func,
+        #     e_score_correction_bias=self.e_score_correction_bias
+        # )
+
         routing_weights, routing_indices = torch.topk(
             router_logits, self.top_k, dim=-1)
             
@@ -142,7 +191,7 @@ class GrpcExpert(nn.Module):
                 token_expert_indices = routing_indices[seq_idx].tolist()
                 # Convert indices to string IDs
                 token_expert_ids = [
-                    f"{self.layer_idx}_{expert_idx}" for expert_idx in token_expert_indices]
+                    f"{self.ek_model_name}/l{self.layer_idx}-e{expert_idx}" for expert_idx in token_expert_indices]
                 expert_ids.append(token_expert_ids)
             
             # Call remote expert service with all tokens
@@ -177,7 +226,7 @@ class GrpcExpert(nn.Module):
                 # Get expert assignments for this representative token
                 token_expert_indices = routing_indices[rep_idx].tolist()
                 token_expert_ids = [
-                    f"{self.layer_idx}_{expert_idx}" for expert_idx in token_expert_indices]
+                    f"{self.ek_model_name}/l{self.layer_idx}-e{expert_idx}" for expert_idx in token_expert_indices]
                 unique_expert_ids.append(token_expert_ids)
             
             # Call remote expert service with just the unique tokens
@@ -203,8 +252,27 @@ class GrpcExpert(nn.Module):
 
         # Compute weighted sum across expert dimension: [num_tokens, hidden_dim]
         if self.debug_mode:
-            print(f"🚀 {expanded_weights.device}, {expert_outputs.device}, {hidden_states.device} ")
-            print(f"🚀 {expanded_weights.dtype}, {expert_outputs.dtype}, {hidden_states.dtype} ")
+            print(f"🚀 {expanded_weights.device:}, {expert_outputs.device}, {hidden_states.device} ")
+            print(f"🚀 {expanded_weights.dtype:}, {expert_outputs.dtype}, {hidden_states.dtype} ")
         output = torch.sum(expanded_weights * expert_outputs, dim=1)
 
         return output.view(batch_size, hidden_dim)
+    
+    @staticmethod
+    def select_experts(
+        *args,
+        **kwargs
+    ):
+        return FusedMoE.select_experts(
+            *args,
+            **kwargs
+        )
+    
+    @classmethod
+    def make_expert_params_mapping(
+        cls,
+        *args,
+        **kwargs
+    ):
+        return []
+    

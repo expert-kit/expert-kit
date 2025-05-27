@@ -1,8 +1,8 @@
 import logging
 import os
 # from vllm import ModelRegistry
-import vllm.model_executor.models.deepseek_v2 as ds_v2
-import vllm.model_executor.layers.fused_moe.layer as fused_moe
+
+
 from expertkit_vllm.models.deepseek_v2 import ExpertKitMoE
 from expertkit_vllm.experts.grpc_expert import GrpcExpert
 
@@ -31,14 +31,19 @@ def register():
             raise ValueError(f"🚀expertkit-vllm get unknown mode: {mode}")
 
 def expert_mode_register():
-    #TODO: need test, cause A10 has limited GPU memory, too small for testing
     print("🚀expertkit-vllm integration in expert_mode mode")
+    #TODO: need test, cause A10 has limited GPU memory, too small for testing
+    
+    import vllm.model_executor.layers.fused_moe as fused_moe_module
+    import vllm.model_executor.layers.fused_moe.layer as fused_moe
+    
     fused_moe.FusedMoE = GrpcExpert
+    fused_moe_module.FusedMoE = GrpcExpert
 
 def moe_mode_register():
     print("🚀expertkit-vllm integration in moe_mode mode")
     # Replace FusedMoE with ExpertKitFusedMoE
     #TODO: hardcode for Deepseek
-    ds_v2.DeepseekV2MoE = ExpertKitMoE
+    import vllm.model_executor.models.deepseek_v2 as ds_v2
 
-    #TODO: change model loading logic
+    ds_v2.DeepseekV2MoE = ExpertKitMoE

@@ -11,6 +11,7 @@ from vllm.distributed import (
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.models.deepseek_v2 import DeepseekV2MLP
 from expertkit_vllm.grpc_client import ExpertKitClient
+from expertkit_vllm.utils.config import collect_ek_client_cfg
 
 logger = logging.getLogger(__name__)
 
@@ -36,7 +37,8 @@ class ExpertKitMoE(nn.Module):
         self.routed_scaling_factor = config.routed_scaling_factor
         self.n_shared_experts = config.n_shared_experts
 
-        self.debug_mode = os.getenv("EXPERTKIT_DEBUG_MODE", "0") == "1"
+        ek_cfg = collect_ek_client_cfg(config)
+        self.debug_mode = ek_cfg.ek_debug_mode
 
         # Extract layer ID from prefix for gRPC call
         try:
@@ -45,16 +47,9 @@ class ExpertKitMoE(nn.Module):
         except (IndexError, ValueError):
             self.layer_idx = 0
 
-        # Check for required configuration
-        if not hasattr(config, "expertkit_addr"):
-            raise RuntimeError("Missing expertkit_addr in config")
-
-        # Initialize gRPC client
-        timeout_sec = getattr(config, "expertkit_timeout_sec", 2.0)
-
         if ExpertKitMoE.client is None:
-            print(f"🚀ExpertKitMoE {prefix} creating new gRPC client, with addr: {config.expertkit_addr}")
-            ExpertKitMoE.client = ExpertKitClient(config.expertkit_addr, timeout_sec)
+            print(f"🚀ExpertKitMoE {prefix} creating new gRPC client, with addr: {ek_cfg.ek_addr}")
+            ExpertKitMoE.client = ExpertKitClient(config.expertkit_addr, ek_cfg.ek_client_timeout)
 
         # We still need the gate for routing
         self.gate = ReplicatedLinear(
@@ -222,7 +217,13 @@ class ExpertKitMoE(nn.Module):
             print(f"🚀 {expanded_weights.dtype}, {expert_outputs.dtype}, {hidden_states.dtype} ")
         output = torch.sum(expanded_weights * expert_outputs, dim=1)
 
-        print(f"🚀 output shape: {output.shape}, shared_output shape: {shared_output.shape}")
+        # Add shared experts output if available
+        if shared_output is not None:
+            output += shared_output
 
+        # Reshape back to original batch size
+        output = output.view(batch_size, -1)
+        if self.debug_mode:
+            print(f"🚀 final output shape: {output.shape}")
 
-        return output.view(batch_size, hidden_dim)
+        return output

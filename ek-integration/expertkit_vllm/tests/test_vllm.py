@@ -1,10 +1,14 @@
 from vllm import LLM, SamplingParams
 import os
 
-os.environ["EXPERTKIT_ENABLE"] = "1"
 os.environ["VLLM_MLA_DISABLE"] = "1"
-os.environ["EXPERTKIT_DEBUG_MODE"] = "1"
-os.environ["EXPERTKIT_MODE"] = "moe_mode"
+
+os.environ["EXPERTKIT_ENABLE"] = "1"
+os.environ["EK_MODEL_NAME"] = "qwen3"
+os.environ["EK_MODE"] = "expert_mode"
+os.environ["EK_ADDR"] = "localhost:5002"
+os.environ["EK_CLIENT_TIMEOUT"] = "2"
+os.environ["EK_DEBUG_MODE"] = "1"
 
 prompts = [
     "Hello, my name is",
@@ -15,7 +19,7 @@ prompts = [
 sampling_params = SamplingParams(temperature=0.8, top_p=0.95)
 
 llm = LLM(
-        model="/mnt/xact/kioxia/.cache/huggingface/hub/DeepSeek-R1",
+        model="/home/liucp/Documents/gitRepos/expert-kit/expert-kit-deploy/data/qwen3/qwen3",
         trust_remote_code=True,
 
         # dtype=torch.float16,
