@@ -36,10 +36,10 @@ llm = LLM(
 
 ### 3. Enable ExpertKit Plugin
 
-Set the `EXPERTKIT_ENABLE` environment variable to activate the plugin:
+Set the `EK_ENABLE` environment variable to activate the plugin:
 
 ```bash
-export EXPERTKIT_ENABLE=1
+export EK_ENABLE=1
 ```
 
 ### 4. Generate Text
@@ -66,7 +66,7 @@ To deploy the ExpertKit service on a separate GPU machine:
 
 ```bash
 # On the vLLM server
-export EXPERTKIT_ENABLE=1
+export EK_ENABLE=1
 python -m vllm.entrypoints.openai.api_server \
     --model deepseek-ai/deepseek-v2-base \
     --model-config '{"expertkit_addr": "expert-server:50051"}'

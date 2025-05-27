@@ -14,10 +14,10 @@ def register():
 
     This function is called by vLLM's plugin system during initialization.
     It replaces the DeepseekV2MoE implementation with the ExpertKitMoE
-    implementation when the EXPERTKIT_ENABLE environment variable is set.
+    implementation when the EK_ENABLE environment variable is set.
     """
     # Only activate plugin when explicitly enabled
-    if os.getenv("EXPERTKIT_ENABLE") != "1":
+    if os.getenv("EK_ENABLE") != "1":
         return
     print("🚀expertkit-vllm integration activated")
     

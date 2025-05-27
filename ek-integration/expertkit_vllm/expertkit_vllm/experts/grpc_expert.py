@@ -1,5 +1,6 @@
 import torch
 import logging
+import torch.nn.functional as F
 from torch import nn
 from torch.nn import Parameter
 from typing import Optional, List, Callable
@@ -94,6 +95,7 @@ class GrpcExpert(PPMissingLayer):
         self.e_score_correction_bias = e_score_correction_bias
 
         if self.debug_mode:
+            logger.setLevel(logging.DEBUG)
             print(f"🚀 GrpcExpert initialized with prefix: {prefix}, num_experts: {num_experts}, top_k: {top_k}, hidden_size: {hidden_size}")
         
         # Extract layer ID from prefix for gRPC call
@@ -131,7 +133,6 @@ class GrpcExpert(PPMissingLayer):
                 requires_grad=False
             )
 
-    
     def forward(self, hidden_states: torch.Tensor, router_logits: torch.Tensor) -> torch.Tensor:
         """Forward pass using remote expert computation.
 
@@ -150,8 +151,10 @@ class GrpcExpert(PPMissingLayer):
             logger.debug(f"🚀 Hidden states shape: {hidden_states.shape}, batch_size: {batch_size}, hidden_dim: {hidden_dim}")
             logger.debug(f"🚀 Router logits shape: {router_logits.shape}")
             
-        # Get top-k experts for each token based on router_logits
-        
+        # Apply softmax first, then take topk
+        router_probs = F.softmax(router_logits, dim=-1)
+        routing_weights, routing_indices = torch.topk(router_probs, self.top_k, dim=-1)
+
         # TODO: use vllm original select_experts
         # routing_weights, routing_indices = self.select_experts(
         #     hidden_states=hidden_states,
@@ -165,98 +168,117 @@ class GrpcExpert(PPMissingLayer):
         #     scoring_func=self.scoring_func,
         #     e_score_correction_bias=self.e_score_correction_bias
         # )
-
-        routing_weights, routing_indices = torch.topk(
-            router_logits, self.top_k, dim=-1)
+        
+        # Renormalize topk weights to ensure they sum to 1
+        if self.renormalize:
+            routing_weights = routing_weights / (routing_weights.sum(dim=-1, keepdim=True) + 1e-8)
+        
+        # Use reasonable threshold for similarity detection
+        should_optimize = False
+        unique_batch_size = batch_size
+        inverse_indices = None
+        
+        if batch_size > 32:  # Only consider optimization for larger batches
+            # Use hash or reduced precision to detect duplicates
+            hidden_hash = torch.round(hidden_states * 1000).int()  # Reduce precision
+            unique_hash, inverse_indices = torch.unique(
+                hidden_hash, dim=0, return_inverse=True
+            )
+            unique_batch_size = unique_hash.shape[0]
+            should_optimize = unique_batch_size < 0.7 * batch_size  # Adjust threshold
             
-        # ------------------ Optimization: Deduplicate hidden states ------------------
-        # Doing this because vllm always pads hidden_states to max_num_batched_tokens
-        hidden_flattened = hidden_states.view(batch_size, -1)
-        unique_hidden, inverse_indices = torch.unique(
-            hidden_flattened, dim=0, return_inverse=True)
+            if self.debug_mode:
+                logger.debug(f"🚀 unique_batch_size: {unique_batch_size}, batch_size: {batch_size}, should_optimize: {should_optimize}")
         
-        unique_batch_size = unique_hidden.shape[0]
-        if self.debug_mode:
-            logger.debug(f"🚀 unique_batch_size: {unique_batch_size}, batch_size: {batch_size}")
-        
-        # Convert expert indices to string IDs as required by forward_expert
-        expert_ids = []
-        
-        # If there's no significant reduction, process normally
-        if unique_batch_size > 0.8 * batch_size:  # Unique more than 80%(dominant), send directly
-            # Convert expert indices to string IDs
+        if not should_optimize:
+            # Standard path: process all tokens directly
             expert_ids = []
             for seq_idx in range(batch_size):
-                # Get expert indices for current token
                 token_expert_indices = routing_indices[seq_idx].tolist()
-                # Convert indices to string IDs
                 token_expert_ids = [
-                    f"{self.ek_model_name}/l{self.layer_idx}-e{expert_idx}" for expert_idx in token_expert_indices]
+                    f"{self.ek_model_name}/l{self.layer_idx}-e{expert_idx}" 
+                    for expert_idx in token_expert_indices
+                ]
                 expert_ids.append(token_expert_ids)
             
-            # Call remote expert service with all tokens
+            # Call remote expert service
             expert_outputs = self.client.forward_expert(
                 expert_ids=expert_ids,
                 hidden_state=hidden_states
             )
-
-            expert_outputs = expert_outputs.to(device=hidden_states.device, dtype=hidden_states.dtype)
-        else:
-            # Optimization for cases with many duplicate hidden states
             
-            # Create a mapping from unique hidden states to all original tokens
-            # that share this hidden state
-            unique_to_original = [[] for _ in range(unique_batch_size)]
+        else:
+            unique_hidden = hidden_states[torch.unique(inverse_indices)]
+            
+            # Build expert IDs for unique tokens
+            unique_expert_ids = []
+            unique_routing_weights = []
+            unique_routing_indices = []
+            
+            processed_unique = set()
             for i in range(batch_size):
                 unique_idx = inverse_indices[i].item()
-                unique_to_original[unique_idx].append(i)
+                if unique_idx not in processed_unique:
+                    processed_unique.add(unique_idx)
+                    
+                    token_expert_indices = routing_indices[i].tolist()
+                    token_expert_ids = [
+                        f"{self.ek_model_name}/l{self.layer_idx}-e{expert_idx}" 
+                        for expert_idx in token_expert_indices
+                    ]
+                    unique_expert_ids.append(token_expert_ids)
+                    unique_routing_weights.append(routing_weights[i])
+                    unique_routing_indices.append(routing_indices[i])
             
-            # Build expert IDs for unique hidden states
-            unique_expert_ids = []
-            
-            # For each unique hidden state, gather all expert assignments from original tokens
-            for unique_idx in range(unique_batch_size):
-                # Get all original token indices that map to this unique hidden state
-                original_indices = unique_to_original[unique_idx]
-                
-                # Get a representative token (just use the first one)
-                # This assumes tokens with identical hidden states get identical routing decisions
-                rep_idx = original_indices[0]
-                
-                # Get expert assignments for this representative token
-                token_expert_indices = routing_indices[rep_idx].tolist()
-                token_expert_ids = [
-                    f"{self.ek_model_name}/l{self.layer_idx}-e{expert_idx}" for expert_idx in token_expert_indices]
-                unique_expert_ids.append(token_expert_ids)
-            
-            # Call remote expert service with just the unique tokens
+            # Call remote expert service
             unique_expert_outputs = self.client.forward_expert(
                 expert_ids=unique_expert_ids,
                 hidden_state=unique_hidden
             )
             
-            # Map the unique outputs back to the original batch
+            # Map back to original batch
             expert_outputs = torch.zeros(
                 (batch_size, self.top_k, hidden_dim), 
                 device=hidden_states.device, 
                 dtype=hidden_states.dtype
             )
             
+            unique_idx_map = {}
+            unique_counter = 0
             for i in range(batch_size):
-                unique_idx = inverse_indices[i].item()
-                expert_outputs[i] = unique_expert_outputs[unique_idx]
+                orig_unique_idx = inverse_indices[i].item()
+                if orig_unique_idx not in unique_idx_map:
+                    unique_idx_map[orig_unique_idx] = unique_counter
+                    unique_counter += 1
+                
+                mapped_idx = unique_idx_map[orig_unique_idx]
+                expert_outputs[i] = unique_expert_outputs[mapped_idx]
         
-        # Calculate weighted sum (same as original)
-        # Expand routing_weights to [num_tokens, top_k, 1] for broadcast calculation
-        expanded_weights = routing_weights.unsqueeze(-1)
-
-        # Compute weighted sum across expert dimension: [num_tokens, hidden_dim]
+        expert_outputs = expert_outputs.to(
+            device=hidden_states.device, 
+            dtype=hidden_states.dtype
+        )
+        
+        expected_shape = (batch_size, self.top_k, hidden_dim)
+        if expert_outputs.shape != expected_shape:
+            raise RuntimeError(
+                f"Expert outputs shape mismatch: expected {expected_shape}, "
+                f"got {expert_outputs.shape}"
+            )
+        
+        # Calculate weighted sum
+        expanded_weights = routing_weights.unsqueeze(-1)  # [batch_size, top_k, 1]
+        
         if self.debug_mode:
-            print(f"🚀 {expanded_weights.device:}, {expert_outputs.device}, {hidden_states.device} ")
-            print(f"🚀 {expanded_weights.dtype:}, {expert_outputs.dtype}, {hidden_states.dtype} ")
+            logger.debug(f"🚀 Weights device: {expanded_weights.device}, Expert outputs device: {expert_outputs.device}")
+            logger.debug(f"🚀 Weights dtype: {expanded_weights.dtype}, Expert outputs dtype: {expert_outputs.dtype}")
+            logger.debug(f"🚀 Weights shape: {expanded_weights.shape}, Expert outputs shape: {expert_outputs.shape}")
+        
+        # Compute weighted sum: [batch_size, hidden_dim]
         output = torch.sum(expanded_weights * expert_outputs, dim=1)
+        
+        return output
 
-        return output.view(batch_size, hidden_dim)
     
     @staticmethod
     def select_experts(
