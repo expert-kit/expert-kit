@@ -45,6 +45,8 @@ lazy_static = { workspace = true }
 actix-web = { workspace = true }
 actix-http = { workspace = true }
 mime = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
 
 
 [build-dependencies]
