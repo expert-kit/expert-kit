@@ -13,20 +13,14 @@ os.environ["EK_DEBUG_MODE"] = "0"
 prompts = [
     "Hello, my name is",
     "The president of the United",
-    # "The capital of France is",
-    # "The future of AI is",
-] * 32
+]
 sampling_params = SamplingParams(temperature=0.8, top_p=0.95)
 
 llm = LLM(
-        model="/home/liucp/Documents/gitRepos/expert-kit/expert-kit-deploy/data/qwen3/qwen3",
+        model="Qwen/Qwen3-30B-A3B",
         trust_remote_code=True,
 
-        # dtype=torch.float16,
-        max_model_len=16,
         enforce_eager=True,
-        cpu_offload_gb=64,
-        max_num_batched_tokens=1024
     )
 
 outputs = llm.generate(prompts, sampling_params)
