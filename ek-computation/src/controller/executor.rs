@@ -16,7 +16,7 @@ use crate::{
     proto::ek::worker::v1,
 };
 
-use super::registry::{ExpertRegistry, get_registry};
+use super::registry::{ GlobalWorkerRegistry, get_registry};
 
 #[async_trait::async_trait]
 pub trait Executor {
@@ -57,7 +57,7 @@ pub struct NaiveExecutor {
     seq_mapping: BTreeMap<GlobalSeqId, (ReqId, LocalSeqIdx)>,
     seq_gid_cursor: u64,
     req_id_cursor: u64,
-    registry: Arc<Mutex<dyn ExpertRegistry + Send + Sync>>,
+    registry: GlobalWorkerRegistry,
 }
 
 #[async_trait::async_trait]

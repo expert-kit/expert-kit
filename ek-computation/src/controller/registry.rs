@@ -1,16 +1,21 @@
 use std::{collections::HashMap, sync::Arc};
 
-use ek_base::error::{EKError, EKResult};
+use ek_base::{
+    error::{EKError, EKResult},
+    tracing::grpc::OTelGrpcClientMiddleware,
+};
 use ndarray_rand::rand;
 use once_cell::sync::OnceCell;
 use tokio::sync::Mutex;
 use tonic::transport::Channel;
+use tower::ServiceBuilder;
 
 use crate::state::io::{StateReader, StateReaderImpl};
 
 #[async_trait::async_trait]
 pub trait ExpertRegistry {
-    async fn select(&mut self, eid: String) -> EKResult<Channel>;
+    type T;
+    async fn select(&mut self, eid: String) -> EKResult<Self::T>;
     async fn reset(&mut self) -> EKResult<()>;
     async fn deregister(&mut self, host_id: &str);
 }
@@ -29,11 +34,16 @@ pub struct ExpertRegistryImpl {
 
 #[async_trait::async_trait]
 impl ExpertRegistry for ExpertRegistryImpl {
+    type T = OTelGrpcClientMiddleware;
     async fn reset(&mut self) -> EKResult<()> {
         self.inner_reset().await
     }
-    async fn select(&mut self, eid: String) -> EKResult<Channel> {
-        self.inner_select(eid).await
+    async fn select(&mut self, eid: String) -> EKResult<Self::T> {
+        let ch = self.inner_select(eid).await?;
+
+        Ok(ServiceBuilder::new()
+            .layer_fn(OTelGrpcClientMiddleware::new)
+            .service(ch))
     }
     async fn deregister(&mut self, host_id: &str) {
         self.inner_deregister(host_id).await;
@@ -77,9 +87,9 @@ impl ExpertRegistryImpl {
             let addr = node.config["addr"].as_str().unwrap().to_owned();
             let end = Channel::from_shared(addr)
                 .map_err(|e| EKError::InvalidInput(format!("invalid url for gRPC: {}", e)))?;
-            let ch = end.connect().await?;
+            let channel = end.connect().await?;
             let meta = ChannelMeta {
-                ch,
+                ch: channel,
                 host_id: node.hostname.clone(),
             };
             self.channels.insert(eid.clone(), vec![meta]);
@@ -120,7 +130,10 @@ impl ExpertRegistryImpl {
     }
 }
 
-pub fn get_registry() -> Arc<Mutex<dyn ExpertRegistry + Send + Sync>> {
+pub type GlobalWorkerRegistry =
+    Arc<Mutex<dyn ExpertRegistry<T = OTelGrpcClientMiddleware> + Send + Sync>>;
+
+pub fn get_registry() -> GlobalWorkerRegistry {
     static INSTANCE: OnceCell<Arc<Mutex<ExpertRegistryImpl>>> = OnceCell::new();
     let res = INSTANCE.get_or_init(|| {
         let inner = ExpertRegistryImpl::new();

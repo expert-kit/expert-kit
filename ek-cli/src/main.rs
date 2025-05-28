@@ -1,5 +1,5 @@
 #![feature(random)]
-use std::{fmt::format, fs::File, mem::transmute, path::PathBuf};
+use std::{mem::transmute, path::PathBuf};
 mod db;
 mod doctor;
 mod model;
@@ -9,7 +9,7 @@ mod schedule;
 mod onnx;
 use db::execute_db;
 use doctor::doctor_main;
-use ek_base::config::{get_ek_settings, get_ek_settings_base};
+use ek_base::config::get_ek_settings_base;
 use ek_computation::{controller::controller_main, worker::worker_main};
 use ek_db::weight_srv;
 

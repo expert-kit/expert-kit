@@ -9,17 +9,23 @@ use tracing::{Level, field::Empty};
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 use tonic::{body::Body, transport::Channel};
-use tower::Service;
+use tower::{Layer, Service};
 
 #[derive(Default, Debug, Clone)]
 pub struct GRPCClientLayer;
 
 #[derive(Debug, Clone)]
-pub struct OTelGrpcClientService {
+pub struct OTelGrpcClientMiddleware {
     inner: Channel,
 }
 
-impl Service<Request<Body>> for OTelGrpcClientService {
+impl OTelGrpcClientMiddleware {
+    pub fn new(inner: Channel) -> Self {
+        OTelGrpcClientMiddleware { inner }
+    }
+}
+
+impl Service<Request<Body>> for OTelGrpcClientMiddleware {
     type Response = Response<Body>;
     type Error = Box<dyn std::error::Error + Send + Sync>;
     type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send>>;
@@ -86,6 +92,16 @@ where
 
             Ok(response)
         })
+    }
+}
+#[derive(Debug, Clone, Default)]
+pub struct OTelGrpcServerLayer {}
+
+impl<S> Layer<S> for OTelGrpcServerLayer {
+    type Service = OTelGrpcServerMiddleware<S>;
+
+    fn layer(&self, service: S) -> Self::Service {
+        OTelGrpcServerMiddleware { inner: service }
     }
 }
 
