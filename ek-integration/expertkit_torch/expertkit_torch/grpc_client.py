@@ -5,6 +5,9 @@ import numpy as np
 import safetensors
 from expertkit_torch.pbpy.ek.worker.v1 import expert_pb2_grpc, expert_pb2
 from typing import List
+import logging
+
+logger = logging.getLogger(__name__)
 
 MAX_METADATA_SIZE = 20 * 1024  # 20 KB
 MAX_MESSAGE_LENGTH = 1024 * 1024 * 1024  # 100 MB
@@ -71,6 +74,8 @@ class ExpertKitClient:
                 "data"
             ].to(origin_device)
         except grpc.RpcError as e:
+            logger.error(f"gRPC failed: {e.code().name} {str(e)}")
             raise RuntimeError(f"gRPC failed: {e.code().name} {str(e)}") from e
+
         except (IOError, RuntimeError) as e:
             raise RuntimeError(f"Tensor serialization failed: {str(e)}") from e

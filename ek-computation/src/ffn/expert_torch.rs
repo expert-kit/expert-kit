@@ -208,7 +208,6 @@ mod test {
             .sum(tch::Kind::Double)
             .abs()
             .double_value(&[]);
-        dbg!(diff);
         assert!(diff < 0.2);
     }
 

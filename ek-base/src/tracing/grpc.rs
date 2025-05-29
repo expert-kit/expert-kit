@@ -1,11 +1,12 @@
 use http::{Request, Response, Uri};
+use log::warn;
 use opentelemetry::propagation::{Extractor, Injector};
 use std::{
     future::Future,
     pin::Pin,
     task::{Context, Poll},
 };
-use tracing::{Level, field::Empty};
+use tracing::{Instrument, Level, span};
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 use tonic::{body::Body, transport::Channel};
@@ -38,17 +39,21 @@ impl Service<Request<Body>> for OTelGrpcClientMiddleware {
         let mut req = req;
         let clone = self.inner.clone();
         let mut inner = std::mem::replace(&mut self.inner, clone);
-        let span = span_from_req(&req);
-        let ctx = span.context();
 
+        let span = span_from_req_cli(&req);
+        let ctx = span.context();
         let mut injector = HeaderInjector(req.headers_mut());
         opentelemetry::global::get_text_map_propagator(|propagator| {
             propagator.inject_context(&ctx, &mut injector);
         });
-        Box::pin(async move {
-            let resp = inner.call(req).await?;
-            Ok(resp)
-        })
+        let _enter = span.enter();
+        Box::pin(
+            async move {
+                let resp = inner.call(req).await?;
+                Ok(resp)
+            }
+            .in_current_span(),
+        )
     }
 }
 
@@ -57,6 +62,12 @@ pub struct OTelGrpcServerMiddleware<S> {
     inner: S,
 }
 type BoxFuture<'a, T> = Pin<Box<dyn std::future::Future<Output = T> + Send + 'a>>;
+
+impl<S> OTelGrpcServerMiddleware<S> {
+    pub fn new(inner: S) -> Self {
+        Self { inner }
+    }
+}
 
 impl<S, ReqBody, ResBody> Service<http::Request<ReqBody>> for OTelGrpcServerMiddleware<S>
 where
@@ -76,7 +87,7 @@ where
         let clone = self.inner.clone();
         let mut inner = std::mem::replace(&mut self.inner, clone);
         let span = {
-            let span = span_from_req(&req);
+            let span = span_from_req_srv(&req);
             let extractor = HeaderExtractor(req.headers());
             let ctx = opentelemetry::global::get_text_map_propagator(|propagator| {
                 propagator.extract(&extractor)
@@ -105,17 +116,30 @@ impl<S> Layer<S> for OTelGrpcServerLayer {
     }
 }
 
-pub fn span_from_req<B>(req: &http::Request<B>) -> tracing::Span {
+pub fn span_from_req_cli<B>(req: &http::Request<B>) -> tracing::Span {
     let (service, method) = extract_service_method(req.uri());
     tracing::span!(
-        Level::TRACE,
+        Level::INFO,
+        "grpc.request",
+        otel.name = format!("{service}/{method}"),
+        otel.kind = ?opentelemetry::trace::SpanKind::Client,
+        // otel.status_code = Empty, // to set on response
+        // trace_id = Empty, // to set on response
+        // request_id = Empty, // to set
+        // exception.message = Empty, // to set on response
+    )
+}
+pub fn span_from_req_srv<B>(req: &http::Request<B>) -> tracing::Span {
+    let (service, method) = extract_service_method(req.uri());
+    tracing::span!(
+        Level::INFO,
         "grpc.request",
         otel.name = format!("{service}/{method}"),
         otel.kind = ?opentelemetry::trace::SpanKind::Server,
-        otel.status_code = Empty, // to set on response
-        trace_id = Empty, // to set on response
-        request_id = Empty, // to set
-        exception.message = Empty, // to set on response
+        // otel.status_code = Empty, // to set on response
+        // trace_id = Empty, // to set on response
+        // request_id = Empty, // to set
+        // exception.message = Empty, // to set on response
     )
 }
 
@@ -128,6 +152,7 @@ pub fn extract_service_method(uri: &Uri) -> (&str, &str) {
 }
 
 pub struct HeaderInjector<'a>(pub &'a mut http::HeaderMap);
+
 impl Injector for HeaderInjector<'_> {
     fn set(&mut self, key: &str, value: String) {
         if let Ok(name) = http::header::HeaderName::from_bytes(key.as_bytes()) {
@@ -144,6 +169,7 @@ impl Extractor for HeaderExtractor<'_> {
     fn get(&self, key: &str) -> Option<&str> {
         self.0.get(key).and_then(|value| value.to_str().ok())
     }
+
     fn keys(&self) -> Vec<&str> {
         self.0
             .keys()

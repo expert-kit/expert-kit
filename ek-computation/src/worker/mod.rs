@@ -1,6 +1,6 @@
 mod core;
 
-use ek_base::tracing::grpc::OTelGrpcServerLayer;
+use ek_base::tracing::grpc::OTelGrpcServerMiddleware;
 use state::StateInspector;
 use tokio::select;
 use tokio::signal;
@@ -45,7 +45,7 @@ pub async fn worker_main() -> EKResult<()> {
             .unwrap();
         log::info!("worker server listening on {}", addr);
         let layer = tower::ServiceBuilder::new()
-            .layer(OTelGrpcServerLayer::default())
+            .layer_fn(OTelGrpcServerMiddleware::new)
             .into_inner();
 
         let err = tonic::transport::Server::builder()

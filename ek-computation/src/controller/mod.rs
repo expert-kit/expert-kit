@@ -48,9 +48,15 @@ pub async fn controller_main() -> EKResult<()> {
         )
         .parse()
         .unwrap();
+
+        // let layer = tower::ServiceBuilder::new()
+        //     .layer_fn(OTelGrpcServerMiddleware::new)
+        //     .into_inner();
+
         log::info!("computation server listening on {}", inter_addr);
         let plan_srv = PlanServiceImpl::new();
         let err = tonic::transport::Server::builder()
+            // .layer(layer)
             .add_service(
                 ComputationServiceServer::new(srv)
                     .max_decoding_message_size(1024 * 1024 * 1024)

@@ -11,12 +11,29 @@ use db::execute_db;
 use doctor::doctor_main;
 use ek_base::config::get_ek_settings_base;
 use ek_computation::{controller::controller_main, worker::worker_main};
+use opentelemetry::{
+    KeyValue, propagation::TextMapCompositePropagator, trace::TracerProvider as _,
+};
+
+
+use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+
 use ek_db::weight_srv;
 
 use clap::{Parser, Subcommand};
 use model::execute_model;
+use opentelemetry_sdk::{
+    Resource,
+    propagation::{BaggagePropagator, TraceContextPropagator},
+    trace::{RandomIdGenerator, Sampler, SdkTracerProvider},
+};
+use opentelemetry_semantic_conventions::{
+    SCHEMA_URL,
+    resource::{DEPLOYMENT_ENVIRONMENT_NAME, SERVICE_VERSION},
+};
 use pretrain::{PretrainCommand, execute_pretrain};
 use schedule::execute_schedule;
+use tracing::Level;
 extern crate pretty_env_logger;
 
 #[derive(Subcommand, Debug)]
@@ -83,10 +100,66 @@ struct RootCli {
     command: Command,
 }
 
-fn init_log() {
-    let mut builder =
-        env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"));
-    builder.target(env_logger::Target::Stderr).init();
+// fn init_log() {
+//     let mut builder =
+//         env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"));
+//     builder.target(env_logger::Target::Stderr).init();
+// }
+fn resource(cmd: &'static str) -> Resource {
+
+    Resource::builder()
+        .with_service_name(cmd)
+        .with_schema_url(
+            [
+                KeyValue::new(SERVICE_VERSION, env!("CARGO_PKG_VERSION")),
+                KeyValue::new(DEPLOYMENT_ENVIRONMENT_NAME, "develop"),
+            ],
+            SCHEMA_URL,
+        )
+        .build()
+}
+
+fn init_tracer_provider(svc_name: &'static str) -> SdkTracerProvider {
+    let exporter = opentelemetry_otlp::SpanExporter::builder()
+        .with_tonic()
+        .build()
+        .unwrap();
+
+    let provider = SdkTracerProvider::builder()
+        // Customize sampling strategy
+        .with_sampler(Sampler::AlwaysOn)
+        // If export trace to AWS X-Ray, you can use XrayIdGenerator
+        .with_id_generator(RandomIdGenerator::default())
+        .with_resource(resource(svc_name))
+        .with_batch_exporter(exporter)
+        .build();
+    let baggage_propagator = BaggagePropagator::new();
+    let trace_context_propagator = TraceContextPropagator::new();
+    let composite_propagator = TextMapCompositePropagator::new(vec![
+        Box::new(baggage_propagator),
+        Box::new(trace_context_propagator),
+    ]);
+    opentelemetry::global::set_text_map_propagator(composite_propagator);
+    provider
+}
+fn init_tracing_subscriber(svc_name: &'static str) {
+    let tracer_provider = init_tracer_provider(svc_name);
+    let tracer = tracer_provider.tracer("tracing-otel-subscriber");
+    tracing_subscriber::registry()
+        .with(tracing_subscriber::filter::LevelFilter::from_level(
+            Level::INFO,
+        ))
+        .with(tracing_subscriber::fmt::layer())
+        .with(tracing_opentelemetry::layer().with_tracer(tracer))
+        .init();
+}
+
+fn get_command_name(cmd: &Command) -> &'static str {
+    match cmd {
+        Command::Worker {} => "worker",
+        Command::Controller {} => "controller",
+        _ => "others",
+    }
 }
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 48)]
@@ -95,6 +168,8 @@ async fn main() {
     if cli.debug {
         unsafe { std::env::set_var("RUST_LOG", "debug") };
     }
+    let command_name = get_command_name(&cli.command);
+
     let mut config_src = vec![];
     if let Ok(path) = std::env::var("EK_CONFIG") {
         config_src.push(path);
@@ -110,7 +185,8 @@ async fn main() {
             .map(|x| x.as_str())
             .collect::<Vec<_>>(),
     );
-    init_log();
+    init_tracing_subscriber(command_name);
+    // init_log();
     log::info!("config source: {:?}", config_src);
     let res = match cli.command {
         Command::Onnx { command } => onnx::execute_onnx(command).await,

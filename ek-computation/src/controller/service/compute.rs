@@ -1,7 +1,8 @@
-use std::sync::Arc;
+use std::{fmt::Debug, sync::Arc};
 
 use ek_base::{config::get_ek_settings, utils::Defers};
 use tokio::sync::{Mutex, mpsc};
+use tracing::Instrument;
 
 use crate::{
     controller::{
@@ -14,10 +15,29 @@ use crate::{
 pub struct ComputationProxyServiceImpl {
     executor: Arc<Mutex<dyn Executor + Send>>,
 }
+impl Debug for ComputationProxyServiceImpl {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ComputationProxyServiceImpl").finish()
+    }
+}
 
 #[async_trait::async_trait]
 impl ComputationService for ComputationProxyServiceImpl {
     async fn forward(
+        &self,
+        request: tonic::Request<v1::ForwardReq>,
+    ) -> Result<tonic::Response<v1::ForwardResp>, tonic::Status> {
+        self.inner_controller_forward(request).await
+    }
+}
+
+impl ComputationProxyServiceImpl {
+    #[tracing::instrument(
+        skip(self, request),
+        level = "info",
+        fields(method = "ComputationProxyServiceImpl::forward",)
+    )]
+    async fn inner_controller_forward(
         &self,
         request: tonic::Request<v1::ForwardReq>,
     ) -> Result<tonic::Response<v1::ForwardResp>, tonic::Status> {
@@ -38,16 +58,22 @@ impl ComputationService for ComputationProxyServiceImpl {
             let mut lg = self.executor.lock().await;
             lg.submit(request.get_ref()).await?
         };
+
         let exec_bg = self.executor.clone();
         let (err_tx, mut err_rx) = mpsc::channel(1);
-        tokio::spawn(async move {
-            let mut lg = exec_bg.lock().await;
-            let res = lg.exec().await;
-            if let Err(err) = res {
-                log::error!("executor error: {}", err);
-                err_tx.send(err).await.unwrap();
+
+        tokio::spawn(
+            async move {
+                let mut lg = exec_bg.lock().await;
+                let res = lg.exec().await;
+                if let Err(err) = res {
+                    log::error!("executor error: {}", err);
+                    err_tx.send(err).await.unwrap();
+                }
             }
-        });
+            .in_current_span(),
+        );
+
         loop {
             tokio::select! {
                 err = err_rx.recv() => {
