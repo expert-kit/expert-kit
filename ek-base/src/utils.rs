@@ -1,6 +1,5 @@
 use std::{collections::HashMap, path::PathBuf, time};
 
-
 pub struct PerfTimer {
     start: time::Instant,
     name: String,
@@ -27,18 +26,20 @@ impl Drop for PerfTimer {
     fn drop(&mut self) {
         let now = time::Instant::now();
         let elapsed = now.duration_since(self.start);
+        let elapsed_ms = elapsed.as_millis();
         log::debug!(
-            "PerfTimer({}): total elapsed_ms={}",
+            elapsed_ms;
+            "PerfTimer({})",
             self.name,
-            elapsed.as_millis()
         );
         for (name, point) in &self.point {
             let elapsed = point.duration_since(self.start);
+            let elapsed_ms = elapsed.as_millis();
             log::debug!(
-                "PerfTimer({}/{}) elapsed_ms={}",
+                elapsed_ms;
+                "PerfTimer({}/{})",
                 self.name,
                 name,
-                elapsed.as_millis()
             );
         }
     }
@@ -69,7 +70,6 @@ impl Drop for Defers {
         v()
     }
 }
-
 
 unsafe impl Send for Defers {}
 unsafe impl Sync for Defers {}

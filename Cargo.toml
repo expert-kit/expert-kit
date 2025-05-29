@@ -19,11 +19,10 @@ polars = { version = "0.46.0", features = [
     "parquet",
 ] }
 
-log = "0.4.26"
+log = { version = "0.4.26", features = ["kv"] }
 clap = { version = "4.5.31", features = ["derive"] }
 polars-io = "0.46.0"
-pretty_env_logger = "0.5.0"
-env_logger = "0.11.8"
+env_logger = { version = "0.11.8", features = ["kv"] }
 tonic = "*"
 prost = "0.13"
 tokio = { version = "1.0", features = ["macros", "rt-multi-thread"] }
@@ -66,7 +65,11 @@ tracing = { version = "0.1.41", default-features = false, features = [
     "std",
     "attributes",
 ] }
-tracing-subscriber = "0.3.19"
+tracing-subscriber = { version = "0.3.19", default-features = false, features = [
+    "std",
+    "registry",
+    "local-time",
+] }
 tracing-opentelemetry = "0.30.0"
 opentelemetry = { version = "0.29.0", default-features = false, features = [
     "trace",

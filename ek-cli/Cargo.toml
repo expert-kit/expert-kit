@@ -10,7 +10,6 @@ ek_db = { path = "../ek-db" }
 ek_computation = { path = "../ek-computation" }
 ek_base = { path = "../ek-base" }
 tokio = { workspace = true }
-pretty_env_logger = { workspace = true }
 log = { workspace = true }
 env_logger = { workspace = true }
 

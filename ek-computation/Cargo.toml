@@ -17,7 +17,6 @@ ort = { workspace = true }
 polars = { workspace = true }
 polars-io = { workspace = true }
 clap = { workspace = true }
-pretty_env_logger = { workspace = true }
 log = { workspace = true }
 env_logger = { workspace = true }
 safetensors.workspace = true

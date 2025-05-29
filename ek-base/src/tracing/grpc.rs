@@ -1,12 +1,11 @@
 use http::{Request, Response, Uri};
-use log::warn;
 use opentelemetry::propagation::{Extractor, Injector};
 use std::{
     future::Future,
     pin::Pin,
     task::{Context, Poll},
 };
-use tracing::{Instrument, Level, span};
+use tracing::{Instrument, Level};
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 use tonic::{body::Body, transport::Channel};

@@ -1,5 +1,5 @@
 #![feature(random)]
-use std::{mem::transmute, path::PathBuf};
+use std::{env, mem::transmute, path::PathBuf};
 mod db;
 mod doctor;
 mod model;
@@ -11,10 +11,11 @@ use db::execute_db;
 use doctor::doctor_main;
 use ek_base::config::get_ek_settings_base;
 use ek_computation::{controller::controller_main, worker::worker_main};
+use env_logger::fmt::{default_kv_format, style};
 use opentelemetry::{
     KeyValue, propagation::TextMapCompositePropagator, trace::TracerProvider as _,
 };
-
+use std::io::Write;
 
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
@@ -34,7 +35,6 @@ use opentelemetry_semantic_conventions::{
 use pretrain::{PretrainCommand, execute_pretrain};
 use schedule::execute_schedule;
 use tracing::Level;
-extern crate pretty_env_logger;
 
 #[derive(Subcommand, Debug)]
 enum Command {
@@ -100,13 +100,28 @@ struct RootCli {
     command: Command,
 }
 
-// fn init_log() {
-//     let mut builder =
-//         env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"));
-//     builder.target(env_logger::Target::Stderr).init();
-// }
+fn init_log() {
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
+        .format_timestamp_millis()
+        .write_style(env_logger::WriteStyle::Auto)
+        .target(env_logger::Target::Stderr)
+        .format(|buf, record| {
+            let level_color = buf.default_level_style(record.level());
+            let timestamp = buf.timestamp();
+            let level = record.level();
+            let kv = record.key_values();
+            let _ = write!(
+                buf,
+                "<{level_color}{level}{level_color:#}>({timestamp}) {} ",
+                record.args(),
+            );
+            default_kv_format(buf, kv).unwrap();
+            writeln!(buf).unwrap();
+            Ok(())
+        })
+        .init();
+}
 fn resource(cmd: &'static str) -> Resource {
-
     Resource::builder()
         .with_service_name(cmd)
         .with_schema_url(
@@ -149,7 +164,11 @@ fn init_tracing_subscriber(svc_name: &'static str) {
         .with(tracing_subscriber::filter::LevelFilter::from_level(
             Level::INFO,
         ))
-        .with(tracing_subscriber::fmt::layer())
+        // .with(
+        //     tracing_subscriber::fmt::layer()
+        //         .with_thread_ids(true)
+        //         .with_span_events(FmtSpan::NONE),
+        // )
         .with(tracing_opentelemetry::layer().with_tracer(tracer))
         .init();
 }
@@ -186,7 +205,7 @@ async fn main() {
             .collect::<Vec<_>>(),
     );
     init_tracing_subscriber(command_name);
-    // init_log();
+    init_log();
     log::info!("config source: {:?}", config_src);
     let res = match cli.command {
         Command::Onnx { command } => onnx::execute_onnx(command).await,
