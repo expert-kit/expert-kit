@@ -12,15 +12,16 @@ use tower::ServiceBuilder;
 
 use crate::state::io::{StateReader, StateReaderImpl};
 
+pub type ExpertId = String;
+pub type ExpertIdRef<'a> = &'a str;
+
 #[async_trait::async_trait]
 pub trait ExpertRegistry {
     type T;
-    async fn select(&mut self, eid: String) -> EKResult<Self::T>;
+    async fn select(&mut self, eid: ExpertIdRef<'_>) -> EKResult<Self::T>;
     async fn reset(&mut self) -> EKResult<()>;
     async fn deregister(&mut self, host_id: &str);
 }
-
-type ExpertId = String;
 
 struct ChannelMeta {
     host_id: String,
@@ -38,7 +39,7 @@ impl ExpertRegistry for ExpertRegistryImpl {
     async fn reset(&mut self) -> EKResult<()> {
         self.inner_reset().await
     }
-    async fn select(&mut self, eid: String) -> EKResult<Self::T> {
+    async fn select(&mut self, eid: ExpertIdRef<'_>) -> EKResult<Self::T> {
         let ch = self.inner_select(eid).await?;
 
         Ok(ServiceBuilder::new()
@@ -56,8 +57,8 @@ impl ExpertRegistryImpl {
         Ok(())
     }
 
-    async fn inner_select(&mut self, eid: String) -> EKResult<Channel> {
-        let channels = self.channels.get(&eid);
+    async fn inner_select(&mut self, eid: ExpertIdRef<'_>) -> EKResult<Channel> {
+        let channels = self.channels.get(eid);
         if let Some(channels) = channels {
             if channels.is_empty() {
                 return self.create_then_select_channel(eid).await;
@@ -68,8 +69,8 @@ impl ExpertRegistryImpl {
         }
     }
 
-    async fn select_random(&mut self, eid: String) -> EKResult<Channel> {
-        let channels = self.channels.get_mut(&eid);
+    async fn select_random(&mut self, eid: ExpertIdRef<'_>) -> EKResult<Channel> {
+        let channels = self.channels.get_mut(eid);
         if let Some(channels) = channels {
             if channels.is_empty() {
                 return self.create_then_select_channel(eid).await;
@@ -81,7 +82,7 @@ impl ExpertRegistryImpl {
         }
     }
 
-    async fn create_then_select_channel(&mut self, eid: String) -> EKResult<Channel> {
+    async fn create_then_select_channel(&mut self, eid: ExpertIdRef<'_>) -> EKResult<Channel> {
         let nodes = self.reader.node_by_expert(&eid).await?;
         for node in nodes {
             let addr = node.config["addr"].as_str().unwrap().to_owned();
@@ -92,9 +93,9 @@ impl ExpertRegistryImpl {
                 ch: channel,
                 host_id: node.hostname.clone(),
             };
-            self.channels.insert(eid.clone(), vec![meta]);
+            self.channels.insert(eid.to_owned(), vec![meta]);
         }
-        let res = self.channels.get(&eid).ok_or(EKError::NotFound(format!(
+        let res = self.channels.get(eid).ok_or(EKError::NotFound(format!(
             "no channel found for expert {}",
             eid
         )))?;

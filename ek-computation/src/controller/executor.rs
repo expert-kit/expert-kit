@@ -13,7 +13,10 @@ use tracing::{Instrument, instrument, span};
 
 use crate::{
     backend::{EkTensor, torch::TchTensor},
-    controller::metrics::METRIC_CONTROLLER_INTRA_REQ,
+    controller::{
+        metrics::METRIC_CONTROLLER_INTRA_REQ,
+        registry::{ExpertId, ExpertIdRef},
+    },
     proto::ek::worker::v1,
 };
 
@@ -32,8 +35,6 @@ pub trait Executor {
 type ReqId = u64;
 type GlobalSeqId = u64;
 type LocalSeqIdx = usize;
-
-type ExpertId = String;
 
 struct IngressMeta {
     tensor: Tensor,
@@ -149,20 +150,19 @@ impl NaiveExecutor {
     pub async fn inner_execute(&mut self) -> EKResult<()> {
         let mut tit = PerfTimer::new("inner_execute");
         let mut handles = vec![];
-        let mut chips = vec![];
+        let mut chips: Vec<(ExpertId, Vec<EgressMeta>)> = vec![];
         let settings = get_ek_settings();
 
-        for egress_req in self.pending_egress.iter() {
-            chips.push((egress_req.0.clone(), (egress_req.1.to_owned())));
-            let exp_id = egress_req.0.clone();
-            let channel = self.registry.lock().await.select(exp_id).await?;
+        for (expert_id, egress_meta) in self.pending_egress.iter() {
+            let expert_id: ExpertIdRef = expert_id.as_ref();
+            chips.push((expert_id.to_owned(), egress_meta.to_owned()));
+            let channel = self.registry.lock().await.select(expert_id).await?;
 
             let mut cli = v1::computation_service_client::ComputationServiceClient::new(channel)
                 .max_decoding_message_size(1024 * 1024 * 1024)
                 .max_encoding_message_size(1024 * 1024 * 1024);
 
-            let seq_gids = egress_req
-                .1
+            let seq_gids = egress_meta
                 .iter()
                 .map(|e| e.seq_gid)
                 .collect::<Vec<GlobalSeqId>>();
@@ -170,11 +170,10 @@ impl NaiveExecutor {
             let egress_tensor = self.assemble_seq_tensors(seq_gids)?;
             log::debug!("egress tensor shape={:?}", egress_tensor.size());
             let serialized_tensor = TchTensor::from(egress_tensor).serialize();
-            let seqs = egress_req
-                .1
+            let seqs = egress_meta
                 .iter()
                 .map(|_e| v1::forward_req::SequenceInfo {
-                    experts: vec![egress_req.0.clone()],
+                    experts: vec![expert_id.to_owned()],
                 })
                 .collect::<Vec<_>>();
 
@@ -209,8 +208,8 @@ impl NaiveExecutor {
             handles.push(f);
         }
 
-        for (egress_idx, _) in &chips {
-            self.pending_egress.remove(egress_idx);
+        for (expert_id, _) in &chips {
+            self.pending_egress.remove(expert_id);
         }
         tit.stop("egress_req_sent");
 
