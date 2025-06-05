@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, sync::Arc, time};
+use std::{collections::BTreeMap, fmt, sync::Arc, time};
 
 use ek_base::{
     config::get_ek_settings,
@@ -9,6 +9,7 @@ use once_cell::sync::OnceCell;
 use safetensors::SafeTensors;
 use tch::{IndexOp, Tensor};
 use tokio::sync::{Mutex, mpsc};
+use tracing::{Instrument, instrument, span};
 
 use crate::{
     backend::{EkTensor, torch::TchTensor},
@@ -16,7 +17,7 @@ use crate::{
     proto::ek::worker::v1,
 };
 
-use super::registry::{ExpertRegistry, get_registry};
+use super::registry::{GlobalWorkerRegistry, get_registry};
 
 #[async_trait::async_trait]
 pub trait Executor {
@@ -37,13 +38,12 @@ type ExpertId = String;
 struct IngressMeta {
     tensor: Tensor,
     sender: mpsc::Sender<Arc<v1::ForwardResp>>,
-    // tensor shape: [expert,hidden]
     result: Vec<Vec<Option<Tensor>>>,
 }
 
 unsafe impl Sync for IngressMeta {}
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct EgressMeta {
     req_id: ReqId,
     seq_gid: GlobalSeqId,
@@ -57,7 +57,13 @@ pub struct NaiveExecutor {
     seq_mapping: BTreeMap<GlobalSeqId, (ReqId, LocalSeqIdx)>,
     seq_gid_cursor: u64,
     req_id_cursor: u64,
-    registry: Arc<Mutex<dyn ExpertRegistry + Send + Sync>>,
+    registry: GlobalWorkerRegistry,
+}
+
+impl fmt::Debug for NaiveExecutor {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NaiveExecutor").finish()
+    }
 }
 
 #[async_trait::async_trait]
@@ -81,6 +87,13 @@ impl NaiveExecutor {
     ) -> EKResult<mpsc::Receiver<Arc<v1::ForwardResp>>> {
         let (sender, receiver) = mpsc::channel(1);
         log::debug!("submit request, seq_len {:?}", req.sequences.len());
+        let span = span!(
+            tracing::Level::INFO,
+            "naive_executor_submit",
+            seq_len = req.sequences.len(),
+            instance_id = req.instance_id.as_str()
+        );
+        let _enter = span.enter();
 
         let inp_safetensor = SafeTensors::deserialize(&req.tensor)?;
         let inp_view = inp_safetensor.tensor("data")?;
@@ -132,40 +145,41 @@ impl NaiveExecutor {
         Ok(out)
     }
 
+    #[instrument]
     pub async fn inner_execute(&mut self) -> EKResult<()> {
         let mut tit = PerfTimer::new("inner_execute");
         let mut handles = vec![];
         let mut chips = vec![];
         let settings = get_ek_settings();
-        {
-            for egress_req in self.pending_egress.iter() {
-                chips.push((egress_req.0.clone(), (egress_req.1.to_owned())));
-                let exp_id = egress_req.0.clone();
-                let channel = self.registry.lock().await.select(exp_id).await?;
 
-                let mut cli =
-                    v1::computation_service_client::ComputationServiceClient::new(channel)
-                        .max_decoding_message_size(1024 * 1024 * 1024)
-                        .max_encoding_message_size(1024 * 1024 * 1024);
+        for egress_req in self.pending_egress.iter() {
+            chips.push((egress_req.0.clone(), (egress_req.1.to_owned())));
+            let exp_id = egress_req.0.clone();
+            let channel = self.registry.lock().await.select(exp_id).await?;
 
-                let seq_gids = egress_req
-                    .1
-                    .iter()
-                    .map(|e| e.seq_gid)
-                    .collect::<Vec<GlobalSeqId>>();
+            let mut cli = v1::computation_service_client::ComputationServiceClient::new(channel)
+                .max_decoding_message_size(1024 * 1024 * 1024)
+                .max_encoding_message_size(1024 * 1024 * 1024);
 
-                let egress_tensor = self.assemble_seq_tensors(seq_gids)?;
-                log::debug!("egress tensor shape={:?}", egress_tensor.size());
-                let serialized_tensor = TchTensor::from(egress_tensor).serialize();
-                let seqs = egress_req
-                    .1
-                    .iter()
-                    .map(|_e| v1::forward_req::SequenceInfo {
-                        experts: vec![egress_req.0.clone()],
-                    })
-                    .collect::<Vec<_>>();
+            let seq_gids = egress_req
+                .1
+                .iter()
+                .map(|e| e.seq_gid)
+                .collect::<Vec<GlobalSeqId>>();
 
-                let f = tokio::spawn(async move {
+            let egress_tensor = self.assemble_seq_tensors(seq_gids)?;
+            log::debug!("egress tensor shape={:?}", egress_tensor.size());
+            let serialized_tensor = TchTensor::from(egress_tensor).serialize();
+            let seqs = egress_req
+                .1
+                .iter()
+                .map(|_e| v1::forward_req::SequenceInfo {
+                    experts: vec![egress_req.0.clone()],
+                })
+                .collect::<Vec<_>>();
+
+            let f = tokio::spawn(
+                async move {
                     let req = v1::ForwardReq {
                         // TODO: hardcode instance id.
                         instance_id: "0".into(),
@@ -176,7 +190,6 @@ impl NaiveExecutor {
                         let start = time::Instant::now();
                         let _d = Defers::defer(Box::new(move || {
                             let elapsed = start.elapsed();
-
                             // TODO: hardcode metric name
                             METRIC_CONTROLLER_INTRA_REQ
                                 .with_label_values(&[settings.inference.model_name.as_str()])
@@ -190,9 +203,10 @@ impl NaiveExecutor {
                                 e
                             })
                     }
-                });
-                handles.push(f);
-            }
+                }
+                .in_current_span(),
+            );
+            handles.push(f);
         }
 
         for (egress_idx, _) in &chips {
@@ -280,6 +294,7 @@ impl NaiveExecutor {
         }
     }
 
+    #[instrument(skip(self, req))]
     fn break_down_to_egress(&mut self, req: &v1::ForwardReq, req_id: ReqId) {
         for (idx, seq) in req.sequences.iter().enumerate() {
             // update pending_seq

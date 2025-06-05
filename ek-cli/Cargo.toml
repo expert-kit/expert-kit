@@ -10,7 +10,6 @@ ek_db = { path = "../ek-db" }
 ek_computation = { path = "../ek-computation" }
 ek_base = { path = "../ek-base" }
 tokio = { workspace = true }
-pretty_env_logger = { workspace = true }
 log = { workspace = true }
 env_logger = { workspace = true }
 
@@ -27,4 +26,11 @@ safetensors = { workspace = true }
 prost = { workspace = true }
 ort = { workspace = true }
 
-tonic = {workspace = true}
+tonic = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+tracing-opentelemetry = { workspace = true }
+opentelemetry = { workspace = true }
+opentelemetry_sdk = { workspace = true }
+opentelemetry-otlp = { workspace = true }
+opentelemetry-semantic-conventions = { workspace = true }

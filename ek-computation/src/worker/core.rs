@@ -1,12 +1,14 @@
 use super::manager::{ExpertDB, get_expert_db};
 use crate::{
-    backend::{torch::TchTensor, EkTensor}, proto::ek
+    backend::{EkTensor, torch::TchTensor},
+    proto::ek,
 };
 use core::fmt;
 use ek_base::error::EKResult;
 use once_cell::sync::OnceCell;
 use std::sync::Arc;
 use tokio::sync::RwLock;
+use tracing::instrument;
 
 pub struct EKInstanceGate {
     experts: Arc<RwLock<dyn ExpertDB + Send + Sync>>,
@@ -44,6 +46,7 @@ impl EKInstanceGate {
     pub async fn current_experts(&self) -> EKResult<Vec<String>> {
         self.experts.read().await.keys().await
     }
+    #[instrument]
     pub async fn forward(
         &self,
         req: ek::worker::v1::ForwardReq,

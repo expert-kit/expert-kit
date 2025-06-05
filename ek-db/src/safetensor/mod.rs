@@ -153,10 +153,13 @@ impl SafeTensorDB {
         // cache miss: load from weight server
         let start = std::time::Instant::now();
         let res: Buffer = self.load_from_weight_srv(desc).await?;
+        let server_addr = desc.as_object_key().clone();
+        let server_addr = server_addr.as_str();
+        let elapsed_ms = start.elapsed().as_millis();
         log::debug!(
-            "loaded from weight server: {}, elapsed_ms={}",
-            desc.as_object_key(),
-            start.elapsed().as_millis()
+            server_addr,
+            elapsed_ms;
+            "loaded from weight server "
         );
         self.data.insert(&key, res.to_bytes());
         let to_cache = res.clone();

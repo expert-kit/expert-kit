@@ -264,7 +264,6 @@ mod test {
 
         assert!(session.inputs.len() == 1);
         assert!(session.outputs.len() == 1);
-        dbg!("output", &session.outputs);
         let meta = session.metadata().expect("should have metadata");
         assert_eq!(meta.producer().expect("should have producer"), "expert-kit");
     }

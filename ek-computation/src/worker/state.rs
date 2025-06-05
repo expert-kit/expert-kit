@@ -189,9 +189,10 @@ impl StateClient {
         }
 
         js.join_all().await;
+        let elapsed_ms = now.elapsed().as_millis();
         log::info!(
-            "experts is loaded. elapsed_ms={}",
-            now.elapsed().as_millis()
+            elapsed_ms;
+            "experts is loaded.",
         );
         Ok(())
     }
@@ -221,7 +222,7 @@ impl StateInspector {
         let rg = self.edb.read().await;
         let loaded = rg.loaded();
         let loading = rg.loading();
-        log::info!("loading progress: loaded={} loading={} ", loaded, loading,);
+        log::info!(loaded, loading; "loading progress");
         METRIC_WORKER_EXPERT_LOADING
             .with_label_values(&[
                 settings.worker.id.as_str(),

@@ -80,7 +80,8 @@ impl StatePollerImpl {
             })
             .collect::<Vec<NodeWithExperts>>();
         let mut lg = DISPATCHER.lock().await;
-        log::info!("state poller got {} nodes", node_with_expert.len());
+        let nodes_count = node_with_expert.len();
+        log::info!(nodes_count; "polling nodes");
         lg.update(node_with_expert).await;
 
         Ok(())

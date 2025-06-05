@@ -158,7 +158,13 @@ def intercept_moe(ek_addr: str | None, model_name: str):
 
 @torch.no_grad()
 @torch.inference_mode()
-def evaluate(model_path=str, ek_addr: str | None = None, model_name: str = "", batch=1):
+def evaluate(
+    model_path=str,
+    ek_addr: str | None = None,
+    model_name: str = "",
+    batch=1,
+    listen=False,
+):
 
     intercept_missing()
     intercept_moe(ek_addr=ek_addr, model_name=model_name)
@@ -196,19 +202,27 @@ def evaluate(model_path=str, ek_addr: str | None = None, model_name: str = "", b
 
     import time
 
-    start = time.time()
-
-    model_inputs = tokenizer(
-        batch_messages, return_tensors="pt", padding=True, truncation=True
-    ).to(model.device)
-    print(f"123, {model_inputs}")
-    generated_ids = model.generate(
-        **model_inputs, max_new_tokens=1, pad_token_id=tokenizer.eos_token_id
-    )
-    now = time.time()
-    output_ids = generated_ids[0].tolist()
-
-    generation_time = now - start
+    while True:
+        try:
+            start = time.time()
+            model_inputs = tokenizer(
+                batch_messages, return_tensors="pt", padding=True, truncation=True
+            ).to(model.device)
+            generated_ids = model.generate(
+                **model_inputs, max_new_tokens=1, pad_token_id=tokenizer.eos_token_id
+            )
+            now = time.time()
+            output_ids = generated_ids[0].tolist()
+            generation_time = now - start
+        except Exception as e:
+            print(f"Error during generation: {e}")
+        if listen:
+            inp = input("Press Enter to start the evaluation...")
+            if inp == "exit":
+                print("Exiting evaluation.")
+                return
+        else:
+            break
 
     total_input_tokens = model_inputs.input_ids.numel()
     total_output_tokens = generated_ids.numel() - total_input_tokens
@@ -230,6 +244,12 @@ def evaluate(model_path=str, ek_addr: str | None = None, model_name: str = "", b
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
+
+    parser.add_argument(
+        "--listen",
+        help="",
+        action="store_true",
+    )
     parser.add_argument(
         "--model_path",
         type=str,
@@ -260,4 +280,5 @@ if __name__ == "__main__":
         ek_addr=args.ek_addr,
         model_name=args.model_name,
         batch=args.seq,
+        listen=args.listen,
     )
