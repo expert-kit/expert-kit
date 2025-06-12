@@ -1,5 +1,3 @@
-#![feature(f16)]
-
 mod bench;
 use std::{
     fs::File,

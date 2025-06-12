@@ -1,10 +1,9 @@
-use std::random::random;
-
 use ek_base::{
     config::get_ek_settings,
     error::{EKError, EKResult},
 };
 use ek_db::{safetensor::ExpertKey, weight_srv::client::WeightSrvClient};
+use rand::random;
 use tokio::task::JoinSet;
 
 use crate::{

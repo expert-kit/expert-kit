@@ -1,4 +1,3 @@
-#![feature(random)]
 use std::{env, mem::transmute, path::PathBuf};
 mod db;
 mod doctor;

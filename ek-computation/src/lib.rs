@@ -1,7 +1,3 @@
-#![feature(pattern)]
-#![feature(random)]
-#![feature(test)]
-
 pub mod backend;
 pub mod controller;
 pub mod ffn;

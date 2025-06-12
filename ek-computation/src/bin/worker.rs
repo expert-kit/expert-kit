@@ -1,4 +1,3 @@
-#![feature(pattern)]
 use ek_base::error::EKResult;
 use ek_computation::worker::worker_main;
 

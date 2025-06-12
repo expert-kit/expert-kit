@@ -1,4 +1,4 @@
-use std::{path::PathBuf, random::random, str::FromStr};
+use std::{path::PathBuf, str::FromStr};
 
 use clap::Subcommand;
 use ek_base::{
@@ -16,6 +16,7 @@ use ek_computation::{
 use ek_db::{safetensor::ExpertKey, weight_srv::client::WeightSrvClient};
 use indicatif::ProgressBar;
 use log::info;
+use rand::random;
 use serde::Deserialize;
 use tokio::task::JoinSet;
 use tonic::transport::Endpoint;

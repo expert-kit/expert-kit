@@ -142,8 +142,6 @@ mod test {
     use ek_base::utils::workspace_root;
     use safetensors::SafeTensors;
     use tch::IndexOp;
-    use test::Bencher;
-    extern crate test;
 
     use crate::{
         backend::{Device, EkTensor},
@@ -217,17 +215,5 @@ mod test {
             .abs()
             .double_value(&[]);
         assert!(diff < 0.2);
-    }
-
-    #[bench]
-    fn pressure_test(b: &mut Bencher) {
-        let tv1 = tch::Tensor::randn(vec![7168, 2048], (tch::Kind::Float, tch::Device::Cpu));
-        let tv2 = tch::Tensor::randn(vec![56, 16], (tch::Kind::Float, tch::Device::Cpu));
-        let _ = w8a16_activate(&tv1, &tv2, 128);
-        let _ = w8a16_activate(&tv1, &tv2, 128);
-        let _ = w8a16_activate(&tv1, &tv2, 128);
-        b.iter(|| {
-            let _ = w8a16_activate(&tv1, &tv2, 128);
-        });
     }
 }

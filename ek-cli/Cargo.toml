@@ -15,6 +15,7 @@ ek_base = { path = "../ek-base" }
 
 tokio = { workspace = true }
 log = { workspace = true }
+rand = { workspace = true }
 env_logger = { workspace = true }
 
 diesel = { workspace = true }

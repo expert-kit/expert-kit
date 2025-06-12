@@ -53,6 +53,12 @@ tower = { workspace = true }
 [build-dependencies]
 tonic-build = "*"
 
+[dev-dependencies]
+criterion = { workspace = true }
 
 [lib]
 crate-type = ["cdylib", "staticlib", "rlib"]
+
+[[bench]]
+name = "activate"
+harness = false
