@@ -153,10 +153,13 @@ impl NaiveExecutor {
         let mut chips: Vec<(ExpertId, Vec<EgressMeta>)> = vec![];
         let settings = get_ek_settings();
 
-        for (expert_id, egress_meta) in self.pending_egress.iter() {
+        while let Some((expert_id, egress_meta)) = self.pending_egress.pop_first() {
             let expert_id: ExpertIdRef = expert_id.as_ref();
+            let Ok(channel) = self.registry.lock().await.select(expert_id).await else {
+                log::warn!("failed to select channel for expert {}", expert_id);
+                continue;
+            };
             chips.push((expert_id.to_owned(), egress_meta.to_owned()));
-            let channel = self.registry.lock().await.select(expert_id).await?;
 
             let mut cli = v1::computation_service_client::ComputationServiceClient::new(channel)
                 .max_decoding_message_size(1024 * 1024 * 1024)
@@ -208,9 +211,6 @@ impl NaiveExecutor {
             handles.push(f);
         }
 
-        for (expert_id, _) in &chips {
-            self.pending_egress.remove(expert_id);
-        }
         tit.stop("egress_req_sent");
 
         for (egress_idx, handle) in handles.into_iter().enumerate() {
