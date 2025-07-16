@@ -39,15 +39,10 @@ pub struct EKInstance {
 impl Default for EKInstance {
     fn default() -> Self {
         let settings = get_ek_settings();
-        let count = INSTANCE_COUNTER.fetch_add(1, Ordering::SeqCst);
-        let device = if count < 2048 {
-            Device::CUDA(1)
-        } else if count < 4096 {
-            Device::CUDA(2)
-        } else {
-            Device::CUDA(3)
-        };
-        // let device = Device::CPU;
+        let _ = INSTANCE_COUNTER.fetch_add(1, Ordering::SeqCst);
+
+        let device = Device::from(settings.worker.device.as_str());        
+
         Self {
             hidden: settings.inference.hidden_dim,
             intermediate: settings.inference.intermediate_dim,

@@ -29,6 +29,20 @@ impl std::fmt::Display for Device {
     }
 }
 
+impl From<&str> for Device {
+    fn from(value: &str) -> Self {
+        let str_dev = value.to_lowercase();
+        if str_dev == "cpu" {
+            Device::CPU
+        } else if str_dev.starts_with("cuda") {
+            let idx = str_dev[4..].parse::<usize>().unwrap_or(0);
+            Device::CUDA(idx)
+        } else {
+            panic!("Unsupported device: {}", value);
+        }
+    }
+}
+
 pub trait EkTensor: Sized {
     fn rand(shape: Vec<usize>, dtype: DType, dev: Device) -> Self;
     fn stack(tensors: &[Self], dim: usize) -> Self;
