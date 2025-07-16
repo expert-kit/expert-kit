@@ -1,5 +1,6 @@
 mod core;
 
+use ek_base::tracing::grpc::OTelGrpcServerMiddleware;
 use state::StateInspector;
 use tokio::select;
 use tokio::signal;
@@ -43,7 +44,12 @@ pub async fn worker_main() -> EKResult<()> {
             .parse()
             .unwrap();
         log::info!("worker server listening on {}", addr);
+        let layer = tower::ServiceBuilder::new()
+            .layer_fn(OTelGrpcServerMiddleware::new)
+            .into_inner();
+
         let err = tonic::transport::Server::builder()
+            .layer(layer)
             .add_service(
                 ComputationServiceServer::new(server)
                     .max_decoding_message_size(200 * 1024 * 1024)

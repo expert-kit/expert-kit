@@ -51,8 +51,6 @@ impl StateClient {
 
     async fn get_request_stream(worker_id: String) -> impl Stream<Item = ExchangeReq> {
         let settings = get_ek_settings();
-        let dev = settings.worker.device.clone();
-        let dev = dev.unwrap_or("cpu".to_string());
         tokio_stream::iter(1..usize::MAX).map(move |_| ExchangeReq {
             id: worker_id.clone(),
             addr: format!(
@@ -60,7 +58,7 @@ impl StateClient {
                 settings.worker.broadcast, settings.worker.ports.main
             ),
             channel: "grpc".to_string(),
-            device: dev.clone(),
+            device: settings.worker.device.clone(),
             last_will: false,
         })
     }
@@ -189,9 +187,10 @@ impl StateClient {
         }
 
         js.join_all().await;
+        let elapsed_ms = now.elapsed().as_millis();
         log::info!(
-            "experts is loaded. elapsed_ms={}",
-            now.elapsed().as_millis()
+            elapsed_ms;
+            "experts is loaded.",
         );
         Ok(())
     }
@@ -221,7 +220,7 @@ impl StateInspector {
         let rg = self.edb.read().await;
         let loaded = rg.loaded();
         let loading = rg.loading();
-        log::info!("loading progress: loaded={} loading={} ", loaded, loading,);
+        log::info!(loaded, loading; "loading progress");
         METRIC_WORKER_EXPERT_LOADING
             .with_label_values(&[
                 settings.worker.id.as_str(),

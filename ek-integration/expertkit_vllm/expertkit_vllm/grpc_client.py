@@ -1,7 +1,6 @@
 import grpc
+import os
 import torch
-import io
-import numpy as np
 
 # import safetensors
 import safetensors.torch as st
@@ -14,13 +13,14 @@ MAX_MESSAGE_LENGTH = 1024 * 1024 * 1024  # 100 MB
 
 
 class ExpertKitClient:
-    def __init__(self, expertkit_addr: str, timeout_sec: float = 2.0):
+    def __init__(self, expertkit_addr: str = "", timeout_sec: float = 2.0):
         """Initialize ExpertKit gRPC client with configurable timeout.
 
         Args:
             expertkit_addr: Address of the ExpertKit service (host:port)
             timeout_sec: gRPC timeout in seconds (default: 2.0s)
         """
+        print(f"🚀 ExpertKitClient Init: ek_addr({expertkit_addr}), timeout({timeout_sec}s)")
         self.channel = grpc.insecure_channel(
             expertkit_addr,
             options=[

@@ -3,6 +3,7 @@ use expert_ort::OnnxFFN;
 use expert_torch::TorchFFN;
 use meta::{Expert, ExpertWeight};
 use safetensors::tensor::TensorView;
+use tracing::instrument;
 
 use crate::{
     backend::{EkTensor, torch::TchTensor},
@@ -36,6 +37,7 @@ impl ExpertBackend {
 }
 
 impl ExpertBackend {
+    #[instrument(skip(self, view))]
     pub fn forward(&self, view: &TensorView) -> EKResult<TchTensor> {
         match self {
             ExpertBackend::Torch(exp) => {

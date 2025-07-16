@@ -23,3 +23,11 @@ serde = { workspace = true }
 ort = { workspace = true }
 
 gethostname = "1.0.1"
+
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+tracing-opentelemetry = { workspace = true }
+opentelemetry = { workspace = true }
+tower = { workspace = true }
+http = { workspace = true }

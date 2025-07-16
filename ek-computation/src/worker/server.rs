@@ -27,6 +27,16 @@ impl BasicExpertImpl {
 #[tonic::async_trait]
 impl ComputationService for BasicExpertImpl {
     async fn forward(&self, request: Request<ForwardReq>) -> Result<Response<ForwardResp>, Status> {
+        self.inner_forward(request).await
+    }
+}
+
+impl BasicExpertImpl {
+    #[inline]
+    async fn inner_forward(
+        &self,
+        request: Request<ForwardReq>,
+    ) -> Result<Response<ForwardResp>, Status> {
         log::info!(
             "forward request: seq={} exp={}",
             request.get_ref().sequences.len(),
@@ -43,14 +53,19 @@ impl ComputationService for BasicExpertImpl {
                 request.get_ref().sequences[0].experts[0].as_str(),
             ])
             .inc_by(request.get_ref().sequences.len() as u64);
-
-        log::info!(
-            "expert activation: worker_id={} model_name={} expert={} count={}",
-            settings.worker.id,
-            settings.inference.model_name,
-            request.get_ref().sequences[0].experts[0],
-            request.get_ref().sequences.len()
-        );
+        {
+            let worker_id = settings.worker.id.as_str();
+            let model = settings.inference.model_name.as_str();
+            let expert = request.get_ref().sequences[0].experts[0].as_str();
+            let count = request.get_ref().sequences.len();
+            log::info!(
+                worker_id:%,
+                model:%,
+                expert:%,
+                count:%
+                ; "expert activation",
+            );
+        }
 
         Defers::defer(Box::new(move || {
             let elapsed = start_cloned.elapsed();
@@ -66,9 +81,10 @@ impl ComputationService for BasicExpertImpl {
             log::error!("forward error {:?}", e);
             Status::internal("forward error")
         })?;
+        let elapsed_ms = start.elapsed().as_millis();
         log::info!(
-            "forward request: elapsed_ms={:?}",
-            start.elapsed().as_millis()
+            elapsed_ms;
+            "forward request in worker",
         );
 
         Ok(Response::new(res))

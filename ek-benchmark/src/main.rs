@@ -22,7 +22,6 @@ use ek_computation::{
     x,
 };
 use polars::prelude::ParquetWriter;
-extern crate pretty_env_logger;
 #[macro_use]
 extern crate log;
 
@@ -75,7 +74,6 @@ fn main() {
             std::env::set_var("RUST_LOG", "Debug");
         }
     }
-    pretty_env_logger::init();
     let expert_count = m.experts;
     let mut experts: Vec<ExpertBenchmark> = vec![];
     let instance = ek_computation::x::EKInstance {

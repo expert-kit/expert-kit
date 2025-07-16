@@ -1,21 +1,27 @@
 use std::{collections::HashMap, sync::Arc};
 
-use ek_base::error::{EKError, EKResult};
+use ek_base::{
+    error::{EKError, EKResult},
+    tracing::grpc::OTelGrpcClientMiddleware,
+};
 use ndarray_rand::rand;
 use once_cell::sync::OnceCell;
 use tokio::sync::Mutex;
 use tonic::transport::Channel;
+use tower::ServiceBuilder;
 
 use crate::state::io::{StateReader, StateReaderImpl};
 
+pub type ExpertId = String;
+pub type ExpertIdRef<'a> = &'a str;
+
 #[async_trait::async_trait]
 pub trait ExpertRegistry {
-    async fn select(&mut self, eid: String) -> EKResult<Channel>;
+    type T;
+    async fn select(&mut self, eid: ExpertIdRef<'_>) -> EKResult<Self::T>;
     async fn reset(&mut self) -> EKResult<()>;
     async fn deregister(&mut self, host_id: &str);
 }
-
-type ExpertId = String;
 
 struct ChannelMeta {
     host_id: String,
@@ -29,11 +35,16 @@ pub struct ExpertRegistryImpl {
 
 #[async_trait::async_trait]
 impl ExpertRegistry for ExpertRegistryImpl {
+    type T = OTelGrpcClientMiddleware;
     async fn reset(&mut self) -> EKResult<()> {
         self.inner_reset().await
     }
-    async fn select(&mut self, eid: String) -> EKResult<Channel> {
-        self.inner_select(eid).await
+    async fn select(&mut self, eid: ExpertIdRef<'_>) -> EKResult<Self::T> {
+        let ch = self.inner_select(eid).await?;
+
+        Ok(ServiceBuilder::new()
+            .layer_fn(OTelGrpcClientMiddleware::new)
+            .service(ch))
     }
     async fn deregister(&mut self, host_id: &str) {
         self.inner_deregister(host_id).await;
@@ -46,8 +57,8 @@ impl ExpertRegistryImpl {
         Ok(())
     }
 
-    async fn inner_select(&mut self, eid: String) -> EKResult<Channel> {
-        let channels = self.channels.get(&eid);
+    async fn inner_select(&mut self, eid: ExpertIdRef<'_>) -> EKResult<Channel> {
+        let channels = self.channels.get(eid);
         if let Some(channels) = channels {
             if channels.is_empty() {
                 return self.create_then_select_channel(eid).await;
@@ -58,8 +69,8 @@ impl ExpertRegistryImpl {
         }
     }
 
-    async fn select_random(&mut self, eid: String) -> EKResult<Channel> {
-        let channels = self.channels.get_mut(&eid);
+    async fn select_random(&mut self, eid: ExpertIdRef<'_>) -> EKResult<Channel> {
+        let channels = self.channels.get_mut(eid);
         if let Some(channels) = channels {
             if channels.is_empty() {
                 return self.create_then_select_channel(eid).await;
@@ -71,20 +82,20 @@ impl ExpertRegistryImpl {
         }
     }
 
-    async fn create_then_select_channel(&mut self, eid: String) -> EKResult<Channel> {
+    async fn create_then_select_channel(&mut self, eid: ExpertIdRef<'_>) -> EKResult<Channel> {
         let nodes = self.reader.node_by_expert(&eid).await?;
         for node in nodes {
             let addr = node.config["addr"].as_str().unwrap().to_owned();
             let end = Channel::from_shared(addr)
                 .map_err(|e| EKError::InvalidInput(format!("invalid url for gRPC: {}", e)))?;
-            let ch = end.connect().await?;
+            let channel = end.connect().await?;
             let meta = ChannelMeta {
-                ch,
+                ch: channel,
                 host_id: node.hostname.clone(),
             };
-            self.channels.insert(eid.clone(), vec![meta]);
+            self.channels.insert(eid.to_owned(), vec![meta]);
         }
-        let res = self.channels.get(&eid).ok_or(EKError::NotFound(format!(
+        let res = self.channels.get(eid).ok_or(EKError::NotFound(format!(
             "no channel found for expert {}",
             eid
         )))?;
@@ -120,7 +131,10 @@ impl ExpertRegistryImpl {
     }
 }
 
-pub fn get_registry() -> Arc<Mutex<dyn ExpertRegistry + Send + Sync>> {
+pub type GlobalWorkerRegistry =
+    Arc<Mutex<dyn ExpertRegistry<T = OTelGrpcClientMiddleware> + Send + Sync>>;
+
+pub fn get_registry() -> GlobalWorkerRegistry {
     static INSTANCE: OnceCell<Arc<Mutex<ExpertRegistryImpl>>> = OnceCell::new();
     let res = INSTANCE.get_or_init(|| {
         let inner = ExpertRegistryImpl::new();

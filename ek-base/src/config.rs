@@ -1,4 +1,8 @@
-use std::{net::SocketAddr, path::Path, sync::LazyLock};
+use std::{
+    net::SocketAddr,
+    path::Path,
+    sync::LazyLock,
+};
 
 use config::{Config, Environment};
 use once_cell::sync::OnceCell;
@@ -62,7 +66,7 @@ pub struct WorkerSettings {
     pub listen: String,
     pub broadcast: String,
     pub ports: WorkerPorts,
-    pub device: Option<String>,
+    pub device: String,
     #[serde(default = "default_worker_metrics")]
     pub metrics: String,
 }
@@ -124,8 +128,8 @@ fn default_log_enable() -> bool {
 }
 
 fn default_log_root() -> String {
-    let path = "/var/log/expert-kit".to_string();
-    path
+    
+    "/var/log/expert-kit".to_string()
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -204,6 +208,7 @@ worker:
   broadcast: 0.0.0.0
   ports:
     main: 51234
+  device: cpu
 
 controller:
   listen: 0.0.0.0
