@@ -109,7 +109,7 @@ cargo run --release --bin ek-cli db migrate
 
 # Register the model
 ## ⚠ Warning: Current version, model name parameter must match the last segment of the model path
-cargo run --bin ek-cli model upsert --name deepseek-r1
+cargo run --release --bin ek-cli model upsert --name deepseek-r1
 
 # Schedule the experts (extract expert info from weight, and assign to worker)
 cargo run --release --bin ek-cli schedule static --inventory ./dev/local.inventory.yaml
