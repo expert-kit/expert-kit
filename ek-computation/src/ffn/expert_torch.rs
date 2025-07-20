@@ -230,13 +230,12 @@ mod bench_ffn {
 
     #[test]
     fn bench_transfer() {
-        let tensor = TchTensor::rand(vec![2048, 768], DType::BFloat16, Device::CPU);
-
-        // count
+        // Configs
         let round = 128;                
-
         let cuda_device = Device::CUDA(0);
         let cpu_device = Device::CPU;
+
+        let tensor = TchTensor::rand(vec![2048, 768], DType::BFloat16, cpu_device);
 
         // warm
         tensor.to_device(cuda_device);
@@ -296,6 +295,10 @@ mod bench_ffn {
     // bench performace of torch FFN
     #[test]
     fn bench_torch_ffn_gpu() {
+        // Configs
+        let round = 1024;
+        let batch_sizes: Vec<usize> = vec![1, 4, 16, 64];
+
         // generate a FFN with random weights
         let ffn = TorchFFN {
             dim: 2048,
@@ -304,10 +307,6 @@ mod bench_ffn {
             module: OnceCell::new(),
             device: Device::CUDA(0),
         };
-
-        // count
-        let round = 1024;
-        let batch_sizes: Vec<usize> = vec![1, 4, 16, 64];
 
         for batch_size in batch_sizes{
 
@@ -372,6 +371,10 @@ mod bench_ffn {
     // bench performace of torch FFN
     #[test]
     fn bench_torch_ffn_cpu() {
+        // Configs
+        let round = 1024;
+        let batch_sizes: Vec<usize> = vec![1, 4, 16, 64];
+
         // generate a FFN with random weights
         let ffn = TorchFFN {
             dim: 2048,
@@ -380,10 +383,6 @@ mod bench_ffn {
             module: OnceCell::new(),
             device: Device::CPU,
         };
-
-        // count
-        let round = 1024;
-        let batch_sizes: Vec<usize> = vec![1, 4, 16, 64];
 
         for batch_size in batch_sizes{
 
@@ -445,9 +444,11 @@ mod bench_ffn {
 
     #[test]
     fn bench_torch_ffn_queue_cpu() {
-        // create a queue of FFNs
+        // Configs
         let ffn_count = 256;
         let mut ffns = Vec::new();
+        let round = 1;
+        let batch_sizes: Vec<usize> = vec![1, 4, 16, 64];
         
         for _ in 0..ffn_count {
             let ffn = TorchFFN {
@@ -459,9 +460,6 @@ mod bench_ffn {
             };
             ffns.push(ffn);
         }
-
-        let round = 1;
-        let batch_sizes: Vec<usize> = vec![8];
 
         for batch_size in batch_sizes {
             run_ffn_queue_benchmark(&ffns, batch_size, round);
