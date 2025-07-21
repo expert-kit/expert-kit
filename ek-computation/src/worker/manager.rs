@@ -24,6 +24,7 @@ pub trait ExpertDB {
 }
 
 /// Sync trait for expert database operations (used for compute operations)
+#[expect(unused)]
 pub trait ExpertDBSync {
     fn remove(&mut self, id: &str) -> EKResult<()>;
     fn insert(&mut self, id: &str, backend: ExpertBackend) -> EKResult<()>;

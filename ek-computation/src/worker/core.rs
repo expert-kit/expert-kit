@@ -9,7 +9,6 @@ use once_cell::sync::OnceCell;
 use std::sync::Arc;
 use tokio;
 use tracing::instrument;
-use tracing_opentelemetry::{OpenTelemetrySpanExt};
 
 /// Async version of EKInstanceGate for non-compute operations
 pub struct EKInstanceGateAsync {
@@ -158,6 +157,7 @@ impl EKInstanceGateSync {
     }
 
     /// Get list of currently loaded experts (sync version)
+    #[expect(unused)]
     pub fn current_experts_sync(&self) -> EKResult<Vec<String>> {
         let experts_guard = self.experts.read().unwrap();
         experts_guard.keys()
