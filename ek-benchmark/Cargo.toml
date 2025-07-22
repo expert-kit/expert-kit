@@ -11,14 +11,7 @@ repository = { workspace = true }
 ek-computation = { workspace = true }
 
 clap = { workspace = true }
-half = { workspace = true }
 log = { workspace = true }
-ndarray = { workspace = true }
-ndarray-rand = { workspace = true }
 ort = { workspace = true }
 polars = { workspace = true }
-polars-io = { workspace = true }
-rand = { workspace = true }
-rand_distr = { workspace = true }
 sysinfo = { workspace = true }
-tch = { workspace = true }

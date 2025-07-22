@@ -10,39 +10,27 @@ repository = { workspace = true }
 [dependencies]
 ek-base = { workspace = true }
 ek-db = { workspace = true }
-
-actix-http = { workspace = true }
 actix-web = { workspace = true }
-async-channel = { workspace = true }
 async-trait = { workspace = true }
-bytes = { workspace = true }
 clap = { workspace = true }
 diesel = { workspace = true }
 diesel-async = { workspace = true }
 env_logger = { workspace = true }
-float8 = { workspace = true }
 half = { workspace = true }
 lazy_static = { workspace = true }
 log = { workspace = true }
 mime = { workspace = true }
 ndarray = { workspace = true }
 ndarray-rand = { workspace = true }
-object_store = { workspace = true }
-object_store_opendal = { workspace = true }
 once_cell = { workspace = true }
-opendal = { workspace = true }
 ort = { workspace = true }
-polars = { workspace = true }
-polars-io = { workspace = true }
 prometheus = { workspace = true }
 prost = { workspace = true }
 rand = { workspace = true }
 rand_distr = { workspace = true }
-rmp-serde = { workspace = true }
 safetensors = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-sysinfo = { workspace = true }
 tch = { workspace = true }
 tokio = { workspace = true }
 tokio-stream = { workspace = true }
@@ -51,7 +39,6 @@ tonic = { workspace = true }
 tower = { workspace = true }
 tracing = { workspace = true }
 tracing-opentelemetry = { workspace = true }
-tracing-subscriber = { workspace = true }
 
 
 [build-dependencies]
