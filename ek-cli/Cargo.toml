@@ -1,41 +1,39 @@
 [package]
 name = "ek-cli"
-version = "0.1.0"
-edition = "2024"
+version = { workspace = true }
+edition = { workspace = true }
+authors = { workspace = true }
+license = { workspace = true }
+readme = { workspace = true }
+repository = { workspace = true }
 
 [dependencies]
-
-libc = { workspace = true }
-num_cpus = { workspace = true }
+ek-base = { workspace = true }
+ek-computation = { workspace = true }
+ek-db = { workspace = true }
 
 clap = { workspace = true }
-ek_db = { path = "../ek-db" }
-ek_computation = { path = "../ek-computation" }
-ek_base = { path = "../ek-base" }
-
-tokio = { workspace = true }
-log = { workspace = true }
-rand = { workspace = true }
-env_logger = { workspace = true }
-
 diesel = { workspace = true }
 diesel-async = { workspace = true }
-diesel_migrations = "2.2.0"
-
-serde_json = { workspace = true }
-serde = { workspace = true }
-serde_yaml = "0.9.34"
-indicatif = "0.17.11"
-
-safetensors = { workspace = true }
-prost = { workspace = true }
-ort = { workspace = true }
-
-tonic = { workspace = true }
-tracing = { workspace = true }
-tracing-subscriber = { workspace = true }
-tracing-opentelemetry = { workspace = true }
+diesel_migrations = { workspace = true }
+env_logger = { workspace = true }
+indicatif = { workspace = true }
+libc = { workspace = true }
+log = { workspace = true }
+num_cpus = { workspace = true }
 opentelemetry = { workspace = true }
 opentelemetry_sdk = { workspace = true }
 opentelemetry-otlp = { workspace = true }
 opentelemetry-semantic-conventions = { workspace = true }
+ort = { workspace = true }
+prost = { workspace = true }
+rand = { workspace = true }
+safetensors = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml = { workspace = true }
+tokio = { workspace = true }
+tonic = { workspace = true }
+tracing = { workspace = true }
+tracing-opentelemetry = { workspace = true }
+tracing-subscriber = { workspace = true }
