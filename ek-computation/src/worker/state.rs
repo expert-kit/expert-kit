@@ -32,14 +32,14 @@ pub struct StateClient {
     tensor_db: Arc<RwLock<SafeTensorDB>>,
     expert_db: Arc<RwLock<dyn ExpertDB + Sync + Send + 'static>>,
     worker_id: String,
-    gate_async: GlobalEKInstanceGateAsync,  // Use async gate for state management
+    gate_async: GlobalEKInstanceGateAsync, // Use async gate for state management
     controller_addr: Endpoint,
 }
 
 impl StateClient {
     pub fn new(addr: Endpoint, worker_id: &str) -> Self {
         let edb = get_expert_db();
-        let gate_async = get_instance_gate();  // Use async gate for state operations
+        let gate_async = get_instance_gate(); // Use async gate for state operations
         let tdb = SafeTensorDB::new_shared();
         Self {
             tensor_db: tdb,
@@ -232,7 +232,7 @@ impl StateInspector {
         let loaded = rg.loaded();
         let loading = rg.loading();
         log::info!(loaded, loading; "loading progress");
-        
+
         // Update metrics
         METRIC_WORKER_EXPERT_LOADING
             .with_label_values(&[

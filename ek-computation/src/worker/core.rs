@@ -74,7 +74,7 @@ impl EKInstanceGateAsync {
         let edb = get_expert_db();
         EKInstanceGateAsync { experts: edb }
     }
-    
+
     /// Get list of currently loaded experts (async version for state management)
     pub async fn current_experts(&self) -> EKResult<Vec<String>> {
         self.experts.read().await.keys().await
@@ -106,7 +106,7 @@ impl EKInstanceGateSync {
         assert!(!req.sequences.is_empty());
         assert!(req.sequences[0].experts.len() == 1);
         let exp_id = &req.sequences[0].experts[0];
-        
+
         // Load expert synchronously from shared database
         let exp = {
             let experts_guard = self.experts.read().unwrap();
@@ -114,16 +114,13 @@ impl EKInstanceGateSync {
         };
 
         let now = std::time::Instant::now();
-        tracing::debug!(
-            "[L3 {:?}] exp_backend.forward_sync() started",
-            exp_id,
-        );
+        tracing::debug!("[L3 {:?}] exp_backend.forward_sync() started", exp_id,);
 
         // Perform synchronous computation
         let st = safetensors::SafeTensors::deserialize(&input_tensor).unwrap();
         let tv = st.tensor("data")?;
         let res = exp.forward(&tv)?;
-        
+
         tracing::debug!(
             "[L3 {:?}] exp_backend.forward_sync() completed in {:?}",
             exp_id,
@@ -135,14 +132,14 @@ impl EKInstanceGateSync {
         let size = output_tensor.size();
         let kind = output_tensor.kind();
         let output_bytes = TchTensor::from(output_tensor).serialize();
-        
+
         tracing::debug!(
             "output shape={:?} dtype={:?} bytes_len={}",
             size,
             kind,
             output_bytes.len()
         );
-        
+
         let resp = ek::worker::v1::ForwardResp {
             output_tensor: output_bytes,
         };

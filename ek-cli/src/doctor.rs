@@ -43,7 +43,9 @@ impl Doctor {
                 handle: tokio::spawn(async move {
                     let settings = get_ek_settings();
                     let rcli = StateReaderImpl::default();
-                    let res = rcli.instance_by_name(&settings.inference.instance_name).await?;
+                    let res = rcli
+                        .instance_by_name(&settings.inference.instance_name)
+                        .await?;
                     if res.is_none() {
                         return Err(EKError::NotFound(format!(
                             "instance {} not found",

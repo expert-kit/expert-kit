@@ -5,8 +5,9 @@ mod model;
 mod pretrain;
 mod schedule;
 
-mod onnx;
 mod affinity;
+mod onnx;
+use affinity::try_apply_cpu_affinity;
 use db::execute_db;
 use doctor::doctor_main;
 use ek_base::config::get_ek_settings_base;
@@ -15,7 +16,6 @@ use env_logger::fmt::default_kv_format;
 use opentelemetry::{
     KeyValue, propagation::TextMapCompositePropagator, trace::TracerProvider as _,
 };
-use affinity::try_apply_cpu_affinity;
 use std::io::Write;
 
 use tokio::runtime::Runtime;
@@ -183,7 +183,7 @@ fn get_command_name(cmd: &Command) -> &'static str {
     }
 }
 
-const DEFAULT_THREAD_NUM:usize = 48;
+const DEFAULT_THREAD_NUM: usize = 48;
 
 /// Init tokio runtime based on command
 fn init_tokio_runtime(command: &Command) -> Result<Runtime, std::io::Error> {
@@ -196,20 +196,24 @@ fn init_tokio_runtime(command: &Command) -> Result<Runtime, std::io::Error> {
             } else {
                 log::debug!("✅ CPU affinity applied before Tokio runtime creation");
             }
-            
+
             // Determine worker thread count based on CPU affinity configuration
             let worker_threads = if let Some(advanced) = &settings.worker.advanced {
                 if let Some(cpu_config) = &advanced.cpu_affinity {
-                    cpu_config.cores.as_ref().map(|cores| cores.len()).unwrap_or_else(|| DEFAULT_THREAD_NUM)
+                    cpu_config
+                        .cores
+                        .as_ref()
+                        .map(|cores| cores.len())
+                        .unwrap_or_else(|| DEFAULT_THREAD_NUM)
                 } else {
                     DEFAULT_THREAD_NUM
                 }
             } else {
                 DEFAULT_THREAD_NUM
             };
-            
+
             log::info!("Creating Tokio runtime with {worker_threads} worker threads");
-            
+
             // TODO: hardcoded threadnum for now, need to be improved later
             // Create runtime with limited worker threads
             tokio::runtime::Builder::new_multi_thread()

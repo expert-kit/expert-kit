@@ -77,7 +77,7 @@ impl<'data> SafetensorCache<'data> {
         let _lg = self.lk.read().unwrap();
         let m = unsafe { &(*self.map.get()) };
         let v = m.get(key);
-        
+
         v.map(|x| x.safetensors())
     }
 
@@ -104,11 +104,10 @@ impl<'data> SafeTensorWithData<'data> {
         }
     }
     pub fn safetensors(&'data self) -> &'data SafeTensors<'data> {
-        
-        (self.st.get_or_init(|| {
-            
-            safetensors::SafeTensors::deserialize(&self.mmap).unwrap()
-        })) as _
+        (self
+            .st
+            .get_or_init(|| safetensors::SafeTensors::deserialize(&self.mmap).unwrap()))
+            as _
     }
 }
 impl Drop for SafeTensorWithData<'_> {

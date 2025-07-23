@@ -10,20 +10,25 @@ use ek_base::utils::Defers;
 use tonic::{Request, Response, Status};
 use tracing::instrument;
 
-use super::core::{GlobalEKInstanceGateAsync, GlobalEKInstanceGateSync, get_instance_gate, get_instance_gate_sync};
-use tracing_opentelemetry::{OpenTelemetrySpanExt};
+use super::core::{
+    GlobalEKInstanceGateAsync, GlobalEKInstanceGateSync, get_instance_gate, get_instance_gate_sync,
+};
+use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 #[derive(Debug, Default)]
 pub struct BasicExpertImpl {
-    _gate_async: GlobalEKInstanceGateAsync,    // For state management operations
-    gate_sync: GlobalEKInstanceGateSync,      // For compute operations
+    _gate_async: GlobalEKInstanceGateAsync, // For state management operations
+    gate_sync: GlobalEKInstanceGateSync,    // For compute operations
 }
 
 impl BasicExpertImpl {
     pub fn new() -> Self {
         let gate_async = get_instance_gate();
         let gate_sync = get_instance_gate_sync();
-        Self { _gate_async: gate_async, gate_sync }
+        Self {
+            _gate_async: gate_async,
+            gate_sync,
+        }
     }
 }
 
@@ -35,12 +40,8 @@ impl ComputationService for BasicExpertImpl {
         let exp_id = request.get_ref().sequences[0].experts[0].clone();
         tracing::debug!("[L1 {:?}] exp received!", &exp_id);
         let res = self.inner_forward(request).await;
-        tracing::debug!(
-            "[L1 {:?}] completed in {:?}",
-            &exp_id,
-            now.elapsed()
-        );
-        res        
+        tracing::debug!("[L1 {:?}] completed in {:?}", &exp_id, now.elapsed());
+        res
     }
 }
 
@@ -69,7 +70,7 @@ impl BasicExpertImpl {
                 request.get_ref().sequences[0].experts[0].as_str(),
             ])
             .inc_by(request.get_ref().sequences.len() as u64);
-        
+
         {
             let worker_id = settings.worker.id.as_str();
             let model = settings.inference.model_name.as_str();
@@ -95,26 +96,23 @@ impl BasicExpertImpl {
                 .observe(elapsed.as_micros() as f64);
         }));
 
-        tracing::debug!(
-            "[L2 {:?}] sync_gate.forward() start",
-            &exp_id,
-        );
+        tracing::debug!("[L2 {:?}] sync_gate.forward() start", &exp_id,);
 
         let forward_now = Instant::now();
         let req_inner = request.into_inner();
-        
+
         // Use sync gate for compute-intensive operations
         let gate_sync = self.gate_sync.clone();
-        
+
         // Capture current tracing context for the blocking task
         let cx = tracing::Span::current().context();
 
         let cx_clone = cx.clone();
-        
+
         // Run synchronous computation in blocking task
         let res = tokio::task::spawn_blocking(move || {
             let _guard = cx_clone.attach();
-            
+
             // Perform synchronous forward computation
             let sync_guard = gate_sync.read().unwrap();
             sync_guard.forward_sync(req_inner)
@@ -141,7 +139,7 @@ impl BasicExpertImpl {
             &exp_id,
             start.elapsed(),
         );
-        
+
         res
     }
 }

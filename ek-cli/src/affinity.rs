@@ -1,11 +1,11 @@
-use std::collections::HashSet;
 use ek_base::config::CpuAffinityConfig;
+use std::collections::HashSet;
 
 /// CPU affinity operations trait for different operating systems
 pub trait CpuAffinityOps {
     /// Apply CPU core affinity
     fn set_cpu_affinity(&self, cores: &[usize]) -> Result<(), String>;
-    
+
     /// Apply NUMA node affinity
     fn set_numa_affinity(&self, numa_nodes: &[usize]) -> Result<(), String>;
 
@@ -15,16 +15,16 @@ pub trait CpuAffinityOps {
 
     /// Check if CPU affinity is supported on this platform
     fn is_cpu_affinity_supported(&self) -> bool;
-    
+
     /// Check if NUMA affinity is supported on this platform
     fn is_numa_affinity_supported(&self) -> bool;
-    
+
     /// Get platform-specific information
     fn get_platform_info(&self) -> String;
-    
+
     /// Get the number of available CPU cores
     fn get_cpu_count(&self) -> usize;
-    
+
     /// Get the number of available NUMA nodes
     fn get_numa_node_count(&self) -> usize;
 }
@@ -36,8 +36,8 @@ pub struct LinuxCpuAffinityOps;
 #[cfg(target_os = "linux")]
 impl CpuAffinityOps for LinuxCpuAffinityOps {
     fn set_cpu_affinity(&self, cores: &[usize]) -> Result<(), String> {
-        use libc::{cpu_set_t, sched_setaffinity, CPU_SET, CPU_ZERO};
-        
+        use libc::{CPU_SET, CPU_ZERO, cpu_set_t, sched_setaffinity};
+
         unsafe {
             let mut cpu_set: cpu_set_t = std::mem::zeroed();
             CPU_ZERO(&mut cpu_set);
@@ -48,7 +48,7 @@ impl CpuAffinityOps for LinuxCpuAffinityOps {
                 }
                 CPU_SET(core, &mut cpu_set);
             }
-            
+
             let result = sched_setaffinity(0, std::mem::size_of::<cpu_set_t>(), &cpu_set);
             if result != 0 {
                 let error = std::io::Error::last_os_error();
@@ -65,24 +65,24 @@ impl CpuAffinityOps for LinuxCpuAffinityOps {
     }
 
     fn get_cpu_affinity(&self) -> Result<Vec<usize>, String> {
-        use libc::{cpu_set_t, sched_getaffinity, CPU_ISSET};
-        
+        use libc::{CPU_ISSET, cpu_set_t, sched_getaffinity};
+
         unsafe {
             let mut cpu_set: cpu_set_t = std::mem::zeroed();
             let result = sched_getaffinity(0, std::mem::size_of::<cpu_set_t>(), &mut cpu_set);
-            
+
             if result != 0 {
                 let error = std::io::Error::last_os_error();
                 return Err(format!("Failed to get CPU affinity: {error}"));
             }
-            
+
             let mut cores = Vec::new();
             for cpu in 0..libc::CPU_SETSIZE as usize {
                 if CPU_ISSET(cpu, &cpu_set) {
                     cores.push(cpu);
                 }
             }
-            
+
             Ok(cores)
         }
     }
@@ -99,11 +99,11 @@ impl CpuAffinityOps for LinuxCpuAffinityOps {
     fn get_platform_info(&self) -> String {
         "Linux".to_string()
     }
-    
+
     fn get_cpu_count(&self) -> usize {
         num_cpus::get()
     }
-    
+
     fn get_numa_node_count(&self) -> usize {
         self.get_available_numa_nodes().len()
     }
@@ -115,86 +115,91 @@ impl LinuxCpuAffinityOps {
     fn set_numa_cpu_affinity(&self, numa_nodes: &[usize]) -> Result<(), String> {
         // Get CPU cores for the specified NUMA nodes
         let mut cpu_cores = Vec::new();
-        
+
         for &node in numa_nodes {
             let node_cpus = self.get_numa_node_cpus(node)?;
             cpu_cores.extend(node_cpus);
         }
-        
+
         if !cpu_cores.is_empty() {
             self.set_cpu_affinity(&cpu_cores)?;
         }
-        
+
         Ok(())
     }
-    
+
     /// Get CPU cores for a specific NUMA node
     fn get_numa_node_cpus(&self, node: usize) -> Result<Vec<usize>, String> {
         let cpulist_path = format!("/sys/devices/system/node/node{node}/cpulist");
-        
+
         let content = std::fs::read_to_string(&cpulist_path)
             .map_err(|e| format!("Failed to read NUMA node {node} CPU list: {e}"))?;
-        
+
         self.parse_cpu_list(content.trim())
     }
-    
+
     /// Parse CPU list format like "0-3,8-11" or "0,2,4"
     fn parse_cpu_list(&self, cpu_list: &str) -> Result<Vec<usize>, String> {
         let mut cpus = Vec::new();
-        
+
         for part in cpu_list.split(',') {
             let part = part.trim();
             if part.is_empty() {
                 continue;
             }
-            
+
             if part.contains('-') {
                 // Range format like "0-3"
                 let range_parts: Vec<&str> = part.split('-').collect();
                 if range_parts.len() != 2 {
                     return Err(format!("Invalid CPU range format: {part}"));
                 }
-                
-                let start: usize = range_parts[0].parse()
+
+                let start: usize = range_parts[0]
+                    .parse()
                     .map_err(|_| format!("Invalid CPU number: {}", range_parts[0]))?;
-                let end: usize = range_parts[1].parse()
+                let end: usize = range_parts[1]
+                    .parse()
                     .map_err(|_| format!("Invalid CPU number: {}", range_parts[1]))?;
-                
+
                 if start > end {
                     return Err(format!("Invalid CPU range: {start} > {end}"));
                 }
-                
+
                 for cpu in start..=end {
                     cpus.push(cpu);
                 }
             } else {
                 // Single CPU number
-                let cpu: usize = part.parse()
+                let cpu: usize = part
+                    .parse()
                     .map_err(|_| format!("Invalid CPU number: {part}"))?;
                 cpus.push(cpu);
             }
         }
-        
+
         cpus.sort_unstable();
         cpus.dedup();
         Ok(cpus)
     }
-    
+
     /// Get available NUMA nodes
     fn get_available_numa_nodes(&self) -> Vec<usize> {
         let mut nodes = Vec::new();
-        
+
         if let Ok(entries) = std::fs::read_dir("/sys/devices/system/node") {
             for entry in entries.flatten() {
                 let name = entry.file_name();
                 let name_str = name.to_string_lossy();
-                
-                if let Some(name_str) = name_str.strip_prefix("node") && let Ok(node_num) = name_str.parse::<usize>() {
+
+                if let Some(name_str) = name_str.strip_prefix("node")
+                    && let Ok(node_num) = name_str.parse::<usize>()
+                {
                     nodes.push(node_num);
                 }
             }
         }
-        
+
         nodes.sort_unstable();
         nodes
     }
@@ -230,11 +235,11 @@ impl CpuAffinityOps for DefaultCpuAffinityOps {
     fn get_platform_info(&self) -> String {
         "Unsupported Platform".to_string()
     }
-    
+
     fn get_cpu_count(&self) -> usize {
         num_cpus::get()
     }
-    
+
     fn get_numa_node_count(&self) -> usize {
         0
     }
@@ -269,10 +274,16 @@ pub fn try_apply_cpu_affinity(settings: &ek_base::config::WorkerSettings) -> Res
 /// Apply CPU affinity settings based on configuration
 pub fn apply_cpu_affinity(config: &CpuAffinityConfig) -> Result<(), String> {
     let ops = get_cpu_affinity_ops();
-    
-    log::info!("Applying CPU affinity settings on platform: {}", ops.get_platform_info());
-    log::info!("Available CPUs: {}, Available NUMA nodes: {}", 
-               ops.get_cpu_count(), ops.get_numa_node_count());
+
+    log::info!(
+        "Applying CPU affinity settings on platform: {}",
+        ops.get_platform_info()
+    );
+    log::info!(
+        "Available CPUs: {}, Available NUMA nodes: {}",
+        ops.get_cpu_count(),
+        ops.get_numa_node_count()
+    );
 
     // Apply CPU core affinity if specified and supported
     if let Some(cores) = &config.cores {
@@ -318,7 +329,7 @@ pub fn validate_cpu_affinity_config(config: &CpuAffinityConfig) -> Result<(), St
             if !unique_cores.insert(core) {
                 return Err(format!("Duplicate CPU core {core} in configuration"));
             }
-            
+
             // Check against actual CPU count
             if core >= cpu_count {
                 return Err(format!(
@@ -339,7 +350,7 @@ pub fn validate_cpu_affinity_config(config: &CpuAffinityConfig) -> Result<(), St
             if !unique_nodes.insert(node) {
                 return Err(format!("Duplicate NUMA node {node} in configuration"));
             }
-            
+
             // Check against actual NUMA node count
             if numa_count > 0 && node >= numa_count {
                 return Err(format!(
@@ -359,11 +370,11 @@ mod tests {
     #[test]
     fn test_cpu_affinity_ops_factory() {
         let ops = get_cpu_affinity_ops();
-        
+
         // Should not panic and should return a valid implementation
         let platform = ops.get_platform_info();
         assert!(!platform.is_empty());
-        
+
         // CPU count should be reasonable
         let cpu_count = ops.get_cpu_count();
         assert!(cpu_count > 0);
@@ -374,16 +385,16 @@ mod tests {
     #[test]
     fn test_linux_parse_cpu_list() {
         let ops = LinuxCpuAffinityOps;
-        
+
         // Test single CPU
         assert_eq!(ops.parse_cpu_list("0").unwrap(), vec![0]);
-        
+
         // Test CPU range
         assert_eq!(ops.parse_cpu_list("0-3").unwrap(), vec![0, 1, 2, 3]);
-        
+
         // Test mixed format
         assert_eq!(ops.parse_cpu_list("0,2-4,7").unwrap(), vec![0, 2, 3, 4, 7]);
-        
+
         // Test invalid formats
         assert!(ops.parse_cpu_list("0-").is_err());
         assert!(ops.parse_cpu_list("a-b").is_err());
@@ -393,7 +404,7 @@ mod tests {
     #[test]
     fn test_platform_support_detection() {
         let ops = get_cpu_affinity_ops();
-        
+
         // Test that the methods don't panic
         let _cpu_support = ops.is_cpu_affinity_supported();
         let _numa_support = ops.is_numa_affinity_supported();
@@ -405,7 +416,7 @@ mod tests {
     #[test]
     fn test_set_cpu_affinity() {
         let ops = get_cpu_affinity_ops();
-        
+
         // Test setting CPU affinity with valid cores
         let result = ops.set_cpu_affinity(&[0, 1, 4]);
         assert!(result.is_ok(), "Failed to set CPU affinity: {result:?}");
@@ -425,11 +436,11 @@ mod tests {
     #[test]
     fn test_set_numa_affinity() {
         let ops = get_cpu_affinity_ops();
-        
+
         // Test setting NUMA affinity with valid nodes
         let result = ops.set_numa_affinity(&[0, 1]);
         assert!(result.is_ok(), "Failed to set NUMA affinity: {result:?}");
-        
+
         // Test setting NUMA affinity with invalid node
         let result = ops.set_numa_affinity(&[9999]);
         assert!(result.is_err(), "Expected error for invalid NUMA node");

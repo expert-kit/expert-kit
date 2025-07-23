@@ -19,19 +19,19 @@ pub async fn load_expert_task(
     expert_key: &ExpertKey,
 ) -> EKResult<()> {
     let expert_str_key = expert_key.as_object_key();
-    
+
     // Mark expert as loading in shared database
     {
         let mut wg = expert_db.write().await;
         wg.mark_loading(&expert_str_key)?;
     }
-    
+
     // Load tensor and build backend
     {
         let rg = tensor_db.read().await;
         let st = rg.load(expert_key).await?;
         let backend = ExpertBackend::build(instance, &st).await?;
-        
+
         // Insert loaded expert into shared database (accessible by both async and sync gates)
         let mut edb_wg = expert_db.write().await;
         edb_wg.insert(&expert_str_key, backend).await?;

@@ -59,12 +59,14 @@ pub struct ExpertDBImplSync {
 /// Get the shared database core instance
 fn get_shared_db_core() -> SharedExpertDB {
     static INSTANCE: OnceCell<SharedExpertDB> = OnceCell::new();
-    INSTANCE.get_or_init(|| {
-        Arc::new(RwLock::new(ExpertDBCore {
-            tree: BTreeMap::new(),
-            loading: HashMap::new(),
-        }))
-    }).clone()
+    INSTANCE
+        .get_or_init(|| {
+            Arc::new(RwLock::new(ExpertDBCore {
+                tree: BTreeMap::new(),
+                loading: HashMap::new(),
+            }))
+        })
+        .clone()
 }
 
 /// Get the async expert database instance
@@ -91,11 +93,11 @@ impl ExpertDBCore {
     fn loading(&self) -> usize {
         self.loading.len()
     }
-    
+
     fn loaded(&self) -> usize {
         self.tree.len()
     }
-    
+
     fn has(&self, id: &str) -> bool {
         let is_loading = self.loading.contains_key(id);
         let is_loaded = self.tree.contains_key(id);
@@ -113,12 +115,12 @@ impl ExpertDBCore {
         *entry = true;
         Ok(true)
     }
-    
+
     fn remove(&mut self, id: &str) -> EKResult<()> {
         self.tree.remove(id);
         Ok(())
     }
-    
+
     fn insert(&mut self, id: &str, backend: ExpertBackend) -> EKResult<()> {
         self.loading.remove(id);
         self.tree.insert(id.to_owned(), Arc::new(backend));
@@ -131,7 +133,7 @@ impl ExpertDBCore {
             .ok_or(EKError::ExpertNotFound(id.to_owned()))
             .cloned()
     }
-    
+
     fn keys(&self) -> EKResult<Vec<String>> {
         Ok(self.tree.keys().cloned().collect())
     }
@@ -147,14 +149,14 @@ impl ExpertDB for ExpertDBImplAsync {
             core.loading()
         })
     }
-    
+
     fn loaded(&self) -> usize {
         tokio::task::block_in_place(|| {
             let core = self.core.blocking_read();
             core.loaded()
         })
     }
-    
+
     fn has(&self, id: &str) -> bool {
         tokio::task::block_in_place(|| {
             let core = self.core.blocking_read();
@@ -168,12 +170,12 @@ impl ExpertDB for ExpertDBImplAsync {
             core.mark_loading(id)
         })
     }
-    
+
     async fn remove(&mut self, id: &str) -> EKResult<()> {
         let mut core = self.core.write().await;
         core.remove(id)
     }
-    
+
     async fn insert(&mut self, id: &str, backend: ExpertBackend) -> EKResult<()> {
         let mut core = self.core.write().await;
         core.insert(id, backend)
@@ -183,7 +185,7 @@ impl ExpertDB for ExpertDBImplAsync {
         let core = self.core.read().await;
         core.load(id)
     }
-    
+
     async fn keys(&self) -> EKResult<Vec<String>> {
         let core = self.core.read().await;
         core.keys()
@@ -195,12 +197,12 @@ impl ExpertDBSync for ExpertDBImplSync {
         let core = self.core.blocking_read();
         core.loading()
     }
-    
+
     fn loaded(&self) -> usize {
         let core = self.core.blocking_read();
         core.loaded()
     }
-    
+
     fn has(&self, id: &str) -> bool {
         let core = self.core.blocking_read();
         core.has(id)
@@ -210,12 +212,12 @@ impl ExpertDBSync for ExpertDBImplSync {
         let mut core = self.core.blocking_write();
         core.mark_loading(id)
     }
-    
+
     fn remove(&mut self, id: &str) -> EKResult<()> {
         let mut core = self.core.blocking_write();
         core.remove(id)
     }
-    
+
     fn insert(&mut self, id: &str, backend: ExpertBackend) -> EKResult<()> {
         let mut core = self.core.blocking_write();
         core.insert(id, backend)
@@ -225,7 +227,7 @@ impl ExpertDBSync for ExpertDBImplSync {
         let core = self.core.blocking_read();
         core.load(id)
     }
-    
+
     fn keys(&self) -> EKResult<Vec<String>> {
         let core = self.core.blocking_read();
         core.keys()

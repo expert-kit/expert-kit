@@ -41,7 +41,7 @@ impl Default for EKInstance {
         let settings = get_ek_settings();
         let _ = INSTANCE_COUNTER.fetch_add(1, Ordering::SeqCst);
 
-        let device = Device::from(settings.worker.device.as_str());        
+        let device = Device::from(settings.worker.device.as_str());
 
         Self {
             hidden: settings.inference.hidden_dim,

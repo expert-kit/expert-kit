@@ -147,7 +147,7 @@ impl Responder for WrappedTensorView<'_> {
 
     fn respond_to(self, _: &actix_web::HttpRequest) -> HttpResponse<BoxBody> {
         let body = self.inner().unwrap().data().to_vec();
-        
+
         HttpResponse::Ok()
             .content_type(ContentType::octet_stream())
             .body(body)
@@ -250,18 +250,12 @@ where
         layer_id: usize,
         expert_id: usize,
     ) -> EKResult<Vec<String>> {
-        let key_up = format!(
-            "model.layers.{layer_id}.mlp.experts.{expert_id}.up_proj.weight"
-        );
+        let key_up = format!("model.layers.{layer_id}.mlp.experts.{expert_id}.up_proj.weight");
         let key_up_scale = format!("{key_up}_scale_inv");
 
-        let key_gate = format!(
-            "model.layers.{layer_id}.mlp.experts.{expert_id}.down_proj.weight"
-        );
+        let key_gate = format!("model.layers.{layer_id}.mlp.experts.{expert_id}.down_proj.weight");
         let key_gate_scale = format!("{key_gate}_scale_inv");
-        let key_down = format!(
-            "model.layers.{layer_id}.mlp.experts.{expert_id}.gate_proj.weight"
-        );
+        let key_down = format!("model.layers.{layer_id}.mlp.experts.{expert_id}.gate_proj.weight");
 
         let key_down_scale = format!("{key_down}_scale_inv");
 

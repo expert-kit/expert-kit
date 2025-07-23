@@ -11,17 +11,17 @@ mod inner {
                 tonic::include_proto!("ek.object.v1");
             }
         }
-        
+
         pub mod control {
             pub mod v1 {
                 tonic::include_proto!("ek.control.v1");
             }
         }
     }
-    
+
     pub mod pbonnx {
         tonic::include_proto!("onnx");
-    }   
+    }
 }
 
 pub use inner::{ek, pbonnx};

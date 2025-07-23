@@ -118,7 +118,6 @@ where
     D: OrtDType,
 {
     fn from(val: NDArrayTensor<D>) -> Self {
-        
         ort::value::Tensor::from_array(val.0.view())
             .unwrap()
             .into_dyn()
