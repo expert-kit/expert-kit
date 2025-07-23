@@ -118,7 +118,7 @@ impl StateWriter for StateWriterImpl {
                 let node = reader
                     .node_by_hostname(hostname)
                     .await?
-                    .ok_or(EKError::NotFound(format!("node {} not found", hostname)))?;
+                    .ok_or(EKError::NotFound(format!("node {hostname} not found")))?;
                 let updating_ids = self.expert_slice_to_ids(&state)?;
                 let new_experts = self.expert_slice_to_new_expert(node.id, &state)?;
                 // delete state of updating experts

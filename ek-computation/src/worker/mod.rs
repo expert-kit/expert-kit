@@ -37,12 +37,12 @@ pub async fn worker_main() -> EKResult<()> {
     // Spawn state client task (handles expert loading/unloading)
     let cli = tokio::task::spawn(async move {
         let worker_id = x::get_worker_id();
-        log::info!("ek hostname: {:}", worker_id);
+        log::info!("ek hostname: {worker_id:}");
         let control_endpoint = x::get_controller_addr();
         log::info!("control endpoint {:}", control_endpoint.uri());
         let mut state_client = StateClient::new(control_endpoint, &worker_id);
         if let Err(e) = state_client.run(cli_cancel).await {
-            log::error!("state client error {:}", e);
+            log::error!("state client error {e:}");
         }
     });
 
@@ -53,7 +53,7 @@ pub async fn worker_main() -> EKResult<()> {
         let addr = format!("{}:{}", settings.listen, settings.ports.main)
             .parse()
             .unwrap();
-        log::info!("worker server listening on {}", addr);
+        log::info!("worker server listening on {addr}");
         
         // Set up gRPC server with OpenTelemetry middleware
         let layer = tower::ServiceBuilder::new()
@@ -70,7 +70,7 @@ pub async fn worker_main() -> EKResult<()> {
             .serve(addr)
             .await;
         if let Err(e) = err {
-            log::error!("server error {:?}", e);
+            log::error!("server error {e:?}");
         }
     });
 

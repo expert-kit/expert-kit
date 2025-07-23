@@ -26,7 +26,7 @@ async fn load_expert(
     let model = req.match_info().get("model").unwrap();
     let layer = req.match_info().get("layer").unwrap().parse::<usize>()?;
     let expert = req.match_info().get("expert").unwrap().parse::<usize>()?;
-    log::info!("load expert {} {} {}", model, layer, expert);
+    log::info!("load expert {model} {layer} {expert}");
     let pretrained = wm.load_pretrained(model.to_owned()).await?;
     let tv = pretrained.read().await.get_expert(layer, expert).await?;
     Ok(tv)
@@ -57,7 +57,7 @@ pub async fn listen<A: ToSocketAddrs>(roots: &'static [PathBuf], addr: A) -> EKR
     let addr = addr.to_socket_addrs().unwrap().collect::<Vec<_>>();
     log::info!("starting weight server.");
     for a in addr.iter() {
-        log::info!("listening on {}", a);
+        log::info!("listening on {a}");
     }
     HttpServer::new(move || {
         App::new()

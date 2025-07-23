@@ -30,13 +30,13 @@ pub async fn controller_main() -> EKResult<()> {
         )
         .parse()
         .unwrap();
-        log::info!("state server listening on {}", intra_addr);
+        log::info!("state server listening on {intra_addr}");
         let err = tonic::transport::Server::builder()
             .add_service(StateServiceServer::new(srv))
             .serve(intra_addr)
             .await;
         if let Err(e) = err {
-            log::error!("state server error {:?}", e);
+            log::error!("state server error {e:?}");
         }
     });
 
@@ -53,7 +53,7 @@ pub async fn controller_main() -> EKResult<()> {
         //     .layer_fn(OTelGrpcServerMiddleware::new)
         //     .into_inner();
 
-        log::info!("computation server listening on {}", inter_addr);
+        log::info!("computation server listening on {inter_addr}");
         let plan_srv = PlanServiceImpl::new();
         let err = tonic::transport::Server::builder()
             // .layer(layer)
@@ -66,7 +66,7 @@ pub async fn controller_main() -> EKResult<()> {
             .serve(inter_addr)
             .await;
         if let Err(e) = err {
-            log::error!("state server error {:?}", e);
+            log::error!("state server error {e:?}");
         }
     });
 

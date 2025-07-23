@@ -121,11 +121,11 @@ impl BasicExpertImpl {
         })
         .await
         .map_err(|e| {
-            log::error!("blocking task join error {:?}", e);
+            log::error!("blocking task join error {e:?}");
             Status::internal("blocking task error")
         })?
         .map_err(|e| {
-            log::error!("forward error {:?}", e);
+            log::error!("forward error {e:?}");
             Status::internal("forward error")
         })?;
 

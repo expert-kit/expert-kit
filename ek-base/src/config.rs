@@ -171,13 +171,14 @@ pub fn env_source() -> Environment {
 }
 pub fn get_ek_settings_base(src: &[&str]) -> &'static Settings {
     static CONFIG: OnceCell<Settings> = OnceCell::new();
-    let res = CONFIG.get_or_init(|| {
+    
+    (CONFIG.get_or_init(|| {
         let mut settings = Config::builder();
         let candidates = src.iter().chain(["/etc/expert-kit/config.yaml"].iter());
 
         for path in candidates {
             if Path::new(path).exists() {
-                log::info!("Loading config from {}", path);
+                log::info!("Loading config from {path}");
                 settings = settings.add_source(config::File::with_name(path));
                 break;
             }
@@ -186,8 +187,7 @@ pub fn get_ek_settings_base(src: &[&str]) -> &'static Settings {
         let settings = settings.build().unwrap();
 
         settings.try_deserialize::<Settings>().unwrap()
-    });
-    res
+    })) as _
 }
 
 pub fn get_ek_settings() -> &'static Settings {

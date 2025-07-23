@@ -35,7 +35,7 @@ impl StatePoller for StatePollerImpl {
             log::info!("state poller tick");
             let r = self.poll_state().await;
             if let Err(e) = r {
-                log::error!("state poller error: {}", e);
+                log::error!("state poller error: {e}");
             }
             interval.tick().await;
         }
@@ -92,7 +92,7 @@ pub fn start_poll() {
     let mut poller = StatePollerImpl::new();
     tokio::spawn(async move {
         if let Err(e) = poller.run().await {
-            log::error!("state poller error {}", e);
+            log::error!("state poller error {e}");
         }
     });
 }

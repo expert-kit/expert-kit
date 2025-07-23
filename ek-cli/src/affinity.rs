@@ -44,7 +44,7 @@ impl CpuAffinityOps for LinuxCpuAffinityOps {
 
             for &core in cores {
                 if core >= libc::CPU_SETSIZE as usize {
-                    return Err(format!("CPU core {} exceeds CPU_SETSIZE limit", core));
+                    return Err(format!("CPU core {core} exceeds CPU_SETSIZE limit"));
                 }
                 CPU_SET(core, &mut cpu_set);
             }
@@ -52,7 +52,7 @@ impl CpuAffinityOps for LinuxCpuAffinityOps {
             let result = sched_setaffinity(0, std::mem::size_of::<cpu_set_t>(), &cpu_set);
             if result != 0 {
                 let error = std::io::Error::last_os_error();
-                return Err(format!("Failed to set CPU affinity: {}", error));
+                return Err(format!("Failed to set CPU affinity: {error}"));
             }
         }
 
@@ -73,7 +73,7 @@ impl CpuAffinityOps for LinuxCpuAffinityOps {
             
             if result != 0 {
                 let error = std::io::Error::last_os_error();
-                return Err(format!("Failed to get CPU affinity: {}", error));
+                return Err(format!("Failed to get CPU affinity: {error}"));
             }
             
             let mut cores = Vec::new();
@@ -130,10 +130,10 @@ impl LinuxCpuAffinityOps {
     
     /// Get CPU cores for a specific NUMA node
     fn get_numa_node_cpus(&self, node: usize) -> Result<Vec<usize>, String> {
-        let cpulist_path = format!("/sys/devices/system/node/node{}/cpulist", node);
+        let cpulist_path = format!("/sys/devices/system/node/node{node}/cpulist");
         
         let content = std::fs::read_to_string(&cpulist_path)
-            .map_err(|e| format!("Failed to read NUMA node {} CPU list: {}", node, e))?;
+            .map_err(|e| format!("Failed to read NUMA node {node} CPU list: {e}"))?;
         
         self.parse_cpu_list(content.trim())
     }
@@ -152,7 +152,7 @@ impl LinuxCpuAffinityOps {
                 // Range format like "0-3"
                 let range_parts: Vec<&str> = part.split('-').collect();
                 if range_parts.len() != 2 {
-                    return Err(format!("Invalid CPU range format: {}", part));
+                    return Err(format!("Invalid CPU range format: {part}"));
                 }
                 
                 let start: usize = range_parts[0].parse()
@@ -161,7 +161,7 @@ impl LinuxCpuAffinityOps {
                     .map_err(|_| format!("Invalid CPU number: {}", range_parts[1]))?;
                 
                 if start > end {
-                    return Err(format!("Invalid CPU range: {} > {}", start, end));
+                    return Err(format!("Invalid CPU range: {start} > {end}"));
                 }
                 
                 for cpu in start..=end {
@@ -170,7 +170,7 @@ impl LinuxCpuAffinityOps {
             } else {
                 // Single CPU number
                 let cpu: usize = part.parse()
-                    .map_err(|_| format!("Invalid CPU number: {}", part))?;
+                    .map_err(|_| format!("Invalid CPU number: {part}"))?;
                 cpus.push(cpu);
             }
         }
@@ -189,10 +189,8 @@ impl LinuxCpuAffinityOps {
                 let name = entry.file_name();
                 let name_str = name.to_string_lossy();
                 
-                if name_str.starts_with("node") {
-                    if let Ok(node_num) = name_str[4..].parse::<usize>() {
-                        nodes.push(node_num);
-                    }
+                if let Some(name_str) = name_str.strip_prefix("node") && let Ok(node_num) = name_str.parse::<usize>() {
+                    nodes.push(node_num);
                 }
             }
         }
@@ -281,7 +279,7 @@ pub fn apply_cpu_affinity(config: &CpuAffinityConfig) -> Result<(), String> {
         if !cores.is_empty() {
             if ops.is_cpu_affinity_supported() {
                 ops.set_cpu_affinity(cores)?;
-                log::info!("CPU affinity set to cores: {:?}", cores);
+                log::info!("CPU affinity set to cores: {cores:?}");
             } else {
                 log::warn!("CPU affinity requested but not supported on this platform");
             }
@@ -293,7 +291,7 @@ pub fn apply_cpu_affinity(config: &CpuAffinityConfig) -> Result<(), String> {
         if !numa_nodes.is_empty() {
             if ops.is_numa_affinity_supported() {
                 ops.set_numa_affinity(numa_nodes)?;
-                log::info!("NUMA affinity set to nodes: {:?}", numa_nodes);
+                log::info!("NUMA affinity set to nodes: {numa_nodes:?}");
             } else {
                 log::warn!("NUMA affinity requested but not supported on this platform");
             }
@@ -318,14 +316,13 @@ pub fn validate_cpu_affinity_config(config: &CpuAffinityConfig) -> Result<(), St
         let mut unique_cores = HashSet::new();
         for &core in cores {
             if !unique_cores.insert(core) {
-                return Err(format!("Duplicate CPU core {} in configuration", core));
+                return Err(format!("Duplicate CPU core {core} in configuration"));
             }
             
             // Check against actual CPU count
             if core >= cpu_count {
                 return Err(format!(
-                    "CPU core {} exceeds available CPU count {} (cores are 0-indexed)", 
-                    core, cpu_count
+                    "CPU core {core} exceeds available CPU count {cpu_count} (cores are 0-indexed)"
                 ));
             }
         }
@@ -340,14 +337,13 @@ pub fn validate_cpu_affinity_config(config: &CpuAffinityConfig) -> Result<(), St
         let mut unique_nodes = HashSet::new();
         for &node in numa_nodes {
             if !unique_nodes.insert(node) {
-                return Err(format!("Duplicate NUMA node {} in configuration", node));
+                return Err(format!("Duplicate NUMA node {node} in configuration"));
             }
             
             // Check against actual NUMA node count
             if numa_count > 0 && node >= numa_count {
                 return Err(format!(
-                    "NUMA node {} exceeds available NUMA node count {} (nodes are 0-indexed)", 
-                    node, numa_count
+                    "NUMA node {node} exceeds available NUMA node count {numa_count} (nodes are 0-indexed)"
                 ));
             }
         }
@@ -412,7 +408,7 @@ mod tests {
         
         // Test setting CPU affinity with valid cores
         let result = ops.set_cpu_affinity(&[0, 1, 4]);
-        assert!(result.is_ok(), "Failed to set CPU affinity: {:?}", result);
+        assert!(result.is_ok(), "Failed to set CPU affinity: {result:?}");
         // get real set CPU affinity
         let real_affinity = ops.get_cpu_affinity().unwrap();
         assert_eq!(real_affinity, vec![0, 1, 4]);
@@ -432,7 +428,7 @@ mod tests {
         
         // Test setting NUMA affinity with valid nodes
         let result = ops.set_numa_affinity(&[0, 1]);
-        assert!(result.is_ok(), "Failed to set NUMA affinity: {:?}", result);
+        assert!(result.is_ok(), "Failed to set NUMA affinity: {result:?}");
         
         // Test setting NUMA affinity with invalid node
         let result = ops.set_numa_affinity(&[9999]);

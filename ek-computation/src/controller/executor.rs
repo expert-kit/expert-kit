@@ -156,7 +156,7 @@ impl NaiveExecutor {
         while let Some((expert_id, egress_meta)) = self.pending_egress.pop_first() {
             let expert_id: ExpertIdRef = expert_id.as_ref();
             let Ok(channel) = self.registry.lock().await.select(expert_id).await else {
-                log::warn!("failed to select channel for expert {}", expert_id);
+                log::warn!("failed to select channel for expert {expert_id}");
                 continue;
             };
             chips.push((expert_id.to_owned(), egress_meta.to_owned()));
@@ -201,7 +201,7 @@ impl NaiveExecutor {
                             .await
                             .map(|resp| resp.into_inner())
                             .map_err(|e| {
-                                log::error!("forward error: {}", e);
+                                log::error!("forward error: {e}");
                                 e
                             })
                     }
@@ -274,7 +274,7 @@ impl NaiveExecutor {
                 .send_timeout(Arc::new(resp), std::time::Duration::from_secs(5))
                 .await;
             if let Err(e) = send_res {
-                log::error!("send forward response  error: {}", e);
+                log::error!("send forward response  error: {e}");
             }
             removed.push(*req_id);
         }

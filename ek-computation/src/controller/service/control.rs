@@ -50,10 +50,7 @@ async fn execute_rebalance() -> EKResult<()> {
     let instance_name = settings.inference.instance_name.clone();
     let ws_addr = settings.weight.server.as_ref().unwrap().addr.clone();
     log::info!(
-        "Running static schedule for model: {}, instance: {}, weight server: {}",
-        model_name,
-        instance_name,
-        ws_addr
+        "Running static schedule for model: {model_name}, instance: {instance_name}, weight server: {ws_addr}"
     );
     let cli = WeightSrvClient::new(ws_addr);
     let vital = cli.load_meta_vital(&model_name).await?;

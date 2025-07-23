@@ -41,7 +41,7 @@ impl From<Device> for tch::Device {
     fn from(val: Device) -> Self {
         match val {
             Device::CPU => tch::Device::Cpu,
-            Device::CUDA(idx) => tch::Device::Cuda(idx as usize),
+            Device::CUDA(idx) => tch::Device::Cuda(idx),
             // _ => panic!("Unsupported device"),
         }
     }
@@ -51,7 +51,7 @@ impl From<tch::Device> for Device {
     fn from(val: tch::Device) -> Self {
         match val {
             tch::Device::Cpu => Device::CPU,
-            tch::Device::Cuda(idx) => Device::CUDA(idx as usize),
+            tch::Device::Cuda(idx) => Device::CUDA(idx),
             _ => panic!("Unsupported device"),
         }
     }
@@ -147,7 +147,7 @@ impl EkTensor for TchTensor {
     fn device(&self) -> Device {
         match self.0.device() {
             tch::Device::Cpu => Device::CPU,
-            tch::Device::Cuda(idx) => Device::CUDA(idx as usize),
+            tch::Device::Cuda(idx) => Device::CUDA(idx),
             _ => panic!("Unsupported device"),
         }
     }

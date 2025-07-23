@@ -147,10 +147,10 @@ impl Responder for WrappedTensorView<'_> {
 
     fn respond_to(self, _: &actix_web::HttpRequest) -> HttpResponse<BoxBody> {
         let body = self.inner().unwrap().data().to_vec();
-        let res = HttpResponse::Ok()
+        
+        HttpResponse::Ok()
             .content_type(ContentType::octet_stream())
-            .body(body);
-        res
+            .body(body)
     }
 }
 
@@ -211,8 +211,7 @@ where
             .weight_map
             .map_layer(&key.to_string())
             .ok_or(EKError::NotFound(format!(
-                "safetensor not found for layer: {}",
-                key
+                "safetensor not found for layer: {key}"
             )))?;
         let fp = self.desc.root.join(fp);
         let fp_str = fp.to_str().unwrap();
@@ -252,22 +251,19 @@ where
         expert_id: usize,
     ) -> EKResult<Vec<String>> {
         let key_up = format!(
-            "model.layers.{}.mlp.experts.{}.up_proj.weight",
-            layer_id, expert_id
+            "model.layers.{layer_id}.mlp.experts.{expert_id}.up_proj.weight"
         );
-        let key_up_scale = format!("{}_scale_inv", key_up);
+        let key_up_scale = format!("{key_up}_scale_inv");
 
         let key_gate = format!(
-            "model.layers.{}.mlp.experts.{}.down_proj.weight",
-            layer_id, expert_id
+            "model.layers.{layer_id}.mlp.experts.{expert_id}.down_proj.weight"
         );
-        let key_gate_scale = format!("{}_scale_inv", key_gate);
+        let key_gate_scale = format!("{key_gate}_scale_inv");
         let key_down = format!(
-            "model.layers.{}.mlp.experts.{}.gate_proj.weight",
-            layer_id, expert_id
+            "model.layers.{layer_id}.mlp.experts.{expert_id}.gate_proj.weight"
         );
 
-        let key_down_scale = format!("{}_scale_inv", key_down);
+        let key_down_scale = format!("{key_down}_scale_inv");
 
         Ok(vec![
             key_down,

@@ -50,7 +50,7 @@ async fn execute_rebalance() -> EKResult<()> {
         "http://{}:{}",
         settings.controller.broadcast, settings.controller.ports.inter
     );
-    log::info!("connect to controller at {}", controller_addr);
+    log::info!("connect to controller at {controller_addr}");
     let endpoint = Endpoint::from_str(controller_addr.as_str()).unwrap();
     let mut cli = PlanServiceClient::connect(endpoint).await?;
     cli.rebalance(RebalanceReq {}).await?;
@@ -79,7 +79,7 @@ async fn upsert_nodes(inventory: PathBuf) -> EKResult<Vec<i32>> {
     let writer = StateWriterImpl::new();
     let contents = tokio::fs::read(inventory).await?;
     let inventory = serde_yaml::from_slice::<Inventory>(&contents).map_err(|e| {
-        log::error!("failed to parse inventory file: {}", e);
+        log::error!("failed to parse inventory file: {e}");
         EKError::InvalidInput("inventory file".to_string())
     })?;
     let mut node_ids = vec![];
@@ -105,8 +105,7 @@ async fn execute_static_schedule(inventory: PathBuf) -> EKResult<()> {
     let instance_name = settings.inference.instance_name.clone();
     let ws_addr = settings.weight.server.as_ref().unwrap().addr.clone();
     info!(
-        "Running static schedule for model: {}, instance: {}, weight server: {}",
-        model_name, instance_name, ws_addr
+        "Running static schedule for model: {model_name}, instance: {instance_name}, weight server: {ws_addr}"
     );
     let cli = WeightSrvClient::new(ws_addr);
     let vital = cli.load_meta_vital(&model_name).await?;

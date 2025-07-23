@@ -83,11 +83,11 @@ impl ExpertRegistryImpl {
     }
 
     async fn create_then_select_channel(&mut self, eid: ExpertIdRef<'_>) -> EKResult<Channel> {
-        let nodes = self.reader.node_by_expert(&eid).await?;
+        let nodes = self.reader.node_by_expert(eid).await?;
         for node in nodes {
             let addr = node.config["addr"].as_str().unwrap().to_owned();
             let end = Channel::from_shared(addr)
-                .map_err(|e| EKError::InvalidInput(format!("invalid url for gRPC: {}", e)))?;
+                .map_err(|e| EKError::InvalidInput(format!("invalid url for gRPC: {e}")))?;
             let channel = end.connect().await?;
             let meta = ChannelMeta {
                 ch: channel,
@@ -96,20 +96,18 @@ impl ExpertRegistryImpl {
             self.channels.insert(eid.to_owned(), vec![meta]);
         }
         let res = self.channels.get(eid).ok_or(EKError::NotFound(format!(
-            "no channel found for expert {}",
-            eid
+            "no channel found for expert {eid}"
         )))?;
         if res.is_empty() {
             return Err(EKError::NotFound(format!(
-                "no channel found for expert {}",
-                eid
+                "no channel found for expert {eid}"
             )));
         }
         Ok(res[0].ch.clone())
     }
 
     pub async fn inner_deregister(&mut self, host_id: &str) {
-        log::info!("deregister host_id {}", host_id);
+        log::info!("deregister host_id {host_id}");
         for (_, channels) in self.channels.iter_mut() {
             channels.retain(|meta| meta.host_id != host_id);
         }

@@ -78,9 +78,9 @@ impl ComputationService for ExpertKitService {
                 stats.total_processing_time_ms += processing_time.as_millis() as u64;
                 
                 // Log performance stats
-                info!("Request processed in {:.2?}", processing_time);
+                info!("Request processed in {processing_time:.2?}");
                 let avg_time_per_token = stats.total_processing_time_ms as f64 / stats.total_tokens_processed as f64;
-                info!("Average processing time: {:.2}ms per token", avg_time_per_token);
+                info!("Average processing time: {avg_time_per_token:.2}ms per token");
                 
                 if stats.total_tokens_processed > 0 {
                     let unique_ratio = stats.total_unique_tokens_processed as f64 / stats.total_tokens_processed as f64;
@@ -90,7 +90,7 @@ impl ComputationService for ExpertKitService {
                 Ok(Response::new(resp))
             },
             Err(e) => {
-                error!("Error processing request: {}", e);
+                error!("Error processing request: {e}");
                 Err(e)
             },
         }
@@ -102,13 +102,13 @@ impl ExpertKitService {
         // Deserialize the tensor data using safetensors
         let tensors = match safetensors::SafeTensors::deserialize(&request.tensor) {
             Ok(tensors) => tensors,
-            Err(e) => return Err(Status::internal(format!("Failed to deserialize tensor: {}", e))),
+            Err(e) => return Err(Status::internal(format!("Failed to deserialize tensor: {e}"))),
         };
         
         // Get the tensor named "data" (assuming that's what you're using in Python)
         let input_tensor = match tensors.tensor("data") {
             Ok(tensor) => tensor,
-            Err(e) => return Err(Status::internal(format!("Failed to get 'data' tensor: {}", e))),
+            Err(e) => return Err(Status::internal(format!("Failed to get 'data' tensor: {e}"))),
         };
         
         // Get dimensions from shape
@@ -130,7 +130,7 @@ impl ExpertKitService {
             )));
         }
         
-        info!("Input tensor shape: [{}, {}]", batch_size, hidden_dim);
+        info!("Input tensor shape: [{batch_size}, {hidden_dim}]");
         
         // Estimate unique tensors
         stats.total_unique_tokens_processed += batch_size as u64;
@@ -164,14 +164,14 @@ impl ExpertKitService {
             Dtype::F32, 
             output_shape, 
             output_bytes
-        ).map_err(|e| Status::internal(format!("Failed to create tensor view: {}", e)))?;
+        ).map_err(|e| Status::internal(format!("Failed to create tensor view: {e}")))?;
         
         let tensor_map = std::collections::HashMap::from([
             ("data".to_string(), tensor_view)
         ]);
         
         let buffer = safetensors::serialize(&tensor_map, &None)
-            .map_err(|e| Status::internal(format!("Failed to serialize tensor: {}", e)))?;
+            .map_err(|e| Status::internal(format!("Failed to serialize tensor: {e}")))?;
         
         Ok(ForwardResp {
             output_tensor: buffer,
@@ -224,7 +224,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     
     // Start the gRPC server
     let addr = format!("0.0.0.0:{}", args.port).parse()?;
-    info!("Starting server on {}", addr);
+    info!("Starting server on {addr}");
     
     // let http = Http::new().max_metadata_size(1024 * 1024);
 

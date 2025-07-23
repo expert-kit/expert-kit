@@ -36,27 +36,27 @@ impl StateServerImpl {
                         .await;
 
                     if let Err(e) = err {
-                        log::error!("worker ping error, can not upsert node: {}", e);
+                        log::error!("worker ping error, can not upsert node: {e}");
                     }
 
                     let e = w.node_update_seen(&msg.id).await;
                     if let Err(e) = e {
-                        log::error!("worker ping error: {}", e);
+                        log::error!("worker ping error: {e}");
                     }
                     continue;
                 }
                 Ok(Ok(None)) => {
-                    log::warn!("worker ping stream closed for worker_id={}", id);
+                    log::warn!("worker ping stream closed for worker_id={id}");
                     get_registry().lock().await.deregister(&id).await;
                     return;
                 }
                 Ok(Err(e)) => {
-                    log::error!("worker ping stream error for worker_id={}, {}", id, e);
+                    log::error!("worker ping stream error for worker_id={id}, {e}");
                     get_registry().lock().await.deregister(&id).await;
                     return;
                 }
                 Err(e) => {
-                    log::error!("worker ping stream timeout for worker_id={}, {}", id, e);
+                    log::error!("worker ping stream timeout for worker_id={id}, {e}");
                     get_registry().lock().await.deregister(&id).await;
                     return;
                 }
@@ -95,7 +95,7 @@ impl StateService for StateServerImpl {
                     }),
                 };
                 if let Err(e) = stream_tx.send(Ok(resp)).await {
-                    log::error!("stream error: {}", e)
+                    log::error!("stream error: {e}")
                 };
             }
         });

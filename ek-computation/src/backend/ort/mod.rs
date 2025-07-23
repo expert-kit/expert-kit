@@ -118,9 +118,9 @@ where
     D: OrtDType,
 {
     fn from(val: NDArrayTensor<D>) -> Self {
-        let v = ort::value::Tensor::from_array(val.0.view())
+        
+        ort::value::Tensor::from_array(val.0.view())
             .unwrap()
-            .into_dyn();
-        v
+            .into_dyn()
     }
 }

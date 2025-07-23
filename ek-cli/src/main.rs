@@ -192,7 +192,7 @@ fn init_tokio_runtime(command: &Command) -> Result<Runtime, std::io::Error> {
             // Apply CPU affinity before creating runtime for worker
             let settings = ek_base::config::get_ek_settings();
             if let Err(e) = try_apply_cpu_affinity(&settings.worker) {
-                log::warn!("Failed to apply CPU affinity before runtime creation: {}", e);
+                log::warn!("Failed to apply CPU affinity before runtime creation: {e}");
             } else {
                 log::debug!("✅ CPU affinity applied before Tokio runtime creation");
             }
@@ -208,7 +208,7 @@ fn init_tokio_runtime(command: &Command) -> Result<Runtime, std::io::Error> {
                 DEFAULT_THREAD_NUM
             };
             
-            log::info!("Creating Tokio runtime with {} worker threads", worker_threads);
+            log::info!("Creating Tokio runtime with {worker_threads} worker threads");
             
             // TODO: hardcoded threadnum for now, need to be improved later
             // Create runtime with limited worker threads
@@ -250,9 +250,9 @@ fn main() {
             .map(|x| x.as_str())
             .collect::<Vec<_>>(),
     );
-    log::info!("config source: {:?}", config_src);
+    log::info!("config source: {config_src:?}");
     let settings = ek_base::config::get_ek_settings();
-    log::info!("settings: {:?}", settings);
+    log::info!("settings: {settings:?}");
 
     // Init log
     init_log();
@@ -261,7 +261,7 @@ fn main() {
     let tokio_rt = match init_tokio_runtime(&cli.command) {
         Ok(rt) => rt,
         Err(e) => {
-            eprintln!("Failed to create Tokio runtime: {}", e);
+            eprintln!("Failed to create Tokio runtime: {e}");
             std::process::exit(1);
         }
     };
@@ -286,7 +286,7 @@ fn main() {
     });
 
     if let Err(e) = res {
-        eprintln!("Error: {}", e);
+        eprintln!("Error: {e}");
         std::process::exit(1);
     }
 }

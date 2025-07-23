@@ -24,7 +24,7 @@ impl std::fmt::Display for Device {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Device::CPU => write!(f, "CPU"),
-            Device::CUDA(idx) => write!(f, "CUDA({})", idx),
+            Device::CUDA(idx) => write!(f, "CUDA({idx})"),
         }
     }
 }
@@ -38,7 +38,7 @@ impl From<&str> for Device {
             let idx = str_dev[4..].parse::<usize>().unwrap_or(0);
             Device::CUDA(idx)
         } else {
-            panic!("Unsupported device: {}", value);
+            panic!("Unsupported device: {value}");
         }
     }
 }
