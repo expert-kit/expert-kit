@@ -394,14 +394,15 @@ def main():
             ek_addr=args.ek_addr,
             ek_model_name=args.ek_model_name,
         )
-        if args.print_response:
-            for result in batch_result["results"]:
-                print()
-                print(f"Prompt: {result['prompt']}")
-                print(f"Thinking Content: {result['thinking_content']}")
-                print(f"Response: {result['content']}")
-                print(f"Input Tokens: {result['input_tokens']}, Output Tokens: {result['output_tokens']}")
-                print("-" * 40)
+        aggregated_results.extend(batch_result["results"])
 
+    if args.print_response:
+        for result in aggregated_results:
+            print()
+            print(f"Prompt: {result['prompt']}")
+            print(f"Thinking Content: {result['thinking_content']}")
+            print(f"Response: {result['content']}")
+            print(f"Input Tokens: {result['input_tokens']}, Output Tokens: {result['output_tokens']}")
+            print("-" * 40)
 if __name__ == "__main__":
     main()
