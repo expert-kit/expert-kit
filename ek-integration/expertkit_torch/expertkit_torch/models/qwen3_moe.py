@@ -386,6 +386,7 @@ def main():
     ] * 512
     
     test_batch_sizes = [1, 2, 4, 8, 16, 32, 64, 128, 256]
+    aggregated_results = []
     for batch_size in test_batch_sizes:
         batch_result = evaluate_batch(
             model_path=args.model_path, 
