@@ -41,6 +41,13 @@ set_verbosity_error()
 DEFAULT_TIMEOUT_INTVAL = 100
 layer_idx = 0
 
+# The default device should be set according to the environment.
+if torch.cuda.is_available():
+    device = "cuda"
+elif torch.backends.mps.is_available():
+    device = "mps"
+else:
+    device = "cpu"
 
 def intercept_moe(
     enable_ek: bool = True,
@@ -254,8 +261,8 @@ def evaluate_batch(
         model = AutoModelForCausalLM.from_pretrained(
             pretrained_model_name_or_path=model_path,
             torch_dtype="auto",
-        )
-    
+        ).to(device)
+
     # Initialize profiler manager with context manager
     with ProfilerManager(batch_size=len(prompts)) as profiler:
         # Wrap model with profiler - completely non-invasive
@@ -364,6 +371,11 @@ def main():
         action="store_true",
         help="Enable detailed profiling of model components (attention vs expert).",
     )
+    parser.add_argument(
+        "--print_response",
+        action="store_true",
+        help="Print the response content.",
+    )
     args = parser.parse_args()
 
     test_prompts = [
@@ -382,6 +394,14 @@ def main():
             ek_addr=args.ek_addr,
             ek_model_name=args.ek_model_name,
         )
+        if args.print_response:
+            for result in batch_result["results"]:
+                print()
+                print(f"Prompt: {result['prompt']}")
+                print(f"Thinking Content: {result['thinking_content']}")
+                print(f"Response: {result['content']}")
+                print(f"Input Tokens: {result['input_tokens']}, Output Tokens: {result['output_tokens']}")
+                print("-" * 40)
 
 if __name__ == "__main__":
     main()
