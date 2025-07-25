@@ -220,18 +220,17 @@ mod test {
 
 #[cfg(test)]
 mod bench_ffn {
-    use once_cell::sync::OnceCell;
-    extern crate test;
+    use super::TchTensor;
     use crate::{
-        backend::{EkTensor, Device, DType},
+        backend::{DType, Device, EkTensor},
         ffn::{Expert, ExpertWeight, expert_torch::TorchFFN},
     };
-    use super::TchTensor;
+    use once_cell::sync::OnceCell;
 
     #[test]
     fn bench_transfer() {
         // Configs
-        let round = 128;                
+        let round = 128;
         let cuda_device = Device::CUDA(0);
         let cpu_device = Device::CPU;
 
@@ -241,8 +240,8 @@ mod bench_ffn {
         tensor.to_device(cuda_device);
         tensor.to_device(cpu_device);
 
-        let mut to_cuda_durations  = vec![std::time::Duration::new(0, 0)];
-        let mut to_cpu_durations= vec![std::time::Duration::new(0, 0)];
+        let mut to_cuda_durations = vec![std::time::Duration::new(0, 0)];
+        let mut to_cpu_durations = vec![std::time::Duration::new(0, 0)];
 
         println!("Starting transfer benchmark...");
 
@@ -261,13 +260,12 @@ mod bench_ffn {
         // function to calculate mean and variance statistics
         fn calculate_stats(durations: &[std::time::Duration]) -> (f64, f64) {
             let times: Vec<f64> = durations.iter().map(|d| d.as_secs_f64() * 1000.0).collect(); // 转换为毫秒
-            
+
             let mean = times.iter().sum::<f64>() / times.len() as f64;
-            
-            let variance = times.iter()
-                .map(|&x| (x - mean).powi(2))
-                .sum::<f64>() / times.len() as f64;
-            
+
+            let variance =
+                times.iter().map(|&x| (x - mean).powi(2)).sum::<f64>() / times.len() as f64;
+
             (mean, variance)
         }
 
@@ -276,7 +274,10 @@ mod bench_ffn {
         println!("  Total rounds: {}", round);
         println!("  Tensor shape: [2048, 768]");
         println!("  Data type: BFloat16");
-        println!("  Tensor size: {:.2} MB", (2048 * 768 * 2) as f64 / 1024.0 / 1024.0);
+        println!(
+            "  Tensor size: {:.2} MB",
+            (2048 * 768 * 2) as f64 / 1024.0 / 1024.0
+        );
 
         // calculate mean and variance for CPU -> CUDA transfer
         let (cuda_mean, cuda_variance) = calculate_stats(&to_cuda_durations);
@@ -289,7 +290,6 @@ mod bench_ffn {
         println!("\nCUDA -> CPU Transfer Statistics:");
         println!("  Average time: {:.3} ms", cpu_mean);
         println!("  Std: {:.3} ms", cpu_variance.sqrt());
-
     }
 
     // bench performace of torch FFN
@@ -303,14 +303,18 @@ mod bench_ffn {
         let ffn = TorchFFN {
             dim: 2048,
             intermediate_dim: 768,
-            weight: ExpertWeight::from_rand_linear(2048, 768, crate::backend::DType::BFloat16, crate::backend::Device::CUDA(0)),
+            weight: ExpertWeight::from_rand_linear(
+                2048,
+                768,
+                crate::backend::DType::BFloat16,
+                crate::backend::Device::CUDA(0),
+            ),
             module: OnceCell::new(),
             device: Device::CUDA(0),
         };
 
-        for batch_size in batch_sizes{
-
-            let mut res:Vec<std::time::Duration> = vec![];
+        for batch_size in batch_sizes {
+            let mut res: Vec<std::time::Duration> = vec![];
 
             let inp = ffn.rand_input(batch_size);
             let inp = inp.to_device(Device::CUDA(0));
@@ -335,20 +339,22 @@ mod bench_ffn {
             println!("  Batch size: {}", batch_size);
             println!("  Hidden size: {}", ffn.dim);
             println!("  Intermediate size: {}", ffn.intermediate_dim);
-            println!("  Data type: BFloat16"); 
-            
+            println!("  Data type: BFloat16");
+
             // summary
             let total_duration: std::time::Duration = res.iter().sum();
             let avg_duration = total_duration / round as u32;
 
             // calculate variance
             let avg_micros = avg_duration.as_micros() as f64;
-            let variance = res.iter()
+            let variance = res
+                .iter()
                 .map(|d| {
                     let diff = d.as_micros() as f64 - avg_micros;
                     diff * diff
                 })
-                .sum::<f64>() / round as f64;
+                .sum::<f64>()
+                / round as f64;
             let std_dev = variance.sqrt();
 
             // calculate per seq variance
@@ -364,7 +370,6 @@ mod bench_ffn {
                 "⚠ speed per seq: {:.2} ± {:.2} μs",
                 avg_per_seq, std_dev_per_seq
             );
-
         }
     }
 
@@ -379,14 +384,18 @@ mod bench_ffn {
         let ffn = TorchFFN {
             dim: 2048,
             intermediate_dim: 768,
-            weight: ExpertWeight::from_rand_linear(2048, 768, crate::backend::DType::BFloat16, crate::backend::Device::CPU),
+            weight: ExpertWeight::from_rand_linear(
+                2048,
+                768,
+                crate::backend::DType::BFloat16,
+                crate::backend::Device::CPU,
+            ),
             module: OnceCell::new(),
             device: Device::CPU,
         };
 
-        for batch_size in batch_sizes{
-
-            let mut res:Vec<std::time::Duration> = vec![];
+        for batch_size in batch_sizes {
+            let mut res: Vec<std::time::Duration> = vec![];
 
             let inp = ffn.rand_input(batch_size);
             // warm up
@@ -408,20 +417,22 @@ mod bench_ffn {
             println!("  Batch size: {}", batch_size);
             println!("  Hidden size: {}", ffn.dim);
             println!("  Intermediate size: {}", ffn.intermediate_dim);
-            println!("  Data type: BFloat16"); 
-            
+            println!("  Data type: BFloat16");
+
             // summary
             let total_duration: std::time::Duration = res.iter().sum();
             let avg_duration = total_duration / round as u32;
 
             // calculate variance
             let avg_micros = avg_duration.as_micros() as f64;
-            let variance = res.iter()
+            let variance = res
+                .iter()
                 .map(|d| {
                     let diff = d.as_micros() as f64 - avg_micros;
                     diff * diff
                 })
-                .sum::<f64>() / round as f64;
+                .sum::<f64>()
+                / round as f64;
             let std_dev = variance.sqrt();
 
             // calculate per seq variance
@@ -437,9 +448,7 @@ mod bench_ffn {
                 "⚠ speed per seq: {:.2} ± {:.2} μs",
                 avg_per_seq, std_dev_per_seq
             );
-
         }
-
     }
 
     #[test]
@@ -449,12 +458,17 @@ mod bench_ffn {
         let mut ffns = Vec::new();
         let round = 1;
         let batch_sizes: Vec<usize> = vec![1, 4, 16, 64];
-        
+
         for _ in 0..ffn_count {
             let ffn = TorchFFN {
                 dim: 2048,
                 intermediate_dim: 768,
-                weight: ExpertWeight::from_rand_linear(2048, 768, crate::backend::DType::BFloat16, crate::backend::Device::CPU),
+                weight: ExpertWeight::from_rand_linear(
+                    2048,
+                    768,
+                    crate::backend::DType::BFloat16,
+                    crate::backend::Device::CPU,
+                ),
                 module: OnceCell::new(),
                 device: Device::CPU,
             };
@@ -468,23 +482,22 @@ mod bench_ffn {
 
     fn run_ffn_queue_benchmark(ffns: &[TorchFFN], batch_size: usize, round: usize) {
         let mut res: Vec<std::time::Duration> = vec![];
-        
+
         // warm up all FFNs
         log::info!("Warming up {} FFNs...", ffns.len());
         for ffn in ffns {
             let inp = ffn.rand_input(batch_size);
             let _ = ffn.forward(&inp);
         }
-        
+
         let inp = ffns[0].rand_input(batch_size);
 
         // randomly select a FFN and run forward
         for _ in 0..round {
             // randomly select a FFN
-            std::random::random::<usize>();
-            let ffn_idx = std::random::random::<usize>() % ffns.len();
-            let ffn = &ffns[ffn_idx];
-            
+            let ffn_idx = rand::random::<u64>() % ffns.len() as u64;
+            let ffn = &ffns[ffn_idx as usize];
+
             let now = std::time::Instant::now();
             let r = ffn.forward(&inp);
             res.push(now.elapsed());
@@ -500,7 +513,7 @@ mod bench_ffn {
         println!("  Hidden size: {}", ffns[0].dim);
         println!("  Intermediate size: {}", ffns[0].intermediate_dim);
         println!("  Data type: BFloat16");
-        
+
         // summary the results
         let total_duration: std::time::Duration = res.iter().sum();
         let avg_duration = total_duration / round as u32;
@@ -518,15 +531,15 @@ mod bench_ffn {
 #[cfg(test)]
 mod bench_ffn_concurrent {
     use super::*;
+    use once_cell::sync::OnceCell;
     use std::sync::Arc;
     use std::time::{Duration, Instant};
     use tokio::task::JoinSet;
-    use once_cell::sync::OnceCell;
 
     #[tokio::test]
     async fn bench_torch_ffn_concurrent_vs_serial() {
         // Configs
-        let ffn_count = 64; 
+        let ffn_count = 64;
         let batch_size = 1; // Size of each request
         let reqests_num = 512; // Reqests processed in per round
         let thread_num = 64; // Num of concurrent tasks, requests will be evenly distributed across these tasks
@@ -537,7 +550,12 @@ mod bench_ffn_concurrent {
             let ffn = TorchFFN {
                 dim: 2048,
                 intermediate_dim: 768,
-                weight: ExpertWeight::from_rand_linear(2048, 768, crate::backend::DType::BFloat16, crate::backend::Device::CPU),
+                weight: ExpertWeight::from_rand_linear(
+                    2048,
+                    768,
+                    crate::backend::DType::BFloat16,
+                    crate::backend::Device::CPU,
+                ),
                 module: OnceCell::new(),
                 device: Device::CPU,
             };
@@ -558,9 +576,10 @@ mod bench_ffn_concurrent {
 
         // 1. Serial test
         let serial_results = run_serial_benchmark(&ffns, batch_size, reqests_num).await;
-        
+
         // 2. Concurrent test
-        let concurrent_results = run_concurrent_benchmark(&ffns, batch_size, reqests_num, thread_num).await;
+        let concurrent_results =
+            run_concurrent_benchmark(&ffns, batch_size, reqests_num, thread_num).await;
 
         // 3. Compare results
         compare_results(&serial_results, &concurrent_results, batch_size, thread_num);
@@ -577,9 +596,9 @@ mod bench_ffn_concurrent {
     }
 
     async fn run_serial_benchmark(
-        ffns: &[Arc<TorchFFN>], 
-        batch_size: usize, 
-        requests_num: usize
+        ffns: &[Arc<TorchFFN>],
+        batch_size: usize,
+        requests_num: usize,
     ) -> Vec<Duration> {
         println!("📊 Starting serial test...");
         let mut results = Vec::new();
@@ -589,7 +608,7 @@ mod bench_ffn_concurrent {
             // Randomly select a FFN
             let ffn_idx = rand::random_range(0..ffns.len());
             let ffn = &ffns[ffn_idx];
-            
+
             let start = Instant::now();
             let r = ffn.forward(&inp);
             let elapsed = start.elapsed();
@@ -608,19 +627,22 @@ mod bench_ffn_concurrent {
     }
 
     async fn run_concurrent_benchmark(
-        ffns: &[Arc<TorchFFN>], 
-        batch_size: usize, 
+        ffns: &[Arc<TorchFFN>],
+        batch_size: usize,
         requests_num: usize,
-        concurrent_tasks: usize
+        concurrent_tasks: usize,
     ) -> Vec<Duration> {
         println!("📊 Starting concurrent test...");
         // let mut all_results = Vec::new();
-        
+
         // Ensure each task executes at least once with even distribution
         let base_reqs_num = requests_num / concurrent_tasks;
         let extra_reqs_num = requests_num % concurrent_tasks;
-        
-        println!("  Base requests per task: {}, extra requests allocated to first {} tasks", base_reqs_num, extra_reqs_num);
+
+        println!(
+            "  Base requests per task: {}, extra requests allocated to first {} tasks",
+            base_reqs_num, extra_reqs_num
+        );
 
         let mut join_set = JoinSet::new();
 
@@ -628,17 +650,17 @@ mod bench_ffn_concurrent {
         for task_id in 0..concurrent_tasks {
             let ffns_clone = ffns.to_vec();
             let batch_size = batch_size;
-            
+
             // First few tasks get an extra round
-            let reqs_num = if task_id < extra_reqs_num { 
-                base_reqs_num + 1 
-            } else { 
-                base_reqs_num 
+            let reqs_num = if task_id < extra_reqs_num {
+                base_reqs_num + 1
+            } else {
+                base_reqs_num
             };
-            
+
             // If base_rounds is 0 and this task has no extra rounds, execute at least once
             let reqs_num = if reqs_num == 0 { 1 } else { reqs_num };
-            
+
             join_set.spawn(async move {
                 let mut task_results = Vec::new();
                 let inp = ffns_clone[0].rand_input(batch_size);
@@ -647,20 +669,20 @@ mod bench_ffn_concurrent {
                     // Randomly select a FFN for this task
                     let ffn_idx = rand::random_range(0..ffns_clone.len());
                     let ffn = &ffns_clone[ffn_idx];
-                    
+
                     let start = Instant::now();
                     let r = ffn.forward(&inp);
                     let elapsed = start.elapsed();
                     task_results.push(elapsed);
 
                     let _ = std::hint::black_box(r);
-                    
+
                     let _ = i;
                     // if reqs_num > 10 && (i + 1) % 10 == 0 {
                     //     println!("  Concurrent task {} progress: {}/{}", task_id, i + 1, reqs_num);
                     // }
                 }
-                
+
                 // println!("  Task {} completed: {} executions", task_id, reqs_num);
                 task_results
             });
@@ -668,16 +690,16 @@ mod bench_ffn_concurrent {
 
         // join_all tasks at once
         let task_results = join_set.join_all().await;
-        
+
         println!("✅ Concurrent test completed");
         task_results.into_iter().flatten().collect()
     }
 
     fn compare_results(
-        serial_results: &[Duration], 
-        concurrent_results: &[Duration], 
+        serial_results: &[Duration],
+        concurrent_results: &[Duration],
         batch_size: usize,
-        concurrent_tasks: usize
+        concurrent_tasks: usize,
     ) {
         // Check if results are empty
         if serial_results.is_empty() {
@@ -690,7 +712,8 @@ mod bench_ffn_concurrent {
         }
 
         let serial_avg = serial_results.iter().sum::<Duration>() / serial_results.len() as u32;
-        let concurrent_avg = concurrent_results.iter().sum::<Duration>() / concurrent_results.len() as u32;
+        let concurrent_avg =
+            concurrent_results.iter().sum::<Duration>() / concurrent_results.len() as u32;
 
         let serial_min = serial_results.iter().min().unwrap();
         let serial_max = serial_results.iter().max().unwrap();
@@ -699,32 +722,66 @@ mod bench_ffn_concurrent {
 
         println!();
         println!("📈 Performance Comparison Results:");
-        println!("  Actual tests: {} serial rounds, {} concurrent rounds", serial_results.len(), concurrent_results.len());
+        println!(
+            "  Actual tests: {} serial rounds, {} concurrent rounds",
+            serial_results.len(),
+            concurrent_results.len()
+        );
         println!("┌─────────────────────────────────────────┐");
         println!("│            Serial Test Results          │");
         println!("├─────────────────────────────────────────┤");
-        println!("│ Avg latency: {:>8} μs                │", serial_avg.as_micros());
-        println!("│ Min latency: {:>8} μs                │", serial_min.as_micros());
-        println!("│ Max latency: {:>8} μs                │", serial_max.as_micros());
-        println!("│ Per sequence: {:>8.1} μs               │", serial_avg.as_micros() as f64 / batch_size as f64);
+        println!(
+            "│ Avg latency: {:>8} μs                │",
+            serial_avg.as_micros()
+        );
+        println!(
+            "│ Min latency: {:>8} μs                │",
+            serial_min.as_micros()
+        );
+        println!(
+            "│ Max latency: {:>8} μs                │",
+            serial_max.as_micros()
+        );
+        println!(
+            "│ Per sequence: {:>8.1} μs               │",
+            serial_avg.as_micros() as f64 / batch_size as f64
+        );
         println!("└─────────────────────────────────────────┘");
 
         println!();
         println!("┌─────────────────────────────────────────┐");
-        println!("│    Concurrent Test Results ({} tasks)   │", concurrent_tasks);
+        println!(
+            "│    Concurrent Test Results ({} tasks)   │",
+            concurrent_tasks
+        );
         println!("├─────────────────────────────────────────┤");
-        println!("│ Avg latency:    {:>8} μs             │", concurrent_avg.as_micros());
-        println!("│ Min latency:    {:>8} μs             │", concurrent_min.as_micros());
-        println!("│ Max latency:    {:>8} μs             │", concurrent_max.as_micros());
-        println!("│ Per sequence:   {:>8.1} μs             │", concurrent_avg.as_micros() as f64 / batch_size as f64);
+        println!(
+            "│ Avg latency:    {:>8} μs             │",
+            concurrent_avg.as_micros()
+        );
+        println!(
+            "│ Min latency:    {:>8} μs             │",
+            concurrent_min.as_micros()
+        );
+        println!(
+            "│ Max latency:    {:>8} μs             │",
+            concurrent_max.as_micros()
+        );
+        println!(
+            "│ Per sequence:   {:>8.1} μs             │",
+            concurrent_avg.as_micros() as f64 / batch_size as f64
+        );
         println!("└─────────────────────────────────────────┘");
 
         println!();
         let slowdown_ratio = concurrent_avg.as_micros() as f64 / serial_avg.as_micros() as f64;
         println!("🎯 Key Metrics:");
         println!("  • Performance degradation: {:.2}x", slowdown_ratio);
-        println!("  • Concurrent latency increase: {} μs", concurrent_avg.as_micros() as i64 - serial_avg.as_micros() as i64);
-        
+        println!(
+            "  • Concurrent latency increase: {} μs",
+            concurrent_avg.as_micros() as i64 - serial_avg.as_micros() as i64
+        );
+
         // Latency distribution analysis
         println!();
         println!("📊 Latency Distribution Analysis:");
@@ -735,7 +792,7 @@ mod bench_ffn_concurrent {
     fn print_latency_distribution(name: &str, results: &[Duration]) {
         let mut latencies: Vec<u64> = results.iter().map(|d| d.as_micros() as u64).collect();
         latencies.sort();
-        
+
         let len = latencies.len();
         let p50 = latencies[len * 50 / 100];
         let p90 = latencies[len * 90 / 100];
@@ -743,6 +800,9 @@ mod bench_ffn_concurrent {
         let p99 = latencies[len * 99 / 100];
 
         println!("  {} latency distribution:", name);
-        println!("    P50: {} μs, P90: {} μs, P95: {} μs, P99: {} μs", p50, p90, p95, p99);
+        println!(
+            "    P50: {} μs, P90: {} μs, P95: {} μs, P99: {} μs",
+            p50, p90, p95, p99
+        );
     }
 }
