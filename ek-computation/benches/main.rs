@@ -1,0 +1,22 @@
+mod benchmarks;
+
+use std::{collections::HashMap, sync::LazyLock};
+
+use criterion::{criterion_group, criterion_main};
+use ek_computation::backend::Device;
+
+pub static DEVICES: LazyLock<HashMap<&'static str, Device>> = LazyLock::new(|| {
+    let mut devices = HashMap::new();
+    devices.insert("cpu", Device::CPU);
+    devices.insert("cuda:0", Device::CUDA(0));
+    devices
+});
+
+criterion_group!(
+    benches,
+    benchmarks::xpu_ffn_activate::bench,
+    benchmarks::xpu_ffn_queue::bench,
+    benchmarks::xpu_ffn::bench,
+    benchmarks::xpu_transfer::bench,
+);
+criterion_main!(benches);

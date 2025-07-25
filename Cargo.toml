@@ -1,12 +1,6 @@
 [workspace]
 resolver = "2"
-members = [
-    "ek-base",
-    "ek-benchmark",
-    "ek-cli",
-    "ek-computation",
-    "ek-db",
-]
+members = ["ek-base", "ek-benchmark", "ek-cli", "ek-computation", "ek-db"]
 default-members = ["ek-cli"]
 
 [workspace.package]

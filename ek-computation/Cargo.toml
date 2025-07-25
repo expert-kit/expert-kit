@@ -51,5 +51,5 @@ criterion = { workspace = true }
 crate-type = ["cdylib", "staticlib", "rlib"]
 
 [[bench]]
-name = "activate"
+name = "main"
 harness = false
