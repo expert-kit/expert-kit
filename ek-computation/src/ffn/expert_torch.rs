@@ -354,7 +354,6 @@ mod bench_ffn_concurrent {
         // Launch multiple concurrent tasks
         for task_id in 0..concurrent_tasks {
             let ffns_clone = ffns.to_vec();
-            let batch_size = batch_size;
 
             // First few tasks get an extra round
             let reqs_num = if task_id < extra_reqs_num {
