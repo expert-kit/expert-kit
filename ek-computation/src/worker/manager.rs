@@ -80,11 +80,11 @@ pub fn get_expert_db() -> Arc<RwLock<dyn ExpertDB + Send + Sync>> {
 }
 
 /// Get the sync expert database instance
-pub fn get_expert_db_sync() -> Arc<std::sync::RwLock<dyn ExpertDBSync + Send + Sync>> {
-    static INSTANCE: OnceCell<Arc<std::sync::RwLock<ExpertDBImplSync>>> = OnceCell::new();
+pub fn get_expert_db_sync() -> Arc<dyn ExpertDBSync + Send + Sync> {
+    static INSTANCE: OnceCell<Arc<ExpertDBImplSync>> = OnceCell::new();
     let res = INSTANCE.get_or_init(|| {
         let core = get_shared_db_core();
-        Arc::new(std::sync::RwLock::new(ExpertDBImplSync { core }))
+        Arc::new(ExpertDBImplSync { core })
     });
     (res.clone()) as _
 }

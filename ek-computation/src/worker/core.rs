@@ -30,7 +30,7 @@ impl Default for EKInstanceGateAsync {
 
 /// Sync version of EKInstanceGate
 pub struct EKInstanceGateSync {
-    experts: Arc<std::sync::RwLock<dyn ExpertDBSync + Send + Sync>>,
+    experts: Arc<dyn ExpertDBSync + Send + Sync>,
 }
 
 impl fmt::Debug for EKInstanceGateSync {
@@ -47,7 +47,6 @@ impl Default for EKInstanceGateSync {
 }
 
 pub type GlobalEKInstanceGateAsync = Arc<tokio::sync::RwLock<EKInstanceGateAsync>>;
-pub type GlobalEKInstanceGateSync = Arc<std::sync::RwLock<EKInstanceGateSync>>;
 
 /// Get the global async instance gate (for state management, etc.)
 pub fn get_instance_gate() -> GlobalEKInstanceGateAsync {
@@ -60,13 +59,10 @@ pub fn get_instance_gate() -> GlobalEKInstanceGateAsync {
 }
 
 /// Get the global sync instance gate (for compute operations)
-pub fn get_instance_gate_sync() -> GlobalEKInstanceGateSync {
-    static INSTANCE: OnceCell<GlobalEKInstanceGateSync> = OnceCell::new();
-    let inst = INSTANCE.get_or_init(|| {
-        let inner = EKInstanceGateSync::new();
-        Arc::new(std::sync::RwLock::new(inner))
-    });
-    inst.clone()
+pub fn get_instance_gate_sync() -> &'static EKInstanceGateSync {
+    static INSTANCE: OnceCell<EKInstanceGateSync> = OnceCell::new();
+
+    INSTANCE.get_or_init(EKInstanceGateSync::new)
 }
 
 impl EKInstanceGateAsync {
@@ -108,10 +104,7 @@ impl EKInstanceGateSync {
         let exp_id = &req.sequences[0].experts[0];
 
         // Load expert synchronously from shared database
-        let exp = {
-            let experts_guard = self.experts.read().unwrap();
-            experts_guard.load(exp_id)?
-        };
+        let exp = self.experts.load(exp_id)?;
 
         let now = std::time::Instant::now();
         tracing::debug!("[L3 {:?}] exp_backend.forward_sync() started", exp_id,);
@@ -156,7 +149,6 @@ impl EKInstanceGateSync {
     /// Get list of currently loaded experts (sync version)
     #[expect(unused)]
     pub fn current_experts_sync(&self) -> EKResult<Vec<String>> {
-        let experts_guard = self.experts.read().unwrap();
-        experts_guard.keys()
+        self.experts.keys()
     }
 }

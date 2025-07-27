@@ -10,24 +10,24 @@ use ek_base::utils::Defers;
 use tonic::{Request, Response, Status};
 use tracing::instrument;
 
-use super::core::{
-    GlobalEKInstanceGateAsync, GlobalEKInstanceGateSync, get_instance_gate, get_instance_gate_sync,
-};
+use super::core::{EKInstanceGateSync, get_instance_gate_sync};
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct BasicExpertImpl {
-    _gate_async: GlobalEKInstanceGateAsync, // For state management operations
-    gate_sync: GlobalEKInstanceGateSync,    // For compute operations
+    gate_sync: &'static EKInstanceGateSync, // For compute operations
+}
+
+impl Default for BasicExpertImpl {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl BasicExpertImpl {
     pub fn new() -> Self {
-        let gate_async = get_instance_gate();
-        let gate_sync = get_instance_gate_sync();
         Self {
-            _gate_async: gate_async,
-            gate_sync,
+            gate_sync: get_instance_gate_sync(),
         }
     }
 }
@@ -102,7 +102,7 @@ impl BasicExpertImpl {
         let req_inner = request.into_inner();
 
         // Use sync gate for compute-intensive operations
-        let gate_sync = self.gate_sync.clone();
+        let gate_sync = self.gate_sync;
 
         // Capture current tracing context for the blocking task
         let cx = tracing::Span::current().context();
@@ -114,8 +114,7 @@ impl BasicExpertImpl {
             let _guard = cx_clone.attach();
 
             // Perform synchronous forward computation
-            let sync_guard = gate_sync.read().unwrap();
-            sync_guard.forward_sync(req_inner)
+            gate_sync.forward_sync(req_inner)
         })
         .await
         .map_err(|e| {
