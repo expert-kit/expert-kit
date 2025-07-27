@@ -77,12 +77,13 @@ opentelemetry-otlp = { version = "0.29.0", features = [
 opentelemetry-semantic-conventions = { version = "0.29.0", features = [
     "semconv_experimental",
 ] }
-ort = { version = "2.0.0-rc.9", features = [
+ort = { version = "=2.0.0-rc.9", features = [
     "ndarray",
     "load-dynamic",
     "copy-dylibs",
     "half",
 ] }
+ort-sys = { version = "=2.0.0-rc.9" }
 polars = { version = "0.46.0", features = [
     "sql",
     "ndarray",

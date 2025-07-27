@@ -13,5 +13,6 @@ ek-computation = { workspace = true }
 clap = { workspace = true }
 log = { workspace = true }
 ort = { workspace = true }
+ort-sys = { workspace = true }
 polars = { workspace = true }
 sysinfo = { workspace = true }

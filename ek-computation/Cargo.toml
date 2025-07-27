@@ -24,6 +24,7 @@ ndarray = { workspace = true }
 ndarray-rand = { workspace = true }
 once_cell = { workspace = true }
 ort = { workspace = true }
+ort-sys = { workspace = true }
 prometheus = { workspace = true }
 prost = { workspace = true }
 rand = { workspace = true }

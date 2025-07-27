@@ -19,6 +19,7 @@ once_cell = { workspace = true }
 opendal = { workspace = true }
 opentelemetry = { workspace = true }
 ort = { workspace = true }
+ort-sys = { workspace = true }
 reqwest = { workspace = true }
 safetensors = { workspace = true }
 serde = { workspace = true }

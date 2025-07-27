@@ -26,6 +26,7 @@ opentelemetry_sdk = { workspace = true }
 opentelemetry-otlp = { workspace = true }
 opentelemetry-semantic-conventions = { workspace = true }
 ort = { workspace = true }
+ort-sys = { workspace = true }
 prost = { workspace = true }
 rand = { workspace = true }
 safetensors = { workspace = true }
