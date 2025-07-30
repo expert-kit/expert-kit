@@ -5,8 +5,7 @@ use crate::{
 };
 use core::fmt;
 use ek_base::error::EKResult;
-use once_cell::sync::OnceCell;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use tokio;
 use tracing::instrument;
 
@@ -46,22 +45,15 @@ impl Default for EKInstanceGateSync {
     }
 }
 
-pub type GlobalEKInstanceGateAsync = Arc<tokio::sync::RwLock<EKInstanceGateAsync>>;
-
 /// Get the global async instance gate (for state management, etc.)
-pub fn get_instance_gate() -> GlobalEKInstanceGateAsync {
-    static INSTANCE: OnceCell<GlobalEKInstanceGateAsync> = OnceCell::new();
-    let inst = INSTANCE.get_or_init(|| {
-        let inner = EKInstanceGateAsync::new();
-        Arc::new(tokio::sync::RwLock::new(inner))
-    });
-    inst.clone()
+pub fn get_instance_gate() -> &'static EKInstanceGateAsync {
+    static INSTANCE: OnceLock<EKInstanceGateAsync> = OnceLock::new();
+    INSTANCE.get_or_init(EKInstanceGateAsync::new)
 }
 
 /// Get the global sync instance gate (for compute operations)
 pub fn get_instance_gate_sync() -> &'static EKInstanceGateSync {
-    static INSTANCE: OnceCell<EKInstanceGateSync> = OnceCell::new();
-
+    static INSTANCE: OnceLock<EKInstanceGateSync> = OnceLock::new();
     INSTANCE.get_or_init(EKInstanceGateSync::new)
 }
 

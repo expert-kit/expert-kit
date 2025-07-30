@@ -1,7 +1,10 @@
-use std::{net::SocketAddr, path::Path, sync::LazyLock};
+use std::{
+    net::SocketAddr,
+    path::Path,
+    sync::{LazyLock, OnceLock},
+};
 
 use config::{Config, Environment};
-use once_cell::sync::OnceCell;
 use serde::Deserialize;
 
 #[derive(Debug, Deserialize, Clone)]
@@ -165,7 +168,7 @@ pub fn env_source() -> Environment {
     ENV_SRC.clone()
 }
 pub fn get_ek_settings_base(src: &[&str]) -> &'static Settings {
-    static CONFIG: OnceCell<Settings> = OnceCell::new();
+    static CONFIG: OnceLock<Settings> = OnceLock::new();
 
     (CONFIG.get_or_init(|| {
         let mut settings = Config::builder();

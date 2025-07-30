@@ -1,6 +1,8 @@
-use std::{collections::BTreeMap, sync::Arc};
+use std::{
+    collections::BTreeMap,
+    sync::{Arc, LazyLock},
+};
 
-use once_cell::sync::Lazy;
 use tokio::sync::{
     Mutex,
     mpsc::{self, Receiver, Sender},
@@ -20,7 +22,7 @@ pub struct DispatcherImpl {
     ch_store: BTreeMap<String, Sender<Vec<Expert>>>,
 }
 
-pub static DISPATCHER: Lazy<Arc<Mutex<DispatcherImpl>>> = Lazy::new(|| {
+pub static DISPATCHER: LazyLock<Arc<Mutex<DispatcherImpl>>> = LazyLock::new(|| {
     let inner = DispatcherImpl::new();
     Arc::new(Mutex::new(inner))
 });

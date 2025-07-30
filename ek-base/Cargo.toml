@@ -15,7 +15,6 @@ diesel-async = { workspace = true }
 gethostname = { workspace = true }
 http = { workspace = true }
 log = { workspace = true }
-once_cell = { workspace = true }
 opendal = { workspace = true }
 opentelemetry = { workspace = true }
 ort = { workspace = true }

@@ -9,6 +9,7 @@ use crate::{
             state_service_client::StateServiceClient,
         },
     },
+    worker::core::EKInstanceGateAsync,
     x::{EKInstance, get_graceful_shutdown_ch},
 };
 use ek_base::{config::get_ek_settings, error::EKResult};
@@ -23,7 +24,7 @@ use tokio_util::sync::CancellationToken;
 use tonic::transport::Endpoint;
 
 use super::{
-    core::{GlobalEKInstanceGateAsync, get_instance_gate},
+    core::get_instance_gate,
     manager::{ExpertDB, get_expert_db},
     x::{self},
 };
@@ -32,7 +33,7 @@ pub struct StateClient {
     tensor_db: Arc<RwLock<SafeTensorDB>>,
     expert_db: Arc<RwLock<dyn ExpertDB + Sync + Send + 'static>>,
     worker_id: String,
-    gate_async: GlobalEKInstanceGateAsync, // Use async gate for state management
+    gate_async: &'static EKInstanceGateAsync, // Use async gate for state management
     controller_addr: Endpoint,
 }
 
@@ -213,7 +214,7 @@ impl StateClient {
         self.load_new_experts(&exp_incoming).await?;
 
         // Use async gate for state management operations
-        let exp_current = self.gate_async.read().await.current_experts().await?;
+        let exp_current = self.gate_async.current_experts().await?;
         self.remove_stale_experts(&exp_incoming, &exp_current).await;
         Ok(())
     }

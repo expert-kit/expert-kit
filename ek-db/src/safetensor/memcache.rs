@@ -1,8 +1,11 @@
-use std::{cell::UnsafeCell, collections::HashMap, sync::RwLock};
+use std::{
+    cell::UnsafeCell,
+    collections::HashMap,
+    sync::{OnceLock, RwLock},
+};
 
 use bytes::Bytes;
 use memmap2::Mmap;
-use once_cell::sync::OnceCell;
 use safetensors::SafeTensors;
 
 pub struct MemCache {
@@ -92,14 +95,14 @@ unsafe impl Sync for SafetensorCache<'_> {}
 
 #[derive(Debug)]
 pub struct SafeTensorWithData<'data> {
-    st: OnceCell<SafeTensors<'data>>,
+    st: OnceLock<SafeTensors<'data>>,
     mmap: Mmap,
 }
 
 impl<'data> SafeTensorWithData<'data> {
     pub fn new(mmap: Mmap) -> Self {
         Self {
-            st: OnceCell::new(),
+            st: OnceLock::new(),
             mmap,
         }
     }

@@ -13,7 +13,6 @@ actix-web = { workspace = true }
 bytes = { workspace = true }
 log = { workspace = true }
 memmap2 = { workspace = true }
-once_cell = { workspace = true }
 opendal = { workspace = true }
 reqwest = { workspace = true }
 safetensors = { workspace = true }

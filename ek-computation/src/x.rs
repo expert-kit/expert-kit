@@ -1,15 +1,19 @@
-use std::{path::PathBuf, sync::Arc};
+use std::{
+    path::PathBuf,
+    sync::{
+        Arc, OnceLock,
+        atomic::{AtomicUsize, Ordering},
+    },
+};
 
 use clap::ValueEnum;
 use ek_base::config::get_ek_settings;
-use once_cell::sync::OnceCell;
 use tokio::sync::{
     Mutex,
     mpsc::{Receiver, Sender},
 };
 
 use super::backend::Device;
-use std::sync::atomic::{AtomicUsize, Ordering};
 
 static INSTANCE_COUNTER: AtomicUsize = AtomicUsize::new(0);
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, ValueEnum, Debug)]
@@ -60,7 +64,7 @@ pub fn test_root() -> PathBuf {
 type GracefulChannelPair = (Sender<()>, Arc<Mutex<Receiver<()>>>);
 
 pub fn get_graceful_shutdown_ch() -> GracefulChannelPair {
-    static GRACEFUL_SHUTDOWN: OnceCell<GracefulChannelPair> = OnceCell::new();
+    static GRACEFUL_SHUTDOWN: OnceLock<GracefulChannelPair> = OnceLock::new();
     let res = GRACEFUL_SHUTDOWN.get_or_init(|| {
         let (tx, rx) = tokio::sync::mpsc::channel(1);
         (tx, Arc::new(Mutex::new(rx)))

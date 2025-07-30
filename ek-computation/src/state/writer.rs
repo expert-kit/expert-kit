@@ -1,4 +1,7 @@
-use std::{sync::Arc, time};
+use std::{
+    sync::{Arc, OnceLock},
+    time,
+};
 
 use crate::{
     proto::ek::object::v1::ExpertSlice,
@@ -10,15 +13,15 @@ use crate::{
 };
 use tonic::async_trait;
 
-use super::models::{self, NewExpert, NewInstance, NewModel, NewNode};
+use super::{
+    io::StateWriter,
+    models::{self, NewExpert, NewInstance, NewModel, NewNode},
+};
 use diesel::{ExpressionMethods, SelectableHelper, upsert::excluded};
 use diesel_async::{AsyncConnection, RunQueryDsl};
 use ek_base::error::{EKError, EKResult};
 use models::{Expert, Instance, Model, Node};
-use once_cell::sync::OnceCell;
 use tokio::sync::RwLock;
-
-use super::io::StateWriter;
 
 pub struct StateWriterImpl {}
 
@@ -254,7 +257,7 @@ impl StateWriterImpl {
     }
 }
 pub fn get_state_writer() -> Arc<RwLock<dyn StateWriter + Send + Sync>> {
-    static INSTANCE: OnceCell<Arc<RwLock<StateWriterImpl>>> = OnceCell::new();
+    static INSTANCE: OnceLock<Arc<RwLock<StateWriterImpl>>> = OnceLock::new();
     let res = INSTANCE.get_or_init(|| {
         let inner = StateWriterImpl {};
         Arc::new(RwLock::new(inner))

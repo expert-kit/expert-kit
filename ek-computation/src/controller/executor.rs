@@ -1,11 +1,15 @@
-use std::{collections::BTreeMap, fmt, sync::Arc, time};
+use std::{
+    collections::BTreeMap,
+    fmt,
+    sync::{Arc, OnceLock},
+    time,
+};
 
 use ek_base::{
     config::get_ek_settings,
     error::{EKError, EKResult},
     utils::{Defers, PerfTimer},
 };
-use once_cell::sync::OnceCell;
 use safetensors::SafeTensors;
 use tch::{IndexOp, Tensor};
 use tokio::sync::{Mutex, mpsc};
@@ -338,7 +342,7 @@ impl NaiveExecutor {
 }
 
 pub fn get_executor() -> Arc<Mutex<dyn Executor + Send>> {
-    static INSTANCE: OnceCell<Arc<Mutex<dyn Executor + Send>>> = OnceCell::new();
+    static INSTANCE: OnceLock<Arc<Mutex<dyn Executor + Send>>> = OnceLock::new();
     let res = INSTANCE.get_or_init(|| {
         let inner = NaiveExecutor::new();
         Arc::new(Mutex::new(inner))

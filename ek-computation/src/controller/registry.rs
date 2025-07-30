@@ -1,11 +1,13 @@
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::HashMap,
+    sync::{Arc, OnceLock},
+};
 
 use ek_base::{
     error::{EKError, EKResult},
     tracing::grpc::OTelGrpcClientMiddleware,
 };
 use ndarray_rand::rand;
-use once_cell::sync::OnceCell;
 use tokio::sync::Mutex;
 use tonic::transport::Channel;
 use tower::ServiceBuilder;
@@ -133,7 +135,7 @@ pub type GlobalWorkerRegistry =
     Arc<Mutex<dyn ExpertRegistry<T = OTelGrpcClientMiddleware> + Send + Sync>>;
 
 pub fn get_registry() -> GlobalWorkerRegistry {
-    static INSTANCE: OnceCell<Arc<Mutex<ExpertRegistryImpl>>> = OnceCell::new();
+    static INSTANCE: OnceLock<Arc<Mutex<ExpertRegistryImpl>>> = OnceLock::new();
     let res = INSTANCE.get_or_init(|| {
         let inner = ExpertRegistryImpl::new();
         Arc::new(Mutex::new(inner))

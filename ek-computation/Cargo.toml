@@ -22,7 +22,6 @@ log = { workspace = true }
 mime = { workspace = true }
 ndarray = { workspace = true }
 ndarray-rand = { workspace = true }
-once_cell = { workspace = true }
 ort = { workspace = true }
 ort-sys = { workspace = true }
 prometheus = { workspace = true }

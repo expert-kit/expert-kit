@@ -1,4 +1,4 @@
-use std::sync::{Arc, Mutex};
+use std::sync::OnceLock;
 
 use crate::backend::{DType, Device, EkTensor, torch::TchTensor};
 
@@ -7,7 +7,6 @@ use super::{
     meta::{Expert, ExpertShape},
 };
 use ek_base::error::EKResult;
-use once_cell::sync::OnceCell;
 use tch::{
     self,
     nn::{self, Module},
@@ -16,7 +15,7 @@ use tch::{
 pub struct TorchFFN {
     dim: usize,
     intermediate_dim: usize,
-    module: OnceCell<Arc<Mutex<nn::Sequential>>>,
+    module: OnceLock<nn::Sequential>,
     weight: ExpertWeight<TchTensor>,
     device: Device,
 }
@@ -58,7 +57,7 @@ impl TorchFFN {
     pub fn new(
         dim: usize,
         intermediate_dim: usize,
-        module: OnceCell<Arc<Mutex<nn::Sequential>>>,
+        module: OnceLock<nn::Sequential>,
         weight: ExpertWeight<TchTensor>,
         device: Device,
     ) -> Self {
@@ -71,8 +70,8 @@ impl TorchFFN {
         }
     }
 
-    pub fn load_module(&self) -> Arc<Mutex<nn::Sequential>> {
-        let m = self.module.get_or_init(|| {
+    pub fn load_module(&self) -> &nn::Sequential {
+        self.module.get_or_init(|| {
             tch::no_grad(|| {
                 let w1_tensor = self
                     .weight
@@ -95,17 +94,14 @@ impl TorchFFN {
                     .shallow_clone()
                     .to_kind(tch::Kind::BFloat16)
                     .to_device(self.device.into());
-                let module = nn::seq().add_fn(move |x| {
+                nn::seq().add_fn(move |x| {
                     let _up = x.matmul(&w1_tensor.transpose(0, 1));
                     let _gate = x.matmul(&w3_tensor.transpose(0, 1));
                     let _hidden = _up * _gate.silu();
                     _hidden.matmul(&w2_tensor.transpose(0, 1))
-                });
-
-                Arc::new(Mutex::new(module))
+                })
             })
-        });
-        m.clone()
+        })
     }
 
     pub fn device(&self) -> Device {
@@ -116,9 +112,7 @@ impl TorchFFN {
 impl Expert<TchTensor> for TorchFFN {
     fn forward(&self, x: &TchTensor) -> TchTensor {
         let module = self.load_module();
-        let guard = module.lock().unwrap();
-
-        let res = guard.forward(&x.inner());
+        let res = module.forward(&x.inner());
         TchTensor(res)
     }
 
@@ -137,17 +131,13 @@ impl Expert<TchTensor> for TorchFFN {
     }
 
     fn construct(x: crate::x::EKInstance, weight: ExpertWeight<TchTensor>) -> EKResult<Self> {
-        let cell: OnceCell<Arc<Mutex<nn::Sequential>>> = OnceCell::new();
-        let res = TorchFFN {
+        Ok(TorchFFN {
             intermediate_dim: x.intermediate,
             dim: x.hidden,
-            module: cell,
+            module: OnceLock::new(),
             weight,
             device: x.device,
-        };
-        // res.load_module();
-
-        Ok(res)
+        })
     }
 }
 
@@ -237,7 +227,6 @@ mod test {
 #[cfg(test)]
 mod bench_ffn_concurrent {
     use super::*;
-    use once_cell::sync::OnceCell;
     use std::sync::Arc;
     use std::time::{Duration, Instant};
     use tokio::task::JoinSet;
@@ -262,7 +251,7 @@ mod bench_ffn_concurrent {
                     crate::backend::DType::BFloat16,
                     crate::backend::Device::CPU,
                 ),
-                module: OnceCell::new(),
+                module: OnceLock::new(),
                 device: Device::CPU,
             };
             ffns.push(ffn);

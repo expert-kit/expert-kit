@@ -1,3 +1,5 @@
+use std::sync::OnceLock;
+
 use criterion::{BatchSize, Criterion};
 use ek_computation::{
     backend::EkTensor,
@@ -6,7 +8,6 @@ use ek_computation::{
         meta::{Expert, ExpertWeight},
     },
 };
-use once_cell::sync::OnceCell;
 
 use crate::DEVICES;
 
@@ -23,7 +24,7 @@ pub fn bench(c: &mut Criterion) {
                     TorchFFN::new(
                         2048,
                         768,
-                        OnceCell::new(),
+                        OnceLock::new(),
                         ExpertWeight::from_rand_linear(
                             2048,
                             768,
