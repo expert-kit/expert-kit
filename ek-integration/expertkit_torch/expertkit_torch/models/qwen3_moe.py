@@ -340,6 +340,21 @@ def evaluate_batch(
         }
 
 
+def sharegpt(path):
+    if not os.path.exists(path):
+        raise FileNotFoundError(f"File does not exist: {path}")
+    if not os.path.isfile(path):  
+        raise ValueError(f"Path is not a file: {path}")
+    with open(path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    prompts = []
+    for item in data:
+        for conversation in item["conversations"]:
+            if conversation["from"] == "human":
+                prompts.append(conversation["value"])
+    return prompts
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -372,19 +387,43 @@ def main():
         help="Enable detailed profiling of model components (attention vs expert).",
     )
     parser.add_argument(
+        "--dataset",
+        choices=["none", "sharegpt"],
+        default="none",
+        help="The dataset to use for evaluation.",
+    )
+    parser.add_argument(
+        "--dataset_path",
+        type=str,
+        help="Path to the dataset file.",
+    )
+    parser.add_argument(
         "--print_response",
         action="store_true",
         help="Print the response content.",
     )
     args = parser.parse_args()
 
-    test_prompts = [
-        "What is MoE Model?",
-        "Explain the benefits of mixture of experts.",
-        "How does MoE improve model efficiency?",
-        "Compare MoE with dense models.",
-    ] * 512
-    
+    if args.dataset == "none":
+        # Use default prompts if no dataset is specified
+        test_prompts = [
+            "What is MoE Model?",
+            "Explain the benefits of mixture of experts.",
+            "How does MoE improve model efficiency?",
+            "Compare MoE with dense models.",
+        ] * 512
+    elif args.dataset == "sharegpt":
+        # Validate that dataset_path is provided
+        if args.dataset_path is None:
+            raise ValueError("You must provide --dataset_path when using the 'sharegpt' dataset.")
+        # Load prompts from ShareGPT dataset
+        test_prompts = sharegpt(args.dataset_path)
+        if len(test_prompts) < 512:
+            test_prompts *= (512 // len(test_prompts)) + 1
+        test_prompts = test_prompts[:512]
+    else:
+        raise ValueError("Invalid dataset specified.")
+
     test_batch_sizes = [1, 2, 4, 8, 16, 32, 64, 128, 256]
     aggregated_results = []
     for batch_size in test_batch_sizes:
