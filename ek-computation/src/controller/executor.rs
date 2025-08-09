@@ -24,9 +24,7 @@ use crate::{
             LocalShmWorkerResp,
         },
     },
-    proto::ek::worker::v1::{self, ForwardReq, forward_req::SequenceInfo},
-    schema::expert,
-    shmq::ShmQueue,
+    proto::ek::worker::v1::{self},
 };
 
 use super::registry::{GlobalWorkerRegistry, get_registry};
@@ -357,6 +355,12 @@ pub struct LocalShmExecutor {
     pending_resp: Arc<Mutex<HashMap<usize, LocalShmWorkerResp>>>,
 }
 
+impl Default for LocalShmExecutor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl LocalShmExecutor {
     pub fn new() -> Self {
         Self {
@@ -510,7 +514,7 @@ impl LocalShmExecutor {
                         expert_id,
                         start.elapsed().as_millis(),
                     );
-                    return resp;
+                    resp
                 }
                 .in_current_span(),
             );
@@ -520,7 +524,7 @@ impl LocalShmExecutor {
         for (egress_idx, handle) in handles.into_iter().enumerate() {
             let egress = &chips[egress_idx];
             let res = handle.await?;
-            let res_safetensor = SafeTensors::deserialize(&res.output_tensor())?;
+            let res_safetensor = SafeTensors::deserialize(res.output_tensor())?;
             // TODO: hardcode safe tensor name
             let view = res_safetensor.tensor("data")?;
             let res_tensor = TchTensor::from(&view).inner();

@@ -215,7 +215,7 @@ mod test {
         assert_eq!(receiver.recv(), Ok(4));
 
         let mut counter = 0;
-        while let Ok(_) = sender.send(&5) {
+        while sender.send(&5).is_ok() {
             counter += 1;
         }
         assert_eq!(sender.send(&5), Err(ShmQueueError::Full));

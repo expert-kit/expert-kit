@@ -195,9 +195,9 @@ impl ShmBytes for LocalShmWorkerReq {
         self.id
             .to_le_bytes()
             .into_iter()
-            .chain(self.expert_id.into_iter())
-            .chain(self.input_tensor.len().to_le_bytes().into_iter())
-            .chain(self.input_tensor.clone().into_iter())
+            .chain(self.expert_id)
+            .chain(self.input_tensor.len().to_le_bytes())
+            .chain(self.input_tensor.clone())
     }
 
     fn from_bytes(bytes: &[u8]) -> Self {
@@ -253,8 +253,8 @@ impl ShmBytes for LocalShmWorkerResp {
         self.id
             .to_le_bytes()
             .into_iter()
-            .chain(self.output_tensor.len().to_le_bytes().into_iter())
-            .chain(self.output_tensor.clone().into_iter())
+            .chain(self.output_tensor.len().to_le_bytes())
+            .chain(self.output_tensor.clone())
     }
 
     fn from_bytes(bytes: &[u8]) -> Self {
@@ -290,6 +290,12 @@ pub struct LocalShmExpertRegistry {
         )>,
     >,
     reader: Box<dyn StateReader + Send + Sync>,
+}
+
+impl Default for LocalShmExpertRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl LocalShmExpertRegistry {
@@ -333,7 +339,7 @@ impl ExpertRegistry for LocalShmExpertRegistry {
                     });
                 self.experts2channels
                     .entry(eid.to_owned())
-                    .or_insert_with(Vec::new)
+                    .or_default()
                     .push((
                         node.hostname.clone(),
                         req_channel.clone(),

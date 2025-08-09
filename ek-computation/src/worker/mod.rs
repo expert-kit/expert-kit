@@ -5,7 +5,6 @@ use std::sync::Mutex;
 use std::time;
 use std::time::Duration;
 
-use ek_base::tracing::grpc::OTelGrpcServerMiddleware;
 use state::StateInspector;
 use tokio::select;
 use tokio::signal;
@@ -23,10 +22,7 @@ use crate::shmq::ShmQueue;
 use crate::worker::core::EKInstanceGateSync;
 use crate::x::get_graceful_shutdown_ch;
 
-use super::{
-    proto::ek::worker::v1::computation_service_server::ComputationServiceServer,
-    worker::{server::BasicExpertImpl, state::StateClient},
-};
+use super::worker::state::StateClient;
 use ek_base::{config::get_ek_settings, error::EKResult};
 
 /// Main worker entry point
