@@ -5,6 +5,7 @@ pub mod metrics;
 pub mod onnx;
 pub mod proto;
 mod schema;
+pub(crate) mod shmq;
 pub mod state;
 pub mod weight;
 pub mod worker;
