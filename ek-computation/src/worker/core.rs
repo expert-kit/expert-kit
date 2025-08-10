@@ -147,7 +147,6 @@ impl EKInstanceGateSync {
         let exp = self.experts.load(expert_id)?;
         let st = safetensors::SafeTensors::deserialize(input_tensor)?;
         let tv = st.tensor("data")?;
-        log::info!("input: shape={:?}", tv.shape());
         let res = exp.forward(&tv)?;
         Ok(res.serialize())
     }
