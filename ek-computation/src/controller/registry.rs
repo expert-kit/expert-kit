@@ -142,7 +142,7 @@ impl ExpertRegistryImpl {
     }
 }
 
-const MAX_TENSOR_SIZE: usize = 8 * 1024 * 1024; // 2MB
+const MAX_TENSOR_SIZE: usize = 32 * 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LocalShmWorkerReq {
