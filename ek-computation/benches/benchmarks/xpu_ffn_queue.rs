@@ -28,6 +28,7 @@ pub fn bench(c: &mut Criterion) {
                             2048,
                             768,
                             ek_computation::backend::DType::BFloat16,
+                            // we use cuda gpu to accelerate the ffn initialization here
                             ek_computation::backend::Device::CUDA(0),
                         ),
                         DEVICES[dev],
