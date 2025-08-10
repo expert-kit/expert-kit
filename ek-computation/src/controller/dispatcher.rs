@@ -41,14 +41,14 @@ impl Dispatcher for DispatcherImpl {
         for data in &state {
             let node = &data.node;
             let experts = &data.experts;
-            if let Some(ch) = self.ch_store.get(&node.hostname) {
-                if let Err(e) = ch.send(experts.clone()).await {
-                    log::error!(
-                        "Failed to send expert update to channel for hostname: {} err: {}",
-                        node.hostname,
-                        e
-                    );
-                }
+            if let Some(ch) = self.ch_store.get(&node.hostname)
+                && let Err(e) = ch.send(experts.clone()).await
+            {
+                log::error!(
+                    "Failed to send expert update to channel for hostname: {} err: {}",
+                    node.hostname,
+                    e
+                );
             }
         }
     }

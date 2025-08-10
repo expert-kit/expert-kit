@@ -105,10 +105,10 @@ impl ExpertDBCore {
 
     fn mark_loading(&mut self, id: &str) -> EKResult<bool> {
         let locked = self.loading.get(id);
-        if let Some(locked) = locked {
-            if *locked {
-                return Ok(false);
-            }
+        if let Some(locked) = locked
+            && *locked
+        {
+            return Ok(false);
         }
         let entry = self.loading.entry(id.into()).or_insert(true);
         *entry = true;

@@ -206,6 +206,7 @@ impl LinuxCpuAffinityOps {
 }
 
 /// Default implementation for unsupported platforms
+#[expect(dead_code)]
 pub struct DefaultCpuAffinityOps;
 
 impl CpuAffinityOps for DefaultCpuAffinityOps {
@@ -286,26 +287,26 @@ pub fn apply_cpu_affinity(config: &CpuAffinityConfig) -> Result<(), String> {
     );
 
     // Apply CPU core affinity if specified and supported
-    if let Some(cores) = &config.cores {
-        if !cores.is_empty() {
-            if ops.is_cpu_affinity_supported() {
-                ops.set_cpu_affinity(cores)?;
-                log::info!("CPU affinity set to cores: {cores:?}");
-            } else {
-                log::warn!("CPU affinity requested but not supported on this platform");
-            }
+    if let Some(cores) = &config.cores
+        && !cores.is_empty()
+    {
+        if ops.is_cpu_affinity_supported() {
+            ops.set_cpu_affinity(cores)?;
+            log::info!("CPU affinity set to cores: {cores:?}");
+        } else {
+            log::warn!("CPU affinity requested but not supported on this platform");
         }
     }
 
     // Apply NUMA affinity if specified and supported
-    if let Some(numa_nodes) = &config.numa_nodes {
-        if !numa_nodes.is_empty() {
-            if ops.is_numa_affinity_supported() {
-                ops.set_numa_affinity(numa_nodes)?;
-                log::info!("NUMA affinity set to nodes: {numa_nodes:?}");
-            } else {
-                log::warn!("NUMA affinity requested but not supported on this platform");
-            }
+    if let Some(numa_nodes) = &config.numa_nodes
+        && !numa_nodes.is_empty()
+    {
+        if ops.is_numa_affinity_supported() {
+            ops.set_numa_affinity(numa_nodes)?;
+            log::info!("NUMA affinity set to nodes: {numa_nodes:?}");
+        } else {
+            log::warn!("NUMA affinity requested but not supported on this platform");
         }
     }
 

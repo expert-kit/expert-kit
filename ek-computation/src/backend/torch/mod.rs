@@ -56,6 +56,8 @@ impl From<tch::Device> for Device {
         }
     }
 }
+
+#[expect(dead_code)]
 struct TchSafeView<'a> {
     tensor: &'a tch::Tensor,
     shape: Vec<usize>,
@@ -70,7 +72,7 @@ impl safetensors::View for TchSafeView<'_> {
         &self.shape
     }
 
-    fn data(&self) -> std::borrow::Cow<[u8]> {
+    fn data(&self) -> std::borrow::Cow<'_, [u8]> {
         let mut data = vec![0; self.data_len()];
         let numel = self.tensor.numel();
         self.tensor.f_copy_data_u8(&mut data, numel).unwrap();
