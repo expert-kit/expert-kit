@@ -35,6 +35,8 @@ pub struct ShmQueueMeta {
 }
 
 pub struct ShmQueue<'a, T> {
+    owned: bool,
+    name: String,
     mmap: (NonNull<c_void>, usize),
     meta: &'a mut ShmQueueMeta,
     data: &'a mut [u8],
@@ -89,6 +91,8 @@ impl<'a, T: ShmBytes> ShmQueue<'a, T> {
         };
 
         Self {
+            owned: true,
+            name: name.to_string(),
             mmap: (mmap.cast(), len),
             meta,
             data,
@@ -132,6 +136,8 @@ impl<'a, T: ShmBytes> ShmQueue<'a, T> {
         };
 
         Some(Self {
+            owned: false,
+            name: name.to_string(),
             mmap: (mmap.cast(), len),
             meta,
             data,
@@ -173,6 +179,9 @@ impl<'a, T> Drop for ShmQueue<'a, T> {
     fn drop(&mut self) {
         let (addr, len) = self.mmap;
         unsafe { mman::munmap(addr, len).unwrap() };
+        if self.owned {
+            let _ = mman::shm_unlink(self.name.as_str());
+        }
     }
 }
 
@@ -226,5 +235,13 @@ mod test {
         }
         assert_eq!(counter, 0);
         assert_eq!(receiver.recv(), Err(ShmQueueError::Empty));
+    }
+
+    #[test]
+    fn test_raii() {
+        let owner = ShmQueue::<i32>::new("test_queue", 10);
+        assert!(ShmQueue::<i32>::open("test_queue").is_some());
+        drop(owner);
+        assert!(ShmQueue::<i32>::open("test_queue").is_none());
     }
 }
