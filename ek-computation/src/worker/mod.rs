@@ -117,7 +117,7 @@ pub async fn worker_main() -> EKResult<()> {
                 std::thread::sleep(Duration::from_secs(1));
             };
             let resp = LocalShmWorkerResp::new(req.id(), output_tensor);
-            while let Err(_) = send_channel.lock().unwrap().send(&resp) {
+            while send_channel.lock().unwrap().send(&resp).is_err() {
                 log::warn!("send_channel full, retrying...");
                 std::thread::sleep(Duration::from_micros(100));
             }

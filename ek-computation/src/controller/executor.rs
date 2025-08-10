@@ -477,7 +477,7 @@ impl LocalShmExecutor {
                             .observe(elapsed.as_micros() as f64);
                     }));
 
-                    while let Err(_) = send_channel.lock().await.send(&req) {
+                    while send_channel.lock().await.send(&req).is_err() {
                         log::warn!("failed to send request to expert {expert_id}");
                         tokio::time::sleep(tokio::time::Duration::from_micros(100)).await;
                     }

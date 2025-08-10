@@ -4,7 +4,6 @@ use std::{
         Arc, OnceLock,
         atomic::{AtomicUsize, Ordering},
     },
-    usize,
 };
 
 use ek_base::{
@@ -273,6 +272,7 @@ impl ShmBytes for LocalShmWorkerResp {
     }
 }
 
+#[expect(clippy::type_complexity)]
 pub struct LocalShmExpertRegistry {
     all_channels: HashMap<
         String,
