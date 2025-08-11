@@ -141,7 +141,7 @@ impl ExpertRegistryImpl {
     }
 }
 
-const MAX_TENSOR_SIZE: usize = 32 * 1024 * 1024;
+const MAX_TENSOR_SIZE: usize = 64 * 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LocalShmWorkerReq {
@@ -329,11 +329,11 @@ impl ExpertRegistry for LocalShmExpertRegistry {
                     .or_insert_with(|| {
                         let req_queue = Arc::new(Mutex::new(ShmQueue::new(
                             &format!("ek-shmq-req-{}", node.hostname),
-                            512,
+                            128,
                         )));
                         let resp_queue = Arc::new(Mutex::new(ShmQueue::new(
                             &format!("ek-shmq-resp-{}", node.hostname),
-                            512,
+                            128,
                         )));
                         (req_queue, resp_queue)
                     });

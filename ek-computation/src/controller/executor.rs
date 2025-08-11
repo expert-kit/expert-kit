@@ -459,6 +459,7 @@ impl LocalShmExecutor {
                 .collect::<Vec<GlobalSeqId>>();
 
             let egress_tensor = self.assemble_seq_tensors(seq_gids)?;
+            let tensor_shape = egress_tensor.size();
             log::debug!("egress tensor shape={:?}", egress_tensor.size());
             let serialized_tensor = TchTensor::from(egress_tensor).serialize();
 
@@ -509,10 +510,11 @@ impl LocalShmExecutor {
                         }
                     };
                     log::info!(
-                        "received response of {} for {} in {}ms",
+                        "received response of {} for {} (shape: {:?}) in {}us",
                         resp.id(),
                         expert_id,
-                        start.elapsed().as_millis(),
+                        tensor_shape,
+                        start.elapsed().as_micros(),
                     );
                     resp
                 }

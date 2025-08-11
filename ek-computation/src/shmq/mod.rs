@@ -49,12 +49,17 @@ pub trait ShmBytes {
     fn as_bytes(&self) -> impl Iterator<Item = u8> + '_;
 
     fn from_bytes(bytes: &[u8]) -> Self;
+
+    #[inline]
+    fn aligned_size() -> usize {
+        Self::SIZE.next_multiple_of(128)
+    }
 }
 
 impl<'a, T: ShmBytes> ShmQueue<'a, T> {
     pub fn new(name: &str, capacity: usize) -> Self {
-        let meta_vs_data = std::mem::size_of::<ShmQueueMeta>() / T::SIZE;
-        let len = (capacity + 1 + meta_vs_data) * T::SIZE;
+        let meta_vs_data = std::mem::size_of::<ShmQueueMeta>() / T::aligned_size();
+        let len = (capacity + 1 + meta_vs_data) * T::aligned_size();
         let shm = mman::shm_open(
             name,
             OFlag::O_CREAT | OFlag::O_RDWR | OFlag::O_EXCL,
@@ -85,8 +90,8 @@ impl<'a, T: ShmBytes> ShmQueue<'a, T> {
 
         let data = unsafe {
             std::slice::from_raw_parts_mut(
-                mmap.as_ptr().add(meta.data_offset * T::SIZE),
-                capacity * T::SIZE,
+                mmap.as_ptr().add(meta.data_offset * T::aligned_size()),
+                capacity * T::aligned_size(),
             )
         };
 
@@ -130,8 +135,8 @@ impl<'a, T: ShmBytes> ShmQueue<'a, T> {
 
         let data = unsafe {
             std::slice::from_raw_parts_mut(
-                mmap.as_ptr().add(meta.data_offset * T::SIZE),
-                meta.capacity * T::SIZE,
+                mmap.as_ptr().add(meta.data_offset * T::aligned_size()),
+                meta.capacity * T::aligned_size(),
             )
         };
 
@@ -156,7 +161,7 @@ impl<'a, T: ShmBytes> ShmQueue<'a, T> {
         }
 
         for (i, byte) in item.as_bytes().enumerate() {
-            self.data[meta.tail * T::SIZE + i] = byte;
+            self.data[meta.tail * T::aligned_size() + i] = byte;
         }
 
         self.meta.tail = (self.meta.tail + 1) % self.meta.capacity;
@@ -169,7 +174,9 @@ impl<'a, T: ShmBytes> ShmQueue<'a, T> {
             return Err(ShmQueueError::Empty);
         }
 
-        let item = T::from_bytes(&self.data[meta.head * T::SIZE..(meta.head + 1) * T::SIZE]);
+        let item = T::from_bytes(
+            &self.data[meta.head * T::aligned_size()..(meta.head + 1) * T::aligned_size()],
+        );
         self.meta.head = (self.meta.head + 1) % self.meta.capacity;
         Ok(item)
     }
