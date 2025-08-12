@@ -16,6 +16,7 @@ criterion_group!(
     benches,
     benchmarks::xpu_ffn_activate::bench,
     benchmarks::xpu_ffn_queue::bench,
+    benchmarks::xpu_ffn_with_weight_transfer::bench,
     benchmarks::xpu_ffn::bench,
     benchmarks::xpu_transfer::bench,
 );

@@ -14,7 +14,7 @@ use crate::DEVICES;
 const BATCH_SIZES: &[usize] = &[1, 4, 8, 16, 64];
 
 pub fn bench(c: &mut Criterion) {
-    let mut group = c.benchmark_group("torch ffn");
+    let mut group = c.benchmark_group("torch ffn w/o weight transfer");
 
     for &batch_size in BATCH_SIZES {
         for &dev in DEVICES.keys() {
@@ -39,7 +39,7 @@ pub fn bench(c: &mut Criterion) {
                                 .to_device(Device::CPU),
                         );
                     },
-                    BatchSize::NumBatches(1),
+                    BatchSize::PerIteration,
                 );
             });
         }
