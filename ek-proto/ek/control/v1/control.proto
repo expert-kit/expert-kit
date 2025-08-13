@@ -12,10 +12,18 @@ message DuplicateReq {
 message DuplicateResp {
 }
 
+message ManualReq {
+  repeated string hostnames = 1;
+  string layers = 2;
+}
+message ManualResp {
+}
+
 
 service PlanService {
   rpc Rebalance(RebalanceReq) returns (RebalanceResp);
   rpc Duplicate(DuplicateReq) returns (DuplicateResp);
+  rpc Manual(ManualReq) returns (ManualResp);
 }
 
 message ResolveRequest {

@@ -6,7 +6,7 @@ use ek_base::{
     error::{EKError, EKResult},
 };
 use ek_computation::{
-    proto::ek::control::v1::{DuplicateReq, RebalanceReq, plan_service_client::PlanServiceClient},
+    proto::ek::control::v1::{DuplicateReq, ManualReq, RebalanceReq, plan_service_client::PlanServiceClient},
     state::{
         io::StateReaderImpl,
         models::{NewExpert, NewInstance, NewNode},
@@ -32,6 +32,12 @@ pub enum ScheduleCommand {
         #[arg(long, help = "Specific hostnames to duplicate to (if not specified, duplicates to all nodes)", value_delimiter = ',')]
         hostnames: Option<Vec<String>>,
     },
+    Manual {
+        #[arg(long, help = "Hostnames of the target nodes", value_delimiter = ',')]
+        hostnames: Vec<String>,
+        #[arg(long, help = "Layer ranges to assign (e.g., '1-2,4-8')")]
+        layers: String,
+    },
 }
 
 pub async fn execute_schedule(cmd: ScheduleCommand) -> EKResult<()> {
@@ -48,6 +54,11 @@ pub async fn execute_schedule(cmd: ScheduleCommand) -> EKResult<()> {
 
         ScheduleCommand::Duplicate { hostnames } => {
             execute_duplicate(hostnames).await?;
+            Ok(())
+        }
+
+        ScheduleCommand::Manual { hostnames, layers } => {
+            execute_manual(hostnames, layers).await?;
             Ok(())
         }
     }
@@ -80,6 +91,23 @@ async fn execute_duplicate(hostnames: Option<Vec<String>>) -> EKResult<()> {
         hostnames: hostnames.unwrap_or_default(),
     }).await?;
     log::info!("duplicate done");
+    Ok(())
+}
+
+async fn execute_manual(hostnames: Vec<String>, layers: String) -> EKResult<()> {
+    let settings = get_ek_settings();
+    let controller_addr = format!(
+        "http://{}:{}",
+        settings.controller.broadcast, settings.controller.ports.inter
+    );
+    log::info!("connect to controller at {controller_addr}");
+    let endpoint = Endpoint::from_str(controller_addr.as_str()).unwrap();
+    let mut cli = PlanServiceClient::connect(endpoint).await?;
+    cli.manual(ManualReq {
+        hostnames,
+        layers,
+    }).await?;
+    log::info!("manual assignment done");
     Ok(())
 }
 

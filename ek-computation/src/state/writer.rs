@@ -103,6 +103,7 @@ impl StateWriter for StateWriterImpl {
             .await?;
         Ok(())
     }
+
     async fn del_node(&mut self, id: i32) -> EKResult<()> {
         let mut conn = POOL.get().await?;
         use schema::node::dsl;
@@ -219,6 +220,16 @@ impl StateWriterImpl {
             .on_conflict(schema::model::name)
             .do_update()
             .set(schema::model::config.eq(excluded(schema::model::config)))
+            .execute(&mut conn)
+            .await?;
+        Ok(())
+    }
+    
+    pub async fn del_experts_by_node(&self, node_id: i32) -> EKResult<()> {
+        let mut conn = POOL.get().await?;
+        use schema::expert::dsl;
+        diesel::delete(schema::expert::table)
+            .filter(dsl::node_id.eq(node_id))
             .execute(&mut conn)
             .await?;
         Ok(())
