@@ -66,13 +66,20 @@ pub async fn worker_main() -> EKResult<()> {
     let thread_count: usize = env::var("EK_WORKER_THREADS")
         .map(|v| v.parse().unwrap_or(1))
         .unwrap_or(1);
+
+    let poison = Arc::new(Mutex::new(false));
+
     for _ in 0..thread_count {
         let recv_channel = recv_channel.clone();
         let send_channel = send_channel.clone();
         let gate = EKInstanceGateSync::default();
+        let poison = poison.clone();
         let srv = std::thread::spawn(move || {
-            loop {
+            'main: loop {
                 let req = loop {
+                    if *poison.lock().unwrap() {
+                        break 'main;
+                    }
                     if let Ok(req) = recv_channel.lock().unwrap().recv() {
                         break req;
                     }
@@ -122,6 +129,7 @@ pub async fn worker_main() -> EKResult<()> {
         _ = state_inspect => { },
         _ = signal::ctrl_c() => {
             log::info!("ctrl-c signal received, shutting down");
+            *poison.lock().unwrap() = true;
             token.clone().cancel();
             let(_,rx) = get_graceful_shutdown_ch();
             rx.lock().await.recv().await;
