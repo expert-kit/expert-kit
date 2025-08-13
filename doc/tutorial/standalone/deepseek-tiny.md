@@ -33,6 +33,8 @@ unzip /tmp/libtorch.zip -d ./vendor/
 # download the expert-kit source code
 # since we are using git lfs, make sure you have git-lfs installed and initialized
 git lfs fetch --all  # download the ds-tiny weight
+git lfs install      # initialize git-lfs if not done yet
+git lfs checkout     # checkout the ds-tiny weight files
 
 cargo build --release
 uv sync
@@ -45,25 +47,25 @@ uv sync
 docker-compose -f dev/meta-db.docker-compose.yaml up -d
 
 # run weight server
-cargo run --bin ek-cli weight-server --model "${DS_TINY_ROOT}"
+cargo run --release --bin ek-cli weight-server --model "${DS_TINY_ROOT}"
 ```
 
 3. prepare the metadata
 
 ```bash
-cargo run --bin ek-cli db migrate
-cargo run --bin ek-cli model upsert --name ds-tiny
-cargo run --bin ek-cli schedule  static --inventory ./dev/local.inventory.yaml
+cargo run --release --bin ek-cli db migrate
+cargo run --release --bin ek-cli model upsert --name ds-tiny
+cargo run --release --bin ek-cli schedule  static --inventory ./dev/local.inventory.yaml
 ```
 
 4. run the frontend controller and backend worker
 
 ```bash
 # run the frontend controller
-cargo run --bin ek-cli controller
+cargo run --release --bin ek-cli controller
 # create a new terminal session, then run worker
 # pay attention to the required environment variable
-cargo run --bin ek-cli worker
+cargo run --release --bin ek-cli worker
 ```
 
 5. run a simple test
@@ -71,7 +73,7 @@ cargo run --bin ek-cli worker
 ```bash
 cd ek-integration/expertkit_torch/
 # compare the result between the vanilla pytorch and expert-kit offloaded
-python3 -m expertkit_torch.models.deepseek_v3.model --model_path "${DS_TINY_ROOT}" --ek_addr 127.0.0.1:5002
+python3 -m expertkit_torch.models.deepseek_v3.model --model_path "${DS_TINY_ROOT}" --model_name ds-tiny --ek_addr 127.0.0.1:5002
 
 # some random char would be generated
 # example: Seeds TESToth inventory inventory inventory inventory inventoryothothothothothothothothothothothothothothothothothothothothothothothoth апреothothoth conson conson conson conson conson地道 conson conson conson conson conson地道 conson conson

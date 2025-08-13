@@ -21,6 +21,8 @@ By decoupling expert modules and deploying them across distributed GPUs and CPUs
   <img alt="arch-illustration-light" src="./doc/assets/arch-illustration.svg">
 </picture>
 
+https://github.com/user-attachments/assets/9f1f5b23-28fe-44cf-b592-2f6ad0ad4dad
+
 ## Quick Start
 
 Here are some tutorials to help you quickly start with Expert Kit.

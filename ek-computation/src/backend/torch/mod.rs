@@ -41,10 +41,21 @@ impl From<Device> for tch::Device {
     fn from(val: Device) -> Self {
         match val {
             Device::CPU => tch::Device::Cpu,
+            Device::CUDA(idx) => tch::Device::Cuda(idx as usize),
+            // _ => panic!("Unsupported device"),
         }
     }
 }
 
+impl From<tch::Device> for Device {
+    fn from(val: tch::Device) -> Self {
+        match val {
+            tch::Device::Cpu => Device::CPU,
+            tch::Device::Cuda(idx) => Device::CUDA(idx as usize),
+            _ => panic!("Unsupported device"),
+        }
+    }
+}
 struct TchSafeView<'a> {
     tensor: &'a tch::Tensor,
     shape: Vec<usize>,
@@ -132,10 +143,23 @@ impl EkTensor for TchTensor {
     fn from_tensor_view(tv: &TensorView<'_>) -> Self {
         tv.into()
     }
+
+    fn device(&self) -> Device {
+        match self.0.device() {
+            tch::Device::Cpu => Device::CPU,
+            tch::Device::Cuda(idx) => Device::CUDA(idx as usize),
+            _ => panic!("Unsupported device"),
+        }
+    }
+
+    fn to_device(&self, device: Device) -> Self {
+        let dev: tch::Device = device.into();
+        TchTensor(self.0.to_device(dev))
+    }
 }
 
 impl FromSafeTensor for TchTensor {
-    fn lookup_suffix(st: &safetensors::SafeTensors, name: &[&str]) -> Option<Self> {
+    fn lookup_suffix(st: &safetensors::SafeTensors, name: &[&str], device: Device) -> Option<Self> {
         let idx = st
             .names()
             .iter()
@@ -145,7 +169,7 @@ impl FromSafeTensor for TchTensor {
             let (_name, view) = tensors.get(x).unwrap();
             let size: Vec<usize> = view.shape().to_vec();
             let kind: DType = DType::from(dtype_to_tch_kind(view.dtype()).unwrap());
-            Some(Self::from_raw(view.data(), &size, kind))
+            Some(Self::from_raw(view.data(), &size, kind).to_device(device))
         } else {
             None
         }

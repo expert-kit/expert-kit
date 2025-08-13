@@ -66,7 +66,7 @@ pub struct WorkerSettings {
     pub listen: String,
     pub broadcast: String,
     pub ports: WorkerPorts,
-    pub device: Option<String>,
+    pub device: String,
     #[serde(default = "default_worker_metrics")]
     pub metrics: String,
 }
@@ -208,6 +208,7 @@ worker:
   broadcast: 0.0.0.0
   ports:
     main: 51234
+  device: cpu
 
 controller:
   listen: 0.0.0.0

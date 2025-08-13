@@ -8,7 +8,14 @@ from expertkit_torch.grpc_client import ExpertKitClient
 from transformers import modeling_utils as mu
 
 layer_idx = 3
-device = "mps"
+
+# The default device should be set according to the environment.
+if torch.cuda.is_available():
+    device = "cuda"
+elif torch.backends.mps.is_available():
+    device = "mps"
+else:
+    device = "cpu"
 
 
 def intercept_missing():

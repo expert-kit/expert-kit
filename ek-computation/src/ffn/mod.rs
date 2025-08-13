@@ -27,7 +27,7 @@ impl ExpertBackend {
     ) -> EKResult<ExpertBackend> {
         let backend = match instance.backend {
             x::ExpertBackendType::Torch => {
-                let weight = ExpertWeight::<TchTensor>::from_safetensor(tensor)?;
+                let weight = ExpertWeight::<TchTensor>::from_safetensor(tensor, instance.device)?;
                 ExpertBackend::Torch(TorchFFN::construct(instance, weight)?)
             }
             x::ExpertBackendType::Onnx => todo!(),
@@ -43,6 +43,7 @@ impl ExpertBackend {
             ExpertBackend::Torch(exp) => {
                 let inp = TchTensor::from_tensor_view(view);
                 let shape = inp.inner().size();
+                let inp = inp.to_device(exp.device());
                 log::debug!("input shape {:?}", shape);
                 assert!(shape.len() == 2);
                 Ok(exp.forward(&inp))

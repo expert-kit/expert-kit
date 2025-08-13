@@ -51,8 +51,6 @@ impl StateClient {
 
     async fn get_request_stream(worker_id: String) -> impl Stream<Item = ExchangeReq> {
         let settings = get_ek_settings();
-        let dev = settings.worker.device.clone();
-        let dev = dev.unwrap_or("cpu".to_string());
         tokio_stream::iter(1..usize::MAX).map(move |_| ExchangeReq {
             id: worker_id.clone(),
             addr: format!(
@@ -60,7 +58,7 @@ impl StateClient {
                 settings.worker.broadcast, settings.worker.ports.main
             ),
             channel: "grpc".to_string(),
-            device: dev.clone(),
+            device: settings.worker.device.clone(),
             last_will: false,
         })
     }

@@ -45,21 +45,24 @@ where
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "ExpertWeight(up_w: {:?}, down_w: {:?}, gate_w: {:?})",
+            "ExpertWeight(up_w: {:?} {:?}, down_w: {:?} {:?}, gate_w: {:?} {:?})",
             self.up_w.shape(),
+            self.up_w.device(),
             self.down_w.shape(),
-            self.gate_w.shape()
+            self.up_w.device(),
+            self.gate_w.shape(),
+            self.up_w.device()
         )
     }
 }
 
 impl<T: EkTensor + FromSafeTensor> ExpertWeight<T> {
-    pub fn from_safetensor(st: &safetensors::SafeTensors) -> EKResult<Self> {
-        let up_w = T::lookup_suffix(st, &["w1.weight", "up_proj.weight"])
+    pub fn from_safetensor(st: &safetensors::SafeTensors, dev: Device) -> EKResult<Self> {
+        let up_w = T::lookup_suffix(st, &["w1.weight", "up_proj.weight"], dev)
             .ok_or(EKError::ExpertWeightNotFound("w1/up_w".to_owned()))?;
-        let down_w = T::lookup_suffix(st, &["w2.weight", "down_proj.weight"])
+        let down_w = T::lookup_suffix(st, &["w2.weight", "down_proj.weight"], dev)
             .ok_or(EKError::ExpertWeightNotFound("w2/down_w".to_owned()))?;
-        let gate_w = T::lookup_suffix(st, &["w3.weight", "gate_proj.weight"])
+        let gate_w = T::lookup_suffix(st, &["w3.weight", "gate_proj.weight"], dev)
             .ok_or(EKError::ExpertWeightNotFound("w3/gate_w".to_owned()))?;
         Ok(Self {
             up_w,
