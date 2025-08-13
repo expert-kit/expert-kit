@@ -57,7 +57,6 @@ impl From<tch::Device> for Device {
     }
 }
 
-#[expect(dead_code)]
 struct TchSafeView<'a> {
     tensor: &'a tch::Tensor,
     shape: Vec<usize>,
