@@ -6,7 +6,7 @@ use ek_base::{
     error::{EKError, EKResult},
 };
 use ek_computation::{
-    proto::ek::control::v1::{RebalanceReq, plan_service_client::PlanServiceClient},
+    proto::ek::control::v1::{DuplicateReq, RebalanceReq, plan_service_client::PlanServiceClient},
     state::{
         io::StateReaderImpl,
         models::{NewExpert, NewInstance, NewNode},
@@ -28,6 +28,7 @@ pub enum ScheduleCommand {
         inventory: PathBuf,
     },
     Rebalance,
+    Duplicate,
 }
 
 pub async fn execute_schedule(cmd: ScheduleCommand) -> EKResult<()> {
@@ -39,6 +40,11 @@ pub async fn execute_schedule(cmd: ScheduleCommand) -> EKResult<()> {
 
         ScheduleCommand::Rebalance => {
             execute_rebalance().await?;
+            Ok(())
+        }
+
+        ScheduleCommand::Duplicate => {
+            execute_duplicate().await?;
             Ok(())
         }
     }
@@ -55,6 +61,20 @@ async fn execute_rebalance() -> EKResult<()> {
     let mut cli = PlanServiceClient::connect(endpoint).await?;
     cli.rebalance(RebalanceReq {}).await?;
     log::info!("rebalance done");
+    Ok(())
+}
+
+async fn execute_duplicate() -> EKResult<()> {
+    let settings = get_ek_settings();
+    let controller_addr = format!(
+        "http://{}:{}",
+        settings.controller.broadcast, settings.controller.ports.inter
+    );
+    log::info!("connect to controller at {controller_addr}");
+    let endpoint = Endpoint::from_str(controller_addr.as_str()).unwrap();
+    let mut cli = PlanServiceClient::connect(endpoint).await?;
+    cli.duplicate(DuplicateReq {}).await?;
+    log::info!("duplicate done");
     Ok(())
 }
 

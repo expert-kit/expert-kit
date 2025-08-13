@@ -6,9 +6,15 @@ message RebalanceReq {
 message RebalanceResp {
 }
 
+message DuplicateReq {
+}
+message DuplicateResp {
+}
+
 
 service PlanService {
   rpc Rebalance(RebalanceReq) returns (RebalanceResp);
+  rpc Duplicate(DuplicateReq) returns (DuplicateResp);
 }
 
 message ResolveRequest {
