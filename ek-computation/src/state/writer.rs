@@ -224,12 +224,13 @@ impl StateWriterImpl {
             .await?;
         Ok(())
     }
-    
-    pub async fn del_experts_by_node(&self, node_id: i32) -> EKResult<()> {
+
+    pub async fn del_experts_by_node(&self, node_id: i32, instance_id: i32) -> EKResult<()> {
         let mut conn = POOL.get().await?;
         use schema::expert::dsl;
         diesel::delete(schema::expert::table)
             .filter(dsl::node_id.eq(node_id))
+            .filter(dsl::instance_id.eq(instance_id))
             .execute(&mut conn)
             .await?;
         Ok(())

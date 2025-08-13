@@ -308,7 +308,7 @@ async fn execute_manual_schedule(hostnames: Vec<String>, layers_str: String) -> 
     // Clear experts on the target nodes
     log::info!("Removing existing experts from {} target nodes", target_nodes.len());
     for node in &target_nodes {
-        writer.del_experts_by_node(node.id).await?;
+        writer.del_experts_by_node(node.id, instance_obj.id).await?;
     }
 
     // Generate experts only for the specified layers
