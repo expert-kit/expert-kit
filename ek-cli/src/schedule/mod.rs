@@ -28,7 +28,10 @@ pub enum ScheduleCommand {
         inventory: PathBuf,
     },
     Rebalance,
-    Duplicate,
+    Duplicate {
+        #[arg(long, help = "Specific hostnames to duplicate to (if not specified, duplicates to all nodes)", value_delimiter = ',')]
+        hostnames: Option<Vec<String>>,
+    },
 }
 
 pub async fn execute_schedule(cmd: ScheduleCommand) -> EKResult<()> {
@@ -43,8 +46,8 @@ pub async fn execute_schedule(cmd: ScheduleCommand) -> EKResult<()> {
             Ok(())
         }
 
-        ScheduleCommand::Duplicate => {
-            execute_duplicate().await?;
+        ScheduleCommand::Duplicate { hostnames } => {
+            execute_duplicate(hostnames).await?;
             Ok(())
         }
     }
@@ -64,7 +67,7 @@ async fn execute_rebalance() -> EKResult<()> {
     Ok(())
 }
 
-async fn execute_duplicate() -> EKResult<()> {
+async fn execute_duplicate(hostnames: Option<Vec<String>>) -> EKResult<()> {
     let settings = get_ek_settings();
     let controller_addr = format!(
         "http://{}:{}",
@@ -73,7 +76,9 @@ async fn execute_duplicate() -> EKResult<()> {
     log::info!("connect to controller at {controller_addr}");
     let endpoint = Endpoint::from_str(controller_addr.as_str()).unwrap();
     let mut cli = PlanServiceClient::connect(endpoint).await?;
-    cli.duplicate(DuplicateReq {}).await?;
+    cli.duplicate(DuplicateReq {
+        hostnames: hostnames.unwrap_or_default(),
+    }).await?;
     log::info!("duplicate done");
     Ok(())
 }

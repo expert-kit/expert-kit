@@ -44,9 +44,10 @@ impl v1::plan_service_server::PlanService for PlanServiceImpl {
 
     async fn duplicate(
         &self,
-        _request: tonic::Request<v1::DuplicateReq>,
+        request: tonic::Request<v1::DuplicateReq>,
     ) -> Result<tonic::Response<v1::DuplicateResp>, tonic::Status> {
-        execute_duplicate_schedule().await?;
+        let req = request.into_inner();
+        execute_duplicate_schedule(req.hostnames).await?;
         let registry = get_registry();
         registry.lock().await.reset().await?;
         let resp = v1::DuplicateResp {};
@@ -123,7 +124,7 @@ async fn execute_rebalance() -> EKResult<()> {
     Ok(())
 }
 
-async fn execute_duplicate_schedule() -> EKResult<()> {
+async fn execute_duplicate_schedule(hostnames: Vec<String>) -> EKResult<()> {
     let settings = get_ek_settings();
     let model_name = settings.inference.model_name.clone();
     let instance_name = settings.inference.instance_name.clone();
@@ -142,12 +143,23 @@ async fn execute_duplicate_schedule() -> EKResult<()> {
         .ok_or(EKError::NotFound("model not found".to_string()))?;
 
     let writer = StateWriterImpl::new();
-    let node_ids = reader
-        .active_nodes()
-        .await?
-        .into_iter()
-        .map(|x| x.id)
-        .collect::<Vec<_>>();
+    let all_nodes = reader.active_nodes().await?;
+    
+    let node_ids = if hostnames.is_empty() {
+        log::info!("No specific hostnames provided, duplicating to all active nodes");
+        all_nodes.into_iter().map(|x| x.id).collect::<Vec<_>>()
+    } else {
+        log::info!("Filtering nodes by hostnames: {:?}", hostnames);
+        all_nodes
+            .into_iter()
+            .filter(|node| hostnames.contains(&node.hostname))
+            .map(|x| x.id)
+            .collect::<Vec<_>>()
+    };
+
+    if node_ids.is_empty() {
+        return Err(EKError::NotFound("No matching nodes found for the specified hostnames".to_string()));
+    }
 
     let instance_obj = writer
         .instance_upsert(NewInstance {
@@ -162,8 +174,8 @@ async fn execute_duplicate_schedule() -> EKResult<()> {
             experts.push(ExpertKey::new(model_name.clone(), layer, expert));
         }
     }
-    log::info!("total experts to schedule: {}, nodes: {}", experts.len(), node_ids.len());
-    log::info!("duplicating all experts to all {} nodes", node_ids.len());
+    log::info!("total experts to schedule: {}, target nodes: {}", experts.len(), node_ids.len());
+    log::info!("duplicating all experts to {} nodes", node_ids.len());
 
     writer.expert_del_by_instance(instance_obj.id).await?;
 
@@ -187,7 +199,7 @@ async fn execute_duplicate_schedule() -> EKResult<()> {
         }
     }
     js.join_all().await;
-    log::info!("all experts duplicated to all nodes");
+    log::info!("all experts duplicated to target nodes");
 
     Ok(())
 }

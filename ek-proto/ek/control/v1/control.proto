@@ -7,6 +7,7 @@ message RebalanceResp {
 }
 
 message DuplicateReq {
+  repeated string hostnames = 1;
 }
 message DuplicateResp {
 }
