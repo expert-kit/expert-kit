@@ -113,6 +113,7 @@ fn main() {
                 .unwrap();
                 experts.push(ExpertBenchmark(ExpertBackend::OnnxF32(exp)));
             }
+            _ => todo!(),
         }
     }
     let mut bencher = Benchmarker::new(experts);

@@ -67,15 +67,6 @@ where
         Self(res)
     }
 
-    fn stack(tensors: &[Self], dim: usize) -> Self {
-        let views = tensors.iter().map(|x| x.0.view()).collect::<Vec<_>>();
-        let res = ndarray::stack(ndarray::Axis(dim), &views)
-            .unwrap()
-            .into_dimensionality::<IxDyn>()
-            .unwrap();
-        NDArrayTensor(res)
-    }
-
     fn shape(&self) -> Vec<usize> {
         self.0.shape().to_vec()
     }

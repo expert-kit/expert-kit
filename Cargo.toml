@@ -1,6 +1,13 @@
 [workspace]
 resolver = "2"
-members = ["ek-base", "ek-benchmark", "ek-cli", "ek-computation", "ek-db"]
+members = [
+    "ek-base",
+    "ek-benchmark",
+    "ek-cli",
+    "ek-computation",
+    "ek-db",
+    "ek-ggml",
+]
 default-members = ["ek-cli"]
 
 [workspace.package]
@@ -18,14 +25,17 @@ ek-benchmark = { path = "ek-benchmark" }
 ek-cli = { path = "ek-cli" }
 ek-computation = { path = "ek-computation" }
 ek-db = { path = "ek-db" }
+ek-ggml = { path = "ek-ggml" }
 
 # External dependencies (alphabetical order)
 actix-http = "3.10.0"
 actix-web = "4.10.2"
 async-channel = "2.3.1"
 async-trait = "0.1.88"
+bindgen = "0.72"
 bytes = "1.10.1"
 clap = { version = "4.5.31", features = ["derive"] }
+cmake = "0.1"
 config = "0.15.11"
 criterion = { version = "0.6.0", features = ["html_reports"] }
 dashmap = "6.1.0"

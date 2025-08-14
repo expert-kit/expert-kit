@@ -23,6 +23,7 @@ impl ExpertBenchmark {
         match &self.0 {
             ExpertBackend::Torch(exp) => exp.backend(),
             ExpertBackend::OnnxF32(onnx_exp) => onnx_exp.backend(),
+            _ => todo!(),
         }
     }
 
@@ -30,6 +31,7 @@ impl ExpertBenchmark {
         match &self.0 {
             ExpertBackend::Torch(exp) => exp.shape(),
             ExpertBackend::OnnxF32(onnx_exp) => onnx_exp.shape(),
+            _ => todo!(),
         }
     }
 
@@ -48,6 +50,7 @@ impl ExpertBenchmark {
                 let _ = onnx_exp.forward(&input);
                 start
             }
+            _ => todo!(),
         }
     }
 }

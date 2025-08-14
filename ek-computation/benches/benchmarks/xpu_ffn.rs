@@ -8,6 +8,7 @@ use ek_computation::{
         meta::{Expert, ExpertWeight},
     },
 };
+use ek_ggml::Context;
 
 use crate::DEVICES;
 
@@ -16,9 +17,22 @@ const BATCH_SIZES: &[usize] = &[1, 4, 8, 16, 64];
 pub fn bench(c: &mut Criterion) {
     let mut group = c.benchmark_group("torch ffn w/o weight transfer");
 
+    Context::init(64 * 1024 * 1024 * 1024);
+
     for &batch_size in BATCH_SIZES {
         for &dev in DEVICES.keys() {
             group.bench_function(format!("batch={batch_size}, device={dev}"), |b| {
+                // let ffn = GgmlFFN::new(
+                //     2048,
+                //     768,
+                //     ExpertWeight::from_rand_linear(
+                //         2048,
+                //         768,
+                //         ek_computation::backend::DType::Float,
+                //         DEVICES[dev],
+                //     ),
+                //     8,
+                // );
                 let ffn = TorchFFN::new(
                     2048,
                     768,
@@ -26,7 +40,7 @@ pub fn bench(c: &mut Criterion) {
                     ExpertWeight::from_rand_linear(
                         2048,
                         768,
-                        ek_computation::backend::DType::BFloat16,
+                        ek_computation::backend::DType::Float,
                         DEVICES[dev],
                     ),
                     DEVICES[dev],

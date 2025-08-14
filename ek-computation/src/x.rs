@@ -20,6 +20,7 @@ static INSTANCE_COUNTER: AtomicUsize = AtomicUsize::new(0);
 pub enum ExpertBackendType {
     Torch,
     Onnx,
+    Ggml,
 }
 
 impl From<&str> for ExpertBackendType {
@@ -27,6 +28,7 @@ impl From<&str> for ExpertBackendType {
         match value {
             "torch" => ExpertBackendType::Torch,
             "ort" => ExpertBackendType::Onnx,
+            "ggml" => ExpertBackendType::Ggml,
             _ => unimplemented!(),
         }
     }

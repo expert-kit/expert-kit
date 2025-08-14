@@ -10,6 +10,7 @@ repository = { workspace = true }
 [dependencies]
 ek-base = { workspace = true }
 ek-db = { workspace = true }
+ek-ggml = { workspace = true }
 actix-web = { workspace = true }
 async-trait = { workspace = true }
 clap = { workspace = true }

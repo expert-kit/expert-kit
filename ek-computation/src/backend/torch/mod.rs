@@ -117,10 +117,6 @@ impl EkTensor for TchTensor {
         TchTensor(rand)
     }
 
-    fn stack(tensors: &[Self], dim: usize) -> Self {
-        TchTensor(tch::Tensor::stack(tensors, dim as i64))
-    }
-
     fn shape(&self) -> Vec<usize> {
         self.0.size().iter().map(|&x| x as usize).collect()
     }
