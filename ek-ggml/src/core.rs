@@ -155,7 +155,7 @@ impl Tensor {
         inner.ne.iter().take(n_dim as _).rev().cloned().collect()
     }
 
-    pub fn matmul(&self, other: &Tensor) -> Tensor {
+    pub fn matmul(&self, other: &Self) -> Self {
         let tensor =
             unsafe { bindings::ggml_mul_mat(self.ctx.as_ptr(), &mut *self.ptr, &mut *other.ptr) };
         Self {
@@ -164,7 +164,7 @@ impl Tensor {
         }
     }
 
-    pub fn mul(&self, other: &Tensor) -> Tensor {
+    pub fn mul(&self, other: &Self) -> Self {
         let tensor =
             unsafe { bindings::ggml_mul(self.ctx.as_ptr(), &mut *self.ptr, &mut *other.ptr) };
         Self {
@@ -173,7 +173,7 @@ impl Tensor {
         }
     }
 
-    pub fn mul_inplace(self, other: &Tensor) -> Tensor {
+    pub fn mul_inplace(self, other: &Self) -> Self {
         let tensor = unsafe {
             bindings::ggml_mul_inplace(self.ctx.as_ptr(), &mut *self.ptr, &mut *other.ptr)
         };
@@ -183,7 +183,7 @@ impl Tensor {
         }
     }
 
-    pub fn sub(&self, other: &Tensor) -> Tensor {
+    pub fn sub(&self, other: &Self) -> Self {
         let tensor =
             unsafe { bindings::ggml_sub(self.ctx.as_ptr(), &mut *self.ptr, &mut *other.ptr) };
         Self {
@@ -192,14 +192,14 @@ impl Tensor {
         }
     }
 
-    pub fn sum(&self) -> Tensor {
+    pub fn sum(&self) -> Self {
         let tensor = unsafe { bindings::ggml_sum(self.ctx.as_ptr(), &mut *self.ptr) };
         Self {
             ctx: self.ctx,
             ptr: tensor,
         }
     }
-    pub fn silu(&self) -> Tensor {
+    pub fn silu(&self) -> Self {
         let tensor = unsafe { bindings::ggml_silu(self.ctx.as_ptr(), &mut *self.ptr) };
         Self {
             ctx: self.ctx,
@@ -207,7 +207,7 @@ impl Tensor {
         }
     }
 
-    pub fn silu_inplace(self) -> Tensor {
+    pub fn silu_inplace(self) -> Self {
         let tensor = unsafe { bindings::ggml_silu_inplace(self.ctx.as_ptr(), &mut *self.ptr) };
         Self {
             ctx: self.ctx,
@@ -215,11 +215,11 @@ impl Tensor {
         }
     }
 
-    pub fn transpose(&self) -> Tensor {
+    pub fn transpose(&self) -> Self {
         self.transpose_view().cont()
     }
 
-    pub fn transpose_view(&self) -> Tensor {
+    pub fn transpose_view(&self) -> Self {
         let tensor = unsafe { bindings::ggml_transpose(self.ctx.as_ptr(), &mut *self.ptr) };
         Self {
             ctx: self.ctx,
@@ -227,7 +227,7 @@ impl Tensor {
         }
     }
 
-    pub fn cont(&self) -> Tensor {
+    pub fn cont(&self) -> Self {
         let tensor = unsafe { bindings::ggml_cont(self.ctx.as_ptr(), &mut *self.ptr) };
         Self {
             ctx: self.ctx,
@@ -235,7 +235,7 @@ impl Tensor {
         }
     }
 
-    pub fn cast(&self, kind: Kind) -> Tensor {
+    pub fn cast(&self, kind: Kind) -> Self {
         let tensor = unsafe { bindings::ggml_cast(self.ctx.as_ptr(), &mut *self.ptr, kind as _) };
         Self {
             ctx: self.ctx,
