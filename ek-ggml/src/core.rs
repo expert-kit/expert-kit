@@ -1,6 +1,6 @@
-use std::{cell::OnceCell, ptr::NonNull};
+use std::ptr::NonNull;
 
-use crate::bindings::{ggml_dup_tensor, ggml_n_dims, ggml_type_size};
+use crate::bindings::{ggml_dup_tensor, ggml_n_dims, ggml_tensor_overhead, ggml_type_size};
 
 #[allow(warnings)]
 pub(crate) mod bindings {
@@ -12,18 +12,8 @@ pub struct Context {
     ptr: NonNull<bindings::ggml_context>,
 }
 
-thread_local! {
-    static CONTEXT: OnceCell<Context> = OnceCell::new();
-}
-
 impl Context {
-    pub fn init(size: usize) {
-        CONTEXT.with(|ctx| {
-            ctx.get_or_init(|| Context::new(size));
-        });
-    }
-
-    fn new(size: usize) -> Self {
+    pub fn new(size: usize) -> Self {
         let params = bindings::ggml_init_params {
             mem_buffer: std::ptr::null_mut(),
             mem_size: size,
@@ -34,6 +24,31 @@ impl Context {
 
         Self {
             ptr: NonNull::new(ctx).unwrap(),
+        }
+    }
+
+    pub fn create_graph(&mut self) -> Graph {
+        let graph = unsafe { bindings::ggml_new_graph(self.ptr.as_ptr()) };
+
+        Graph {
+            ctx: NonNull::new(self.ptr.as_ptr()).unwrap(),
+            ptr: NonNull::new(graph).unwrap(),
+        }
+    }
+
+    pub fn create_tensor(&mut self, shape: &[i64], kind: Kind) -> Tensor {
+        let ne = shape.iter().rev().cloned().collect::<Vec<_>>();
+        let tensor = unsafe {
+            bindings::ggml_new_tensor(
+                self.ptr.as_ptr(),
+                kind as _,
+                ne.len() as _,
+                ne.as_ptr() as _,
+            )
+        };
+        Tensor {
+            ctx: NonNull::new(self.ptr.as_ptr()).unwrap(),
+            ptr: tensor,
         }
     }
 }
@@ -52,16 +67,8 @@ pub struct Graph {
 }
 
 impl Graph {
-    pub fn new() -> Self {
-        CONTEXT.with(|ctx| {
-            let ctx = ctx.get().expect("Context not initialized");
-            let graph = unsafe { bindings::ggml_new_graph(ctx.ptr.as_ptr()) };
-
-            Self {
-                ctx: NonNull::new(ctx.ptr.as_ptr()).unwrap(),
-                ptr: NonNull::new(graph).unwrap(),
-            }
-        })
+    pub fn overhead() -> usize {
+        unsafe { bindings::ggml_graph_overhead() }
     }
 
     pub fn build_forward(&mut self, tensor: &Tensor) {
@@ -85,9 +92,11 @@ unsafe impl Send for Graph {}
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Kind {
     F32 = bindings::ggml_type_GGML_TYPE_F32,
+    BF16 = bindings::ggml_type_GGML_TYPE_BF16,
 }
 
 impl Kind {
+    #[inline]
     pub fn size(&self) -> usize {
         let ggml_type: bindings::ggml_type = *self as _;
         unsafe { bindings::ggml_type_size(ggml_type) }
@@ -95,9 +104,11 @@ impl Kind {
 }
 
 impl From<bindings::ggml_type> for Kind {
+    #[inline]
     fn from(ggml_type: bindings::ggml_type) -> Self {
         match ggml_type {
             bindings::ggml_type_GGML_TYPE_F32 => Kind::F32,
+            bindings::ggml_type_GGML_TYPE_BF16 => Kind::BF16,
             _ => unreachable!(),
         }
     }
@@ -110,49 +121,9 @@ pub struct Tensor {
 }
 
 impl Tensor {
-    pub fn empty(shape: &[i64], kind: Kind) -> Option<Self> {
-        CONTEXT.with(|ctx| {
-            let ctx = ctx.get().expect("Context not initialized");
-            let ne: Vec<i64> = shape.iter().rev().cloned().collect();
-            let tensor = unsafe {
-                bindings::ggml_new_tensor(
-                    ctx.ptr.as_ptr(),
-                    kind as _,
-                    ne.len() as _,
-                    ne.as_ptr() as _,
-                )
-            };
-            Some(Self {
-                ctx: NonNull::new(ctx.ptr.as_ptr())?,
-                ptr: tensor,
-            })
-        })
-    }
-
-    pub unsafe fn from_raw(data: &[u8], shape: &[i64], kind: Kind) -> Option<Self> {
-        CONTEXT.with(|ctx| {
-            let ctx = ctx.get().expect("Context not initialized");
-            let ne: Vec<i64> = shape.iter().rev().cloned().collect();
-            let tensor = unsafe {
-                &mut *bindings::ggml_new_tensor(
-                    ctx.ptr.as_ptr(),
-                    kind as _,
-                    ne.len() as _,
-                    ne.as_ptr() as *const _,
-                )
-            };
-
-            unsafe {
-                tensor
-                    .data
-                    .copy_from_nonoverlapping(data.as_ptr() as _, data.len())
-            };
-
-            Some(Self {
-                ctx: NonNull::new(ctx.ptr.as_ptr()).unwrap(),
-                ptr: tensor,
-            })
-        })
+    #[inline]
+    pub fn overhead() -> usize {
+        unsafe { ggml_tensor_overhead() }
     }
 
     pub fn set_data(&mut self, data: &[u8]) -> Result<(), (usize, usize)> {
@@ -170,18 +141,18 @@ impl Tensor {
         Ok(())
     }
 
-    pub fn shape(&self) -> Vec<i64> {
-        let n_dim = unsafe { ggml_n_dims(self.ptr) };
-        let inner = unsafe { &*self.ptr };
-        inner.ne.iter().take(n_dim as _).rev().cloned().collect()
-    }
-
-    pub fn raw_data(&self) -> &[u8] {
+    pub fn get_data(&self) -> &[u8] {
         let inner = unsafe { &*self.ptr };
         let numel = inner.ne.iter().product::<i64>() as usize;
         unsafe {
             std::slice::from_raw_parts(inner.data as *const u8, ggml_type_size(inner.type_) * numel)
         }
+    }
+
+    pub fn shape(&self) -> Vec<i64> {
+        let n_dim = unsafe { ggml_n_dims(self.ptr) };
+        let inner = unsafe { &*self.ptr };
+        inner.ne.iter().take(n_dim as _).rev().cloned().collect()
     }
 
     pub fn matmul(&self, other: &Tensor) -> Tensor {
@@ -196,6 +167,16 @@ impl Tensor {
     pub fn mul(&self, other: &Tensor) -> Tensor {
         let tensor =
             unsafe { bindings::ggml_mul(self.ctx.as_ptr(), &mut *self.ptr, &mut *other.ptr) };
+        Self {
+            ctx: self.ctx,
+            ptr: tensor,
+        }
+    }
+
+    pub fn mul_inplace(self, other: &Tensor) -> Tensor {
+        let tensor = unsafe {
+            bindings::ggml_mul_inplace(self.ctx.as_ptr(), &mut *self.ptr, &mut *other.ptr)
+        };
         Self {
             ctx: self.ctx,
             ptr: tensor,
@@ -220,6 +201,14 @@ impl Tensor {
     }
     pub fn silu(&self) -> Tensor {
         let tensor = unsafe { bindings::ggml_silu(self.ctx.as_ptr(), &mut *self.ptr) };
+        Self {
+            ctx: self.ctx,
+            ptr: tensor,
+        }
+    }
+
+    pub fn silu_inplace(self) -> Tensor {
+        let tensor = unsafe { bindings::ggml_silu_inplace(self.ctx.as_ptr(), &mut *self.ptr) };
         Self {
             ctx: self.ctx,
             ptr: tensor,
@@ -283,45 +272,54 @@ mod test {
         c
     }
 
-    fn tensor(a: &[f32]) -> Tensor {
-        let len = a.len();
-        let a = unsafe {
+    fn set_tensor(tensor: &mut Tensor, data: &[f32]) {
+        let tensor_data = unsafe {
             std::slice::from_raw_parts_mut(
-                a.as_ptr() as *mut _,
-                a.len() * std::mem::size_of::<f32>(),
+                data.as_ptr() as *mut _,
+                data.len() * std::mem::size_of::<f32>(),
             )
         };
-        unsafe { Tensor::from_raw(a, &[len as _, 1], Kind::F32).unwrap() }
+        tensor.set_data(tensor_data).unwrap();
+    }
+
+    fn chk_tensor(tensor: &Tensor, data: &[f32]) {
+        let tensor_data = tensor.get_data();
+        let result = unsafe {
+            std::slice::from_raw_parts_mut(
+                tensor_data.as_ptr() as *mut f32,
+                tensor_data.len() / std::mem::size_of::<f32>(),
+            )
+        };
+        assert_eq!(result, data);
     }
 
     #[test]
     fn test_tensor_mul() -> Result<(), Box<dyn std::error::Error>> {
-        Context::init(1024 * 1024);
+        let mut ctx = Context::new(1024 * 1024);
 
         let a: [f32; 3] = [1.0, 2.0, 3.0];
         let b: [f32; 3] = [4.0, 5.0, 6.0];
 
         let expected_c = matmul(&a, &b);
 
-        let mut tensor_a = tensor(&a);
-        let mut tensor_b = tensor(&b);
+        let mut tensor_a = ctx.create_tensor(&[3, 1], Kind::F32);
+        let mut tensor_b = ctx.create_tensor(&[3, 1], Kind::F32);
 
         assert_eq!(tensor_a.shape(), &[3, 1]);
         assert_eq!(tensor_b.shape(), &[3, 1]);
+
         let mut tensor_c = tensor_a.matmul(&mut tensor_b);
 
-        let mut graph = Graph::new();
-        graph.build_forward(&mut tensor_c);
-        graph.compute(1);
-        let c_data = tensor_c.raw_data();
-        let result = unsafe {
-            std::slice::from_raw_parts_mut(
-                c_data.as_ptr() as *mut f32,
-                c_data.len() / std::mem::size_of::<f32>(),
-            )
-        };
+        let mut graph = ctx.create_graph();
 
-        assert_eq!(result, &expected_c);
+        graph.build_forward(&mut tensor_c);
+
+        set_tensor(&mut tensor_a, &a);
+        set_tensor(&mut tensor_b, &b);
+
+        graph.compute(1);
+
+        chk_tensor(&tensor_c, &expected_c);
 
         for _ in 0..32 {
             let mut a: [f32; 3] = [0.0; 3];
@@ -333,32 +331,12 @@ mod test {
 
             let expected_c = matmul(&a, &b);
 
-            let a = unsafe {
-                std::slice::from_raw_parts_mut(
-                    a.as_ptr() as _,
-                    a.len() * std::mem::size_of::<f32>(),
-                )
-            };
-            let b = unsafe {
-                std::slice::from_raw_parts_mut(
-                    b.as_ptr() as _,
-                    b.len() * std::mem::size_of::<f32>(),
-                )
-            };
-
-            tensor_a.set_data(a).unwrap();
-            tensor_b.set_data(b).unwrap();
+            set_tensor(&mut tensor_a, &a);
+            set_tensor(&mut tensor_b, &b);
 
             graph.compute(1);
-            let c_data = tensor_c.raw_data();
-            let result = unsafe {
-                std::slice::from_raw_parts_mut(
-                    c_data.as_ptr() as *mut f32,
-                    c_data.len() / std::mem::size_of::<f32>(),
-                )
-            };
 
-            assert_eq!(result, &expected_c);
+            chk_tensor(&tensor_c, &expected_c);
         }
 
         Ok(())

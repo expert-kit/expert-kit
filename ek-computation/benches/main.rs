@@ -5,6 +5,14 @@ use std::{collections::HashMap, sync::LazyLock};
 use criterion::{criterion_group, criterion_main};
 use ek_computation::backend::Device;
 
+pub static BACKEND2DEVICES: LazyLock<HashMap<&'static str, Vec<&'static str>>> =
+    LazyLock::new(|| {
+        let mut backends = HashMap::new();
+        backends.insert("ggml", vec!["cpu"]);
+        backends.insert("torch", vec!["cpu", "cuda:0"]);
+        backends
+    });
+
 pub static DEVICES: LazyLock<HashMap<&'static str, Device>> = LazyLock::new(|| {
     let mut devices = HashMap::new();
     devices.insert("cpu", Device::CPU);

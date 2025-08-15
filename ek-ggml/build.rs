@@ -6,7 +6,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let dst = cmake::Config::new("ggml")
         .profile("Release")
-        // .define("GGML_STATIC", "ON")
         .define("GGML_LLAMAFILE", "ON")
         .define("GGML_CUDA", "ON")
         .build();

@@ -15,7 +15,6 @@ const BATCH_SIZES: &[usize] = &[1, 4, 8, 16, 64, 128, 256, 512];
 
 pub fn bench(c: &mut Criterion) {
     let mut group = c.benchmark_group("torch ffn w/ weight transfer");
-    group.measurement_time(Duration::from_secs(60));
 
     for &batch_size in BATCH_SIZES {
         for &dev in DEVICES.keys() {

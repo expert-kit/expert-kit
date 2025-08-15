@@ -1,6 +1,6 @@
 use std::{collections::HashMap, sync::Mutex};
 
-use ek_ggml::{Graph, Kind, Tensor};
+use ek_ggml::{Context, Graph, Kind, Tensor};
 
 use crate::{
     backend::{DType, Device, EkTensor, ggml::GgmlTensor},
@@ -10,8 +10,7 @@ use crate::{
 pub struct GgmlFFN {
     dim: usize,
     intermediate_dim: usize,
-    weight: ExpertWeight<GgmlTensor>,
-    io: Mutex<HashMap<u32, (Tensor, Graph, Tensor)>>,
+    inner: Mutex<GgmlForwardInner>,
     n_threads: usize,
 }
 
@@ -22,11 +21,46 @@ impl GgmlFFN {
         weight: ExpertWeight<GgmlTensor>,
         n_threads: usize,
     ) -> Self {
+        let mut context_size = 0;
+        context_size += weight.up_w.shape.iter().sum::<i64>() as usize * weight.up_w.kind.size();
+        context_size +=
+            weight.down_w.shape.iter().sum::<i64>() as usize * weight.down_w.kind.size();
+        context_size +=
+            weight.gate_w.shape.iter().sum::<i64>() as usize * weight.gate_w.kind.size();
+        context_size += 3 * Tensor::overhead();
+
+        for i in 0..=9 {
+            let batch_size = 2_usize.pow(i);
+            context_size += batch_size * dim * Kind::BF16.size(); // input 
+            context_size += batch_size * intermediate_dim * Kind::F32.size(); // up
+            context_size += batch_size * intermediate_dim * Kind::F32.size(); // gate
+            context_size += batch_size * intermediate_dim * Kind::BF16.size(); // hidden
+            context_size += batch_size * intermediate_dim * Kind::BF16.size(); // hidden.T
+            context_size += batch_size * dim * Kind::F32.size(); // output
+            context_size += batch_size * dim * Kind::BF16.size(); // output.cast
+            context_size += 7 * Tensor::overhead(); // overhead for tensors
+            context_size += Graph::overhead(); // overhead for graph
+            context_size += 1024; // additional overhead
+        }
+
+        let mut context = Context::new(context_size.next_multiple_of(4096));
+        let mut weights = [
+            context.create_tensor(&weight.up_w.shape, weight.up_w.kind),
+            context.create_tensor(&weight.down_w.shape, weight.down_w.kind),
+            context.create_tensor(&weight.gate_w.shape, weight.gate_w.kind),
+        ];
+        weights[0].set_data(&weight.up_w.data).unwrap();
+        weights[1].set_data(&weight.down_w.data).unwrap();
+        weights[2].set_data(&weight.gate_w.data).unwrap();
         Self {
             dim,
             intermediate_dim,
-            weight,
-            io: Mutex::new(HashMap::new()),
+            inner: Mutex::new(GgmlForwardInner {
+                dim,
+                context,
+                weights,
+                compute: HashMap::default(),
+            }),
             n_threads,
         }
     }
@@ -34,93 +68,16 @@ impl GgmlFFN {
 
 impl Expert<GgmlTensor> for GgmlFFN {
     fn forward(&self, x: &GgmlTensor) -> GgmlTensor {
-        let shape = x.shape(); // [B, N]
-        let batch_size = shape[0];
-        let padded_batch_size = batch_size.next_power_of_two();
-        let log2 = padded_batch_size.ilog2();
-
-        let mut io = self.io.lock().unwrap();
-        let (input, graph, output) = io.entry(log2).or_insert_with(|| {
-            let w1 = unsafe {
-                Tensor::from_raw(
-                    &self.weight.up_w.data,
-                    &self.weight.up_w.shape,
-                    self.weight.up_w.kind,
-                )
-                .unwrap()
-            }; // [I, N]
-
-            let w2 = unsafe {
-                Tensor::from_raw(
-                    &self.weight.down_w.data,
-                    &self.weight.down_w.shape,
-                    self.weight.down_w.kind,
-                )
-                .unwrap()
-            }; // [N, I]
-
-            let w3 = unsafe {
-                Tensor::from_raw(
-                    &self.weight.gate_w.data,
-                    &self.weight.gate_w.shape,
-                    self.weight.gate_w.kind,
-                )
-                .unwrap()
-            }; // [I, N]
-
-            let input =
-                Tensor::empty(&vec![padded_batch_size as _, self.dim as _], Kind::F32).unwrap(); // [B, N]
-
-            let up = input.matmul(&w1); // [B, I]
-            let gate = input.matmul(&w3); // [B, I]
-
-            let hidden = up.mul(&gate.silu()); // [B, I]
-            let output = hidden.transpose().matmul(&w2).transpose(); // [B, N]
-
-            let mut graph = Graph::new();
-            graph.build_forward(&output);
-
-            (input, graph, output)
-        });
-
-        if padded_batch_size > batch_size {
-            input
-                .set_data(
-                    &x.data
-                        .iter()
-                        .cloned()
-                        .chain(std::iter::repeat(0u8))
-                        .take(padded_batch_size * self.dim * input.kind().size())
-                        .collect::<Vec<_>>()
-                        .as_ref(),
-                )
-                .unwrap();
-            graph.compute(self.n_threads);
-
-            GgmlTensor {
-                data: output
-                    .raw_data()
-                    .iter()
-                    .cloned()
-                    .take(batch_size * self.dim * output.kind().size())
-                    .collect(),
-                kind: output.kind(),
-                shape: x.shape.clone(),
-            }
-        } else {
-            input.set_data(&x.data).unwrap();
-            graph.compute(self.n_threads);
-
-            GgmlTensor {
-                data: output.raw_data().to_vec(),
-                kind: output.kind(),
-                shape: output.shape(),
-            }
+        let mut inner = self.inner.lock().unwrap();
+        GgmlTensor {
+            data: inner.forward(&x.shape(), &x.data, self.n_threads),
+            shape: x.shape.clone(),
+            kind: x.kind,
         }
     }
 
     fn rand_input(&self, batch: usize) -> GgmlTensor {
-        GgmlTensor::rand(vec![batch, self.dim], DType::Float, Device::CPU)
+        GgmlTensor::rand(vec![batch, self.dim], DType::BFloat16, Device::CPU)
     }
 
     fn shape(&self) -> super::meta::ExpertShape {
@@ -138,17 +95,67 @@ impl Expert<GgmlTensor> for GgmlFFN {
         x: crate::x::EKInstance,
         weight: ExpertWeight<GgmlTensor>,
     ) -> ek_base::error::EKResult<Self> {
-        Ok(Self::new(x.hidden, x.intermediate, weight, 16)) // TODO: Make n_threads configurable
+        Ok(Self::new(x.hidden, x.intermediate, weight, 8)) // TODO: Make n_threads configurable
     }
 }
 
-unsafe impl Sync for GgmlFFN {}
+struct GgmlForwardInner {
+    dim: usize,
+    context: Context,
+    weights: [Tensor; 3],
+    compute: HashMap<usize, (Tensor, Graph, Tensor)>,
+}
+
+impl GgmlForwardInner {
+    fn forward(&mut self, shape: &[usize], x: &[u8], n_threads: usize) -> Vec<u8> {
+        let batch_size = shape[0];
+        let padded_batch_size = batch_size.next_power_of_two();
+        let (input, graph, output) = self.compute.entry(padded_batch_size).or_insert_with(|| {
+            let [w1, w2, w3] = &self.weights;
+            let input = self
+                .context
+                .create_tensor(&[padded_batch_size as _, self.dim as _], Kind::BF16); // [B, N] x bf16
+            let up = input.matmul(&w1); // [I, B] x f32
+            let gate = input.matmul(&w3); // [I, B] x f32
+            let hidden = up.mul_inplace(&gate.silu_inplace()).cast(input.kind()); // [I, B] x bf16
+            let hidden = hidden.transpose(); // [B, I] x bf16
+            let output = w2.matmul(&hidden); // [B, N] x f32
+            let output = output.cast(input.kind()); // [B, N] x bf16
+            let mut graph = self.context.create_graph();
+            graph.build_forward(&output);
+            (input, graph, output)
+        });
+        if padded_batch_size > batch_size {
+            input
+                .set_data(
+                    &x.iter()
+                        .cloned()
+                        .chain(std::iter::repeat(0u8))
+                        .take(padded_batch_size * self.dim * input.kind().size())
+                        .collect::<Vec<_>>(),
+                )
+                .unwrap();
+        } else {
+            input.set_data(&x).unwrap();
+        }
+        graph.compute(n_threads);
+        if padded_batch_size > batch_size {
+            output
+                .get_data()
+                .iter()
+                .cloned()
+                .take(batch_size * self.dim * output.kind().size())
+                .collect()
+        } else {
+            output.get_data().iter().cloned().collect()
+        }
+    }
+}
 
 #[cfg(test)]
 mod test {
     use std::fs;
 
-    use ek_ggml::Context;
     use safetensors::SafeTensors;
 
     use crate::{
@@ -162,8 +169,6 @@ mod test {
 
     #[test]
     fn test_ggml_correctness() {
-        Context::init(1024 * 1024 * 1024);
-
         let st_fp = test_root()
             .join("resources")
             .join("qwen3-l0e1.weight.safetensors");
@@ -188,11 +193,7 @@ mod test {
 
         let inp = GgmlTensor::from_tensor_view(&tv);
 
-        let inp_tch = TchTensor(
-            TchTensor::from_tensor_view(&tv)
-                .inner()
-                .to_kind(tch::Kind::Float),
-        );
+        let inp_tch = TchTensor::from_tensor_view(&tv);
 
         let inp_data = inp.data.as_slice();
         let inp_tch_data = unsafe {
@@ -206,13 +207,11 @@ mod test {
 
         let res = ffn.forward(&inp);
 
-        let truth = TchTensor::from_tensor_view(&gt_st.tensor("1-output").unwrap())
-            .inner()
-            .to_kind(tch::Kind::Float);
+        let truth = TchTensor::from_tensor_view(&gt_st.tensor("1-output").unwrap()).inner();
 
         let res_tch = TchTensor::from_raw(&res.data, &res.shape(), res.kind.into()).inner();
 
-        let diff = (&res_tch - &truth).sum(tch::Kind::Float);
+        let diff = (&res_tch - &truth).sum(tch::Kind::BFloat16);
         diff.print();
     }
 }

@@ -6,6 +6,7 @@ impl From<crate::backend::DType> for Kind {
     fn from(value: crate::backend::DType) -> Self {
         match value {
             crate::backend::DType::Float => Kind::F32,
+            crate::backend::DType::BFloat16 => Kind::BF16,
             _ => unimplemented!(),
         }
     }
@@ -15,6 +16,7 @@ impl From<ek_ggml::Kind> for crate::backend::DType {
     fn from(value: Kind) -> Self {
         match value {
             Kind::F32 => crate::backend::DType::Float,
+            Kind::BF16 => crate::backend::DType::BFloat16,
         }
     }
 }
@@ -90,26 +92,15 @@ impl EkTensor for GgmlTensor {
 
     fn from_tensor_view(tv: &safetensors::tensor::TensorView<'_>) -> Self {
         let shape = tv.shape().iter().map(|&s| s as i64).collect::<Vec<_>>();
-        let data = match tv.dtype() {
-            safetensors::tensor::Dtype::F32 => tv.data().to_vec(),
-            safetensors::tensor::Dtype::BF16 => {
-                // bf16 -> f32
-                let f32_data = tv
-                    .data()
-                    .chunks_exact(2)
-                    .flat_map(|chunk| {
-                        let bf16 = u16::from_le_bytes([chunk[0], chunk[1]]);
-                        f32::from_bits((bf16 as u32) << 16).to_le_bytes()
-                    })
-                    .collect();
-                f32_data
-            }
+        let kind = match tv.dtype() {
+            safetensors::tensor::Dtype::F32 => Kind::F32,
+            safetensors::tensor::Dtype::BF16 => Kind::BF16,
             _ => unimplemented!(),
         };
         GgmlTensor {
-            data,
+            data: tv.data().to_vec(),
             shape,
-            kind: Kind::F32,
+            kind,
         }
     }
 
