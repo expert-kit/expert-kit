@@ -162,13 +162,18 @@ impl NaiveExecutor {
 
         while let Some((expert_id, egress_meta)) = self.pending_egress.pop_first() {
             let expert_id: ExpertIdRef = expert_id.as_ref();
-            let Ok(channel) = self.registry.lock().await.select(expert_id).await else {
-                log::warn!("failed to select channel for expert {expert_id}");
+            let Ok(client) = self.registry.lock().await.select(expert_id).await else {
+                log::warn!("failed to select client for expert {expert_id}");
                 continue;
             };
             chips.push((expert_id.to_owned(), egress_meta.to_owned()));
 
-            let mut cli = v1::computation_service_client::ComputationServiceClient::new(channel)
+            let Some(grpc_channel) = client.into_grpc_client() else {
+                log::warn!("expert {expert_id} is not available via gRPC, skipping");
+                continue;
+            };
+
+            let mut cli = v1::computation_service_client::ComputationServiceClient::new(grpc_channel)
                 .max_decoding_message_size(1024 * 1024 * 1024)
                 .max_encoding_message_size(1024 * 1024 * 1024);
 
@@ -351,7 +356,7 @@ pub struct LocalShmExecutor {
     seq_mapping: BTreeMap<GlobalSeqId, (ReqId, LocalSeqIdx)>,
     seq_gid_cursor: u64,
     req_id_cursor: u64,
-    registry: Arc<Mutex<LocalShmExpertRegistry>>,
+    registry: GlobalWorkerRegistry,
     pending_resp: Arc<Mutex<HashMap<usize, LocalShmWorkerResp>>>,
 }
 
@@ -369,7 +374,7 @@ impl LocalShmExecutor {
             seq_mapping: BTreeMap::new(),
             seq_gid_cursor: 0,
             req_id_cursor: 0,
-            registry: Arc::new(Mutex::new(LocalShmExpertRegistry::new())),
+            registry: get_registry(),
             pending_resp: Arc::new(Mutex::new(HashMap::new())),
         }
     }
@@ -445,10 +450,13 @@ impl LocalShmExecutor {
 
         while let Some((expert_id, egress_meta)) = self.pending_egress.pop_first() {
             let expert_id: ExpertIdRef = expert_id.as_ref();
-            let Ok((send_channel, recv_channel)) =
-                self.registry.lock().await.select(expert_id).await
-            else {
-                log::warn!("failed to select channel for expert {expert_id}");
+            let Ok(client) = self.registry.lock().await.select(expert_id).await else {
+                log::warn!("failed to select client for expert {expert_id}");
+                continue;
+            };
+
+            let Some((send_channel, recv_channel)) = client.into_shm_channels() else {
+                log::warn!("expert {expert_id} is not available via shared memory, skipping");
                 continue;
             };
             chips.push((expert_id.to_owned(), egress_meta.to_owned()));
