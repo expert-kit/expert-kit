@@ -159,7 +159,7 @@ async fn execute_duplicate_schedule(hostnames: Vec<String>) -> EKResult<()> {
         log::info!("No specific hostnames provided, duplicating to all active nodes");
         all_nodes.into_iter().map(|x| x.id).collect::<Vec<_>>()
     } else {
-        log::info!("Filtering nodes by hostnames: {:?}", hostnames);
+        log::info!("Filtering nodes by hostnames: {hostnames:?}");
         all_nodes
             .into_iter()
             .filter(|node| hostnames.contains(&node.hostname))
@@ -223,8 +223,7 @@ fn parse_layer_ranges(layers_str: &str) -> EKResult<Vec<u32>> {
             let parts: Vec<&str> = range_part.split('-').collect();
             if parts.len() != 2 {
                 return Err(EKError::InvalidInput(format!(
-                    "Invalid range format: {}. Expected format like '1-5'", 
-                    range_part
+                    "Invalid range format: {range_part}. Expected format like '1-5'"
                 )));
             }
             
@@ -237,8 +236,7 @@ fn parse_layer_ranges(layers_str: &str) -> EKResult<Vec<u32>> {
             
             if start > end {
                 return Err(EKError::InvalidInput(format!(
-                    "Invalid range: {} > {}. Start must be <= end", 
-                    start, end
+                    "Invalid range: {start} > {end}. Start must be <= end"
                 )));
             }
             
@@ -247,7 +245,7 @@ fn parse_layer_ranges(layers_str: &str) -> EKResult<Vec<u32>> {
             }
         } else {
             let layer: u32 = range_part.parse().map_err(|_| {
-                EKError::InvalidInput(format!("Invalid number: {}", range_part))
+                EKError::InvalidInput(format!("Invalid number: {range_part}"))
             })?;
             layers.push(layer);
         }
@@ -264,13 +262,12 @@ async fn execute_manual_schedule(hostnames: Vec<String>, layers_str: String) -> 
     let instance_name = settings.inference.instance_name.clone();
     let ws_addr = settings.weight.server.as_ref().unwrap().addr.clone();
     log::info!(
-        "Running manual schedule for model: {model_name}, instance: {instance_name}, target nodes: {:?}, layers: {layers_str}",
-        hostnames
+        "Running manual schedule for model: {model_name}, instance: {instance_name}, target nodes: {hostnames:?}, layers: {layers_str}"
     );
     
     // Parse layer ranges
     let target_layers = parse_layer_ranges(&layers_str)?;
-    log::info!("Parsed layers: {:?}", target_layers);
+    log::info!("Parsed layers: {target_layers:?}");
     
     let cli = WeightSrvClient::new(ws_addr);
     let vital = cli.load_meta_vital(&model_name).await?;
@@ -296,7 +293,7 @@ async fn execute_manual_schedule(hostnames: Vec<String>, layers_str: String) -> 
     }
     
     let found_hostnames: Vec<_> = target_nodes.iter().map(|n| &n.hostname).collect();
-    log::info!("Target nodes found: {:?}", found_hostnames);
+    log::info!("Target nodes found: {found_hostnames:?}");
 
     let instance_obj = writer
         .instance_upsert(NewInstance {
