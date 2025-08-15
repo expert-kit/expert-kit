@@ -206,6 +206,7 @@ impl LinuxCpuAffinityOps {
 }
 
 /// Default implementation for unsupported platforms
+#[expect(dead_code)]
 pub struct DefaultCpuAffinityOps;
 
 impl CpuAffinityOps for DefaultCpuAffinityOps {
