@@ -64,7 +64,7 @@ impl StatePollerImpl {
             .first::<models::Instance>(&mut conn)
             .await?;
 
-        // Fetch all nodes  
+        // Fetch all nodes
         let nodes = schema::node::table
             .select(models::Node::as_select())
             .load(&mut conn)

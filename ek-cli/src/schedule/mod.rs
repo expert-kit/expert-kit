@@ -6,7 +6,9 @@ use ek_base::{
     error::{EKError, EKResult},
 };
 use ek_computation::{
-    proto::ek::control::v1::{DuplicateReq, ManualReq, RebalanceReq, plan_service_client::PlanServiceClient},
+    proto::ek::control::v1::{
+        DuplicateReq, ManualReq, RebalanceReq, plan_service_client::PlanServiceClient,
+    },
     state::{
         io::StateReaderImpl,
         models::{NewExpert, NewInstance, NewNode},
@@ -29,7 +31,11 @@ pub enum ScheduleCommand {
     },
     Rebalance,
     Duplicate {
-        #[arg(long, help = "Specific hostnames to duplicate to (if not specified, duplicates to all nodes)", value_delimiter = ',')]
+        #[arg(
+            long,
+            help = "Specific hostnames to duplicate to (if not specified, duplicates to all nodes)",
+            value_delimiter = ','
+        )]
         hostnames: Option<Vec<String>>,
     },
     Manual {
@@ -89,7 +95,8 @@ async fn execute_duplicate(hostnames: Option<Vec<String>>) -> EKResult<()> {
     let mut cli = PlanServiceClient::connect(endpoint).await?;
     cli.duplicate(DuplicateReq {
         hostnames: hostnames.unwrap_or_default(),
-    }).await?;
+    })
+    .await?;
     log::info!("duplicate done");
     Ok(())
 }
@@ -103,10 +110,7 @@ async fn execute_manual(hostnames: Vec<String>, layers: String) -> EKResult<()> 
     log::info!("connect to controller at {controller_addr}");
     let endpoint = Endpoint::from_str(controller_addr.as_str()).unwrap();
     let mut cli = PlanServiceClient::connect(endpoint).await?;
-    cli.manual(ManualReq {
-        hostnames,
-        layers,
-    }).await?;
+    cli.manual(ManualReq { hostnames, layers }).await?;
     log::info!("manual assignment done");
     Ok(())
 }
