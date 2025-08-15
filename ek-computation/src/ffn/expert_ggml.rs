@@ -115,8 +115,8 @@ impl GgmlForwardInner {
             let input = self
                 .context
                 .create_tensor(&[padded_batch_size as _, self.dim as _], Kind::BF16); // [B, N] x bf16
-            let up = input.matmul(&w1); // [I, B] x f32
-            let gate = input.matmul(&w3); // [I, B] x f32
+            let up = input.matmul(w1); // [I, B] x f32
+            let gate = input.matmul(w3); // [I, B] x f32
             let hidden = up.mul_inplace(&gate.silu_inplace()).cast(input.kind()); // [I, B] x bf16
             let hidden = hidden.transpose(); // [B, I] x bf16
             let output = w2.matmul(&hidden); // [B, N] x f32
@@ -136,7 +136,7 @@ impl GgmlForwardInner {
                 )
                 .unwrap();
         } else {
-            input.set_data(&x).unwrap();
+            input.set_data(x).unwrap();
         }
         graph.compute(n_threads);
         if padded_batch_size > batch_size {
@@ -147,7 +147,7 @@ impl GgmlForwardInner {
                 .take(batch_size * self.dim * output.kind().size())
                 .collect()
         } else {
-            output.get_data().iter().cloned().collect()
+            output.get_data().to_vec()
         }
     }
 }

@@ -1,4 +1,4 @@
-use std::{sync::OnceLock, time::Duration};
+use std::sync::OnceLock;
 
 use criterion::{BatchSize, Criterion};
 use ek_computation::{

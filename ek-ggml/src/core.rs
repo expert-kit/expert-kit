@@ -251,7 +251,7 @@ impl Tensor {
 
 impl Clone for Tensor {
     fn clone(&self) -> Self {
-        let ptr = unsafe { ggml_dup_tensor(self.ctx.as_ptr(), &mut *self.ptr) };
+        let ptr = unsafe { ggml_dup_tensor(self.ctx.as_ptr(), self.ptr) };
         Self { ctx: self.ctx, ptr }
     }
 }
@@ -264,9 +264,9 @@ mod test {
 
     fn matmul<const N: usize>(a: &[f32; N], b: &[f32; N]) -> Vec<f32> {
         let mut c = Vec::with_capacity(N * N); // C^T = A * B^T
-        for j in 0..N {
-            for i in 0..N {
-                c.push(a[i] * b[j]);
+        for &j in b.iter().take(N) {
+            for &i in a.iter().take(N) {
+                c.push(i * j);
             }
         }
         c
@@ -274,10 +274,7 @@ mod test {
 
     fn set_tensor(tensor: &mut Tensor, data: &[f32]) {
         let tensor_data = unsafe {
-            std::slice::from_raw_parts_mut(
-                data.as_ptr() as *mut _,
-                data.len() * std::mem::size_of::<f32>(),
-            )
+            std::slice::from_raw_parts_mut(data.as_ptr() as *mut _, std::mem::size_of_val(data))
         };
         tensor.set_data(tensor_data).unwrap();
     }
@@ -308,11 +305,11 @@ mod test {
         assert_eq!(tensor_a.shape(), &[3, 1]);
         assert_eq!(tensor_b.shape(), &[3, 1]);
 
-        let mut tensor_c = tensor_a.matmul(&mut tensor_b);
+        let tensor_c = tensor_a.matmul(&tensor_b);
 
         let mut graph = ctx.create_graph();
 
-        graph.build_forward(&mut tensor_c);
+        graph.build_forward(&tensor_c);
 
         set_tensor(&mut tensor_a, &a);
         set_tensor(&mut tensor_b, &b);

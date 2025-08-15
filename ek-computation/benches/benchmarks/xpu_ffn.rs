@@ -1,9 +1,10 @@
-use std::{sync::OnceLock, time::Duration};
+use std::sync::OnceLock;
 
 use criterion::{BatchSize, Criterion};
 use ek_computation::{
     backend::{Device, EkTensor},
     ffn::{
+        expert_ggml::GgmlFFN,
         expert_torch::TorchFFN,
         meta::{Expert, ExpertWeight},
     },
