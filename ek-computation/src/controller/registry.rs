@@ -24,13 +24,15 @@ use crate::{
 pub type ExpertId = String;
 pub type ExpertIdRef<'a> = &'a str;
 
+pub type LocalShmChannel = (
+    Arc<Mutex<ShmQueue<'static, LocalShmWorkerReq>>>,
+    Arc<Mutex<ShmQueue<'static, LocalShmWorkerResp>>>,
+);
+
 #[derive(Clone)]
 pub enum ExpertClient {
     Grpc(OTelGrpcClientMiddleware),
-    Shm((
-        Arc<Mutex<ShmQueue<'static, LocalShmWorkerReq>>>,
-        Arc<Mutex<ShmQueue<'static, LocalShmWorkerResp>>>,
-    )),
+    Shm(LocalShmChannel),
 }
 
 impl std::fmt::Debug for ExpertClient {
@@ -50,10 +52,7 @@ impl ExpertClient {
         }
     }
 
-    pub fn into_shm_channels(self) -> Option<(
-        Arc<Mutex<ShmQueue<'static, LocalShmWorkerReq>>>,
-        Arc<Mutex<ShmQueue<'static, LocalShmWorkerResp>>>,
-    )> {
+    pub fn into_shm_channels(self) -> Option<LocalShmChannel> {
         match self {
             ExpertClient::Grpc(_) => None,
             ExpertClient::Shm(channels) => Some(channels),
@@ -394,7 +393,10 @@ impl ExpertRegistry for LocalShmExpertRegistry {
                 "no channel found for expert {eid}"
             )))?;
         let idx = rand::random::<usize>() % channels.len();
-        Ok(ExpertClient::Shm((channels[idx].1.clone(), channels[idx].2.clone())))
+        Ok(ExpertClient::Shm((
+            channels[idx].1.clone(),
+            channels[idx].2.clone(),
+        )))
     }
 
     async fn reset(&mut self) -> EKResult<()> {
@@ -405,13 +407,9 @@ impl ExpertRegistry for LocalShmExpertRegistry {
     async fn deregister(&mut self, host_id: &str) {
         self.all_channels.retain(|hostname, _| hostname != host_id);
 
-        let origin = self.experts2channels.iter().map(|(_, v)| v.len()).sum::<usize>();
-        log::info!("🚀deregistering host_id {host_id}, origin channels: {origin}");
         for (_, channels) in self.experts2channels.iter_mut() {
             channels.retain(|(id, _, _)| id != host_id);
         }
-        let remaining = self.experts2channels.iter().map(|(_, v)| v.len()).sum::<usize>();
-        log::info!("🚀deregistered host_id {host_id}, remaining channels: {}", remaining);
     }
 }
 

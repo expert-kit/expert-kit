@@ -7,11 +7,13 @@ use rand::random;
 use tokio::task::JoinSet;
 
 use crate::{
-    controller::registry::get_registry, proto::ek::control::v1::{self}, state::{
+    controller::registry::get_registry,
+    proto::ek::control::v1::{self},
+    state::{
         io::StateReaderImpl,
         models::{NewExpert, NewInstance},
         writer::StateWriterImpl,
-    }
+    },
 };
 pub struct PlanServiceImpl {}
 
@@ -154,7 +156,7 @@ async fn execute_duplicate_schedule(hostnames: Vec<String>) -> EKResult<()> {
 
     let writer = StateWriterImpl::new();
     let all_nodes = reader.active_nodes().await?;
-    
+
     let node_ids = if hostnames.is_empty() {
         log::info!("No specific hostnames provided, duplicating to all active nodes");
         all_nodes.into_iter().map(|x| x.id).collect::<Vec<_>>()
@@ -168,7 +170,9 @@ async fn execute_duplicate_schedule(hostnames: Vec<String>) -> EKResult<()> {
     };
 
     if node_ids.is_empty() {
-        return Err(EKError::NotFound("No matching nodes found for the specified hostnames".to_string()));
+        return Err(EKError::NotFound(
+            "No matching nodes found for the specified hostnames".to_string(),
+        ));
     }
 
     let instance_obj = writer
@@ -184,7 +188,11 @@ async fn execute_duplicate_schedule(hostnames: Vec<String>) -> EKResult<()> {
             experts.push(ExpertKey::new(model_name.clone(), layer, expert));
         }
     }
-    log::info!("total experts to schedule: {}, target nodes: {}", experts.len(), node_ids.len());
+    log::info!(
+        "total experts to schedule: {}, target nodes: {}",
+        experts.len(),
+        node_ids.len()
+    );
     log::info!("duplicating all experts to {} nodes", node_ids.len());
 
     writer.expert_del_by_instance(instance_obj.id).await?;
@@ -216,7 +224,7 @@ async fn execute_duplicate_schedule(hostnames: Vec<String>) -> EKResult<()> {
 
 fn parse_layer_ranges(layers_str: &str) -> EKResult<Vec<u32>> {
     let mut layers = Vec::new();
-    
+
     for range_part in layers_str.split(',') {
         let range_part = range_part.trim();
         if range_part.contains('-') {
@@ -226,31 +234,31 @@ fn parse_layer_ranges(layers_str: &str) -> EKResult<Vec<u32>> {
                     "Invalid range format: {range_part}. Expected format like '1-5'"
                 )));
             }
-            
-            let start: u32 = parts[0].parse().map_err(|_| {
-                EKError::InvalidInput(format!("Invalid number: {}", parts[0]))
-            })?;
-            let end: u32 = parts[1].parse().map_err(|_| {
-                EKError::InvalidInput(format!("Invalid number: {}", parts[1]))
-            })?;
-            
+
+            let start: u32 = parts[0]
+                .parse()
+                .map_err(|_| EKError::InvalidInput(format!("Invalid number: {}", parts[0])))?;
+            let end: u32 = parts[1]
+                .parse()
+                .map_err(|_| EKError::InvalidInput(format!("Invalid number: {}", parts[1])))?;
+
             if start > end {
                 return Err(EKError::InvalidInput(format!(
                     "Invalid range: {start} > {end}. Start must be <= end"
                 )));
             }
-            
+
             for layer in start..=end {
                 layers.push(layer);
             }
         } else {
-            let layer: u32 = range_part.parse().map_err(|_| {
-                EKError::InvalidInput(format!("Invalid number: {range_part}"))
-            })?;
+            let layer: u32 = range_part
+                .parse()
+                .map_err(|_| EKError::InvalidInput(format!("Invalid number: {range_part}")))?;
             layers.push(layer);
         }
     }
-    
+
     layers.sort();
     layers.dedup();
     Ok(layers)
@@ -264,11 +272,11 @@ async fn execute_manual_schedule(hostnames: Vec<String>, layers_str: String) -> 
     log::info!(
         "Running manual schedule for model: {model_name}, instance: {instance_name}, target nodes: {hostnames:?}, layers: {layers_str}"
     );
-    
+
     // Parse layer ranges
     let target_layers = parse_layer_ranges(&layers_str)?;
     log::info!("Parsed layers: {target_layers:?}");
-    
+
     let cli = WeightSrvClient::new(ws_addr);
     let vital = cli.load_meta_vital(&model_name).await?;
     log::info!("model info : {:?}", &vital);
@@ -281,17 +289,19 @@ async fn execute_manual_schedule(hostnames: Vec<String>, layers_str: String) -> 
 
     let writer = StateWriterImpl::new();
     let all_nodes = reader.active_nodes().await?;
-    
+
     // Find target nodes by hostnames
     let target_nodes: Vec<_> = all_nodes
         .into_iter()
         .filter(|node| hostnames.contains(&node.hostname))
         .collect();
-    
+
     if target_nodes.is_empty() {
-        return Err(EKError::NotFound("No matching nodes found for the specified hostnames".to_string()));
+        return Err(EKError::NotFound(
+            "No matching nodes found for the specified hostnames".to_string(),
+        ));
     }
-    
+
     let found_hostnames: Vec<_> = target_nodes.iter().map(|n| &n.hostname).collect();
     log::info!("Target nodes found: {found_hostnames:?}");
 
@@ -303,7 +313,10 @@ async fn execute_manual_schedule(hostnames: Vec<String>, layers_str: String) -> 
         .await?;
 
     // Clear experts on the target nodes
-    log::info!("Removing existing experts from {} target nodes", target_nodes.len());
+    log::info!(
+        "Removing existing experts from {} target nodes",
+        target_nodes.len()
+    );
     for node in &target_nodes {
         writer.del_experts_by_node(node.id, instance_obj.id).await?;
     }
@@ -315,17 +328,23 @@ async fn execute_manual_schedule(hostnames: Vec<String>, layers_str: String) -> 
         // Validate layer is within model bounds
         if layer < vital.moe_layers.0 || layer >= vital.moe_layers.1 {
             return Err(EKError::InvalidInput(format!(
-                "Layer {} is out of bounds. Model supports layers {}-{}", 
-                layer, vital.moe_layers.0, vital.moe_layers.1 - 1
+                "Layer {} is out of bounds. Model supports layers {}-{}",
+                layer,
+                vital.moe_layers.0,
+                vital.moe_layers.1 - 1
             )));
         }
-        
+
         for expert in 0..vital.routed_experts {
             experts_to_assign.push(ExpertKey::new(model_name.clone(), layer, expert));
         }
     }
-    
-    log::info!("Assigning {} experts to each of {} target nodes", experts_to_assign.len(), target_nodes.len());
+
+    log::info!(
+        "Assigning {} experts to each of {} target nodes",
+        experts_to_assign.len(),
+        target_nodes.len()
+    );
 
     // Assign experts to all target nodes
     let mut js = JoinSet::new();
@@ -349,7 +368,10 @@ async fn execute_manual_schedule(hostnames: Vec<String>, layers_str: String) -> 
         }
     }
     js.join_all().await;
-    
-    log::info!("Manual assignment completed: assigned specified layers to {} nodes", target_nodes.len());
+
+    log::info!(
+        "Manual assignment completed: assigned specified layers to {} nodes",
+        target_nodes.len()
+    );
     Ok(())
 }

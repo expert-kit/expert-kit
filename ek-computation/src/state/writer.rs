@@ -113,7 +113,7 @@ impl StateWriter for StateWriterImpl {
             .await?;
         Ok(())
     }
-    
+
     async fn upd_expert_state(&mut self, hostname: &str, state: ExpertSlice) -> EKResult<()> {
         let mut conn = POOL.get().await?;
         let reader = StateReaderImpl {};
@@ -243,9 +243,7 @@ impl StateWriterImpl {
         // Set last seen to zero time
         diesel::update(schema::node::table)
             .filter(dsl::hostname.eq(hostname))
-            .set((
-                dsl::last_seen_at.eq(std::time::SystemTime::UNIX_EPOCH),
-            ))
+            .set((dsl::last_seen_at.eq(std::time::SystemTime::UNIX_EPOCH),))
             .execute(&mut conn)
             .await?;
         Ok(())

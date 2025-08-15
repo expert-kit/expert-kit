@@ -19,10 +19,7 @@ use crate::{
     backend::{EkTensor, torch::TchTensor},
     controller::{
         metrics::METRIC_CONTROLLER_INTRA_REQ,
-        registry::{
-            ExpertId, ExpertIdRef, ExpertRegistry, LocalShmExpertRegistry, LocalShmWorkerReq,
-            LocalShmWorkerResp,
-        },
+        registry::{ExpertId, ExpertIdRef, LocalShmWorkerReq, LocalShmWorkerResp},
     },
     proto::ek::worker::v1::{self},
 };
@@ -173,9 +170,10 @@ impl NaiveExecutor {
                 continue;
             };
 
-            let mut cli = v1::computation_service_client::ComputationServiceClient::new(grpc_channel)
-                .max_decoding_message_size(1024 * 1024 * 1024)
-                .max_encoding_message_size(1024 * 1024 * 1024);
+            let mut cli =
+                v1::computation_service_client::ComputationServiceClient::new(grpc_channel)
+                    .max_decoding_message_size(1024 * 1024 * 1024)
+                    .max_encoding_message_size(1024 * 1024 * 1024);
 
             let seq_gids = egress_meta
                 .iter()

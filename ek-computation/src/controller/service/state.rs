@@ -19,7 +19,10 @@ use crate::proto::ek::worker::v1::state_service_server::StateService;
 pub struct StateServerImpl {}
 
 impl StateServerImpl {
-    async fn listen_worker_ping(mut req: tonic::Request<Streaming<v1::ExchangeReq>>, hostname: String) {
+    async fn listen_worker_ping(
+        mut req: tonic::Request<Streaming<v1::ExchangeReq>>,
+        hostname: String,
+    ) {
         let w = StateWriterImpl {};
         loop {
             match timeout(Duration::from_secs(60), req.get_mut().message()).await {
@@ -85,13 +88,13 @@ impl StateService for StateServerImpl {
             .await?
             .ok_or(Status::invalid_argument("no message"))?;
         let worker_id = first_message.id.clone();
-        
+
         // Handle incoming worker requests: Ping
         tokio::spawn(async move {
             // Upsert worker node and update last seen time in database
             StateServerImpl::listen_worker_ping(request, worker_id.clone()).await;
         });
-        
+
         // Watcher experts updates for the worker
         let mut rx = dispather_guard.subscribe(&first_message.id).await;
 
