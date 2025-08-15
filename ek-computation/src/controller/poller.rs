@@ -52,24 +52,32 @@ impl StatePollerImpl {
     pub fn new() -> Self {
         StatePollerImpl {}
     }
+
+    /// Polls the state of the system, fetching nodes and their associated experts,
     async fn poll_state(&mut self) -> EKResult<()> {
         let mut conn = pool::POOL.get().await?;
         let settings = get_ek_settings();
 
+        // Fetch instance by name in settings
         let instance = schema::instance::table
             .filter(schema::instance::name.eq(settings.inference.instance_name.clone()))
             .first::<models::Instance>(&mut conn)
             .await?;
 
+        // Fetch all nodes  
         let nodes = schema::node::table
             .select(models::Node::as_select())
             .load(&mut conn)
             .await?;
+
+        // Fetch experts associated with the instance
         let experts = models::Expert::belonging_to(&nodes)
             .select(models::Expert::as_select())
             .filter(schema::expert::instance_id.eq(instance.id))
             .load(&mut conn)
             .await?;
+
+        // Group experts by nodes
         let node_with_expert = experts
             .grouped_by(&nodes)
             .into_iter()
@@ -79,6 +87,8 @@ impl StatePollerImpl {
                 node: n,
             })
             .collect::<Vec<NodeWithExperts>>();
+
+        // update the dispatcher with the new state
         let mut lg = DISPATCHER.lock().await;
         let nodes_count = node_with_expert.len();
         log::info!(nodes_count; "polling nodes");

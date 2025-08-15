@@ -113,6 +113,7 @@ impl StateWriter for StateWriterImpl {
             .await?;
         Ok(())
     }
+    
     async fn upd_expert_state(&mut self, hostname: &str, state: ExpertSlice) -> EKResult<()> {
         let mut conn = POOL.get().await?;
         let reader = StateReaderImpl {};
@@ -231,6 +232,20 @@ impl StateWriterImpl {
         diesel::delete(schema::expert::table)
             .filter(dsl::node_id.eq(node_id))
             .filter(dsl::instance_id.eq(instance_id))
+            .execute(&mut conn)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn deactivate_node(&self, hostname: &str) -> EKResult<()> {
+        let mut conn = POOL.get().await?;
+        use schema::node::dsl;
+        // Set last seen to zero time
+        diesel::update(schema::node::table)
+            .filter(dsl::hostname.eq(hostname))
+            .set((
+                dsl::last_seen_at.eq(std::time::SystemTime::UNIX_EPOCH),
+            ))
             .execute(&mut conn)
             .await?;
         Ok(())

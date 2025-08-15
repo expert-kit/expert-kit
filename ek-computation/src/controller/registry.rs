@@ -7,6 +7,7 @@ use std::{
 };
 
 use ek_base::{
+    config::{ExpertRegistryBackend, get_ek_settings},
     error::{EKError, EKResult},
     tracing::grpc::OTelGrpcClientMiddleware,
 };
@@ -23,10 +24,54 @@ use crate::{
 pub type ExpertId = String;
 pub type ExpertIdRef<'a> = &'a str;
 
+#[derive(Clone)]
+pub enum ExpertClient {
+    Grpc(OTelGrpcClientMiddleware),
+    Shm((
+        Arc<Mutex<ShmQueue<'static, LocalShmWorkerReq>>>,
+        Arc<Mutex<ShmQueue<'static, LocalShmWorkerResp>>>,
+    )),
+}
+
+impl std::fmt::Debug for ExpertClient {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ExpertClient::Grpc(_) => write!(f, "ExpertClient::Grpc(..)"),
+            ExpertClient::Shm(_) => write!(f, "ExpertClient::Shm(..)"),
+        }
+    }
+}
+
+impl ExpertClient {
+    pub fn into_grpc_client(self) -> Option<OTelGrpcClientMiddleware> {
+        match self {
+            ExpertClient::Grpc(client) => Some(client),
+            ExpertClient::Shm(_) => None,
+        }
+    }
+
+    pub fn into_shm_channels(self) -> Option<(
+        Arc<Mutex<ShmQueue<'static, LocalShmWorkerReq>>>,
+        Arc<Mutex<ShmQueue<'static, LocalShmWorkerResp>>>,
+    )> {
+        match self {
+            ExpertClient::Grpc(_) => None,
+            ExpertClient::Shm(channels) => Some(channels),
+        }
+    }
+
+    pub fn is_grpc(&self) -> bool {
+        matches!(self, ExpertClient::Grpc(_))
+    }
+
+    pub fn is_shm(&self) -> bool {
+        matches!(self, ExpertClient::Shm(_))
+    }
+}
+
 #[async_trait::async_trait]
 pub trait ExpertRegistry {
-    type T;
-    async fn select(&mut self, eid: ExpertIdRef<'_>) -> EKResult<Self::T>;
+    async fn select(&mut self, eid: ExpertIdRef<'_>) -> EKResult<ExpertClient>;
     async fn reset(&mut self) -> EKResult<()>;
     async fn deregister(&mut self, host_id: &str);
 }
@@ -43,16 +88,16 @@ pub struct ExpertRegistryImpl {
 
 #[async_trait::async_trait]
 impl ExpertRegistry for ExpertRegistryImpl {
-    type T = OTelGrpcClientMiddleware;
     async fn reset(&mut self) -> EKResult<()> {
         self.inner_reset().await
     }
-    async fn select(&mut self, eid: ExpertIdRef<'_>) -> EKResult<Self::T> {
+    async fn select(&mut self, eid: ExpertIdRef<'_>) -> EKResult<ExpertClient> {
         let ch = self.inner_select(eid).await?;
 
-        Ok(ServiceBuilder::new()
+        let client = ServiceBuilder::new()
             .layer_fn(OTelGrpcClientMiddleware::new)
-            .service(ch))
+            .service(ch);
+        Ok(ExpertClient::Grpc(client))
     }
     async fn deregister(&mut self, host_id: &str) {
         self.inner_deregister(host_id).await;
@@ -306,12 +351,7 @@ impl LocalShmExpertRegistry {
 
 #[async_trait::async_trait]
 impl ExpertRegistry for LocalShmExpertRegistry {
-    type T = (
-        Arc<Mutex<ShmQueue<'static, LocalShmWorkerReq>>>,
-        Arc<Mutex<ShmQueue<'static, LocalShmWorkerResp>>>,
-    );
-
-    async fn select(&mut self, eid: ExpertIdRef<'_>) -> EKResult<Self::T> {
+    async fn select(&mut self, eid: ExpertIdRef<'_>) -> EKResult<ExpertClient> {
         if !self.experts2channels.contains_key(eid) {
             let nodes = self.reader.node_by_expert(eid).await?;
             for node in nodes {
@@ -350,31 +390,47 @@ impl ExpertRegistry for LocalShmExpertRegistry {
                 "no channel found for expert {eid}"
             )))?;
         let idx = rand::random::<usize>() % channels.len();
-        Ok((channels[idx].1.clone(), channels[idx].2.clone()))
+        Ok(ExpertClient::Shm((channels[idx].1.clone(), channels[idx].2.clone())))
     }
 
     async fn reset(&mut self) -> EKResult<()> {
-        self.all_channels.clear();
         self.experts2channels.clear();
         Ok(())
     }
 
     async fn deregister(&mut self, host_id: &str) {
         self.all_channels.retain(|hostname, _| hostname != host_id);
+
+        let origin = self.experts2channels.iter().map(|(_, v)| v.len()).sum::<usize>();
+        log::info!("🚀deregistering host_id {host_id}, origin channels: {origin}");
         for (_, channels) in self.experts2channels.iter_mut() {
             channels.retain(|(id, _, _)| id != host_id);
         }
+        let remaining = self.experts2channels.iter().map(|(_, v)| v.len()).sum::<usize>();
+        log::info!("🚀deregistered host_id {host_id}, remaining channels: {}", remaining);
     }
 }
 
-pub type GlobalWorkerRegistry =
-    Arc<Mutex<dyn ExpertRegistry<T = OTelGrpcClientMiddleware> + Send + Sync>>;
+pub type GlobalWorkerRegistry = Arc<Mutex<dyn ExpertRegistry + Send + Sync>>;
 
 pub fn get_registry() -> GlobalWorkerRegistry {
-    static INSTANCE: OnceLock<Arc<Mutex<ExpertRegistryImpl>>> = OnceLock::new();
-    let res = INSTANCE.get_or_init(|| {
-        let inner = ExpertRegistryImpl::new();
-        Arc::new(Mutex::new(inner))
-    });
-    (res.clone()) as _
+    let settings = get_ek_settings();
+    match settings.controller.registry_backend {
+        ExpertRegistryBackend::Grpc => {
+            static GRPC_INSTANCE: OnceLock<Arc<Mutex<ExpertRegistryImpl>>> = OnceLock::new();
+            let res = GRPC_INSTANCE.get_or_init(|| {
+                let inner = ExpertRegistryImpl::new();
+                Arc::new(Mutex::new(inner))
+            });
+            (res.clone()) as _
+        }
+        ExpertRegistryBackend::Shm => {
+            static SHM_INSTANCE: OnceLock<Arc<Mutex<LocalShmExpertRegistry>>> = OnceLock::new();
+            let res = SHM_INSTANCE.get_or_init(|| {
+                let inner = LocalShmExpertRegistry::new();
+                Arc::new(Mutex::new(inner))
+            });
+            (res.clone()) as _
+        }
+    }
 }

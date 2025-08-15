@@ -12,9 +12,15 @@ use tonic::async_trait;
 use crate::state::models::{Expert, NodeWithExperts};
 
 #[async_trait]
+/// Dispatcher trait for propagate the latest mapping between nodes and their experts
 pub trait Dispatcher {
+    /// Update the latest expert mapping for some nodes
     async fn update(&mut self, state: Vec<NodeWithExperts>);
+
+    /// Subscribe to updates for a specific node, returning a receiver for expert updates
     async fn subscribe(&mut self, hostname: &str) -> Receiver<Vec<Expert>>;
+
+    /// Unsubscribe from updates for a specific node
     async fn unsubscribe(&mut self, hostname: &str);
 }
 
@@ -41,6 +47,8 @@ impl Dispatcher for DispatcherImpl {
         for data in &state {
             let node = &data.node;
             let experts = &data.experts;
+            // Find the channel for the host
+            // If it exists, send the experts updates to the channel
             if let Some(ch) = self.ch_store.get(&node.hostname)
                 && let Err(e) = ch.send(experts.clone()).await
             {
