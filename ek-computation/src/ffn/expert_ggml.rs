@@ -1,11 +1,13 @@
-use std::{collections::HashMap, sync::Mutex};
+use std::sync::Mutex;
 
-use ek_ggml::{Context, Graph, Kind, Tensor};
+use ek_ggml::{Context, Graph, Kind, SharedTensor, Tensor};
 
 use crate::{
     backend::{DType, Device, EkTensor, ggml::GgmlTensor},
     ffn::meta::{Expert, ExpertShape, ExpertWeight},
 };
+
+const MAX_BATCH_SIZE_LOG2: usize = 9;
 
 pub struct GgmlFFN {
     dim: usize,
@@ -29,8 +31,8 @@ impl GgmlFFN {
             weight.gate_w.shape.iter().sum::<i64>() as usize * weight.gate_w.kind.size();
         context_size += 3 * Tensor::overhead();
 
-        for i in 0..=9 {
-            let batch_size = 2_usize.pow(i);
+        for i in 0..=MAX_BATCH_SIZE_LOG2 {
+            let batch_size = 2_usize.pow(i as _);
             context_size += batch_size * dim * Kind::BF16.size(); // input 
             context_size += batch_size * intermediate_dim * Kind::F32.size(); // up
             context_size += batch_size * intermediate_dim * Kind::F32.size(); // gate
@@ -39,19 +41,22 @@ impl GgmlFFN {
             context_size += batch_size * dim * Kind::F32.size(); // output
             context_size += batch_size * dim * Kind::BF16.size(); // output.cast
             context_size += 7 * Tensor::overhead(); // overhead for tensors
-            context_size += Graph::overhead(); // overhead for graph
+            context_size += Graph::<1>::overhead(); // overhead for graph
             context_size += 1024; // additional overhead
         }
 
-        let mut context = Context::new(context_size.next_multiple_of(4096));
-        let mut weights = [
-            context.create_tensor(&weight.up_w.shape, weight.up_w.kind),
-            context.create_tensor(&weight.down_w.shape, weight.down_w.kind),
-            context.create_tensor(&weight.gate_w.shape, weight.gate_w.kind),
+        let context = Context::new(context_size.next_multiple_of(4096));
+        let weights = [
+            context
+                .create_tensor(&weight.up_w.shape, weight.up_w.kind, weight.up_w.data)
+                .unwrap(),
+            context
+                .create_tensor(&weight.down_w.shape, weight.down_w.kind, weight.down_w.data)
+                .unwrap(),
+            context
+                .create_tensor(&weight.gate_w.shape, weight.gate_w.kind, weight.gate_w.data)
+                .unwrap(),
         ];
-        weights[0].set_data(&weight.up_w.data).unwrap();
-        weights[1].set_data(&weight.down_w.data).unwrap();
-        weights[2].set_data(&weight.gate_w.data).unwrap();
         Self {
             dim,
             intermediate_dim,
@@ -59,7 +64,7 @@ impl GgmlFFN {
                 dim,
                 context,
                 weights,
-                compute: HashMap::default(),
+                compute: Box::new([const { None }; MAX_BATCH_SIZE_LOG2 + 1]),
             }),
             n_threads,
         }
@@ -102,52 +107,46 @@ impl Expert<GgmlTensor> for GgmlFFN {
 struct GgmlForwardInner {
     dim: usize,
     context: Context,
-    weights: [Tensor; 3],
-    compute: HashMap<usize, (Tensor, Graph, Tensor)>,
+    weights: [SharedTensor; 3],
+    compute: Box<[Option<Graph<1>>; MAX_BATCH_SIZE_LOG2 + 1]>,
 }
 
 impl GgmlForwardInner {
     fn forward(&mut self, shape: &[usize], x: &[u8], n_threads: usize) -> Vec<u8> {
         let batch_size = shape[0];
         let padded_batch_size = batch_size.next_power_of_two();
-        let (input, graph, output) = self.compute.entry(padded_batch_size).or_insert_with(|| {
-            let [w1, w2, w3] = &self.weights;
-            let input = self
-                .context
-                .create_tensor(&[padded_batch_size as _, self.dim as _], Kind::BF16); // [B, N] x bf16
-            let up = input.matmul(w1); // [I, B] x f32
-            let gate = input.matmul(w3); // [I, B] x f32
-            let hidden = up.mul_inplace(&gate.silu_inplace()).cast(input.kind()); // [I, B] x bf16
-            let hidden = hidden.transpose(); // [B, I] x bf16
-            let output = w2.matmul(&hidden); // [B, N] x f32
-            let output = output.cast(input.kind()); // [B, N] x bf16
-            let mut graph = self.context.create_graph();
-            graph.build_forward(&output);
-            (input, graph, output)
+
+        let index = padded_batch_size.ilog2() as usize;
+
+        assert!(
+            index <= MAX_BATCH_SIZE_LOG2,
+            "Batch size too large: {}",
+            padded_batch_size
+        );
+
+        let graph = self.compute[index].get_or_insert_with(|| {
+            self.context.create_graph(|allocator| {
+                let [w1, w2, w3] = &self.weights;
+                let input = allocator.alloc(&[padded_batch_size as _, self.dim as _], Kind::BF16); // [B, N] x bf16
+                let up = input.matmul(allocator.borrow_shared(w1)); // [I, B] x f32
+                let gate = input.matmul(allocator.borrow_shared(w3)); // [I, B] x f32
+                let hidden = up.mul_inplace(&gate.silu_inplace()).cast(input.kind()); // [I, B] x bf16
+                let hidden = hidden.transpose(); // [B, I] x bf16
+                let output = allocator.borrow_shared(w2).matmul(&hidden); // [B, N] x f32
+                let output = output.cast(input.kind()); // [B, N] x bf16
+                ([input], output)
+            })
         });
         if padded_batch_size > batch_size {
-            input
-                .set_data(
-                    &x.iter()
-                        .cloned()
-                        .chain(std::iter::repeat(0u8))
-                        .take(padded_batch_size * self.dim * input.kind().size())
-                        .collect::<Vec<_>>(),
-                )
-                .unwrap();
-        } else {
-            input.set_data(x).unwrap();
-        }
-        graph.compute(n_threads);
-        if padded_batch_size > batch_size {
-            output
-                .get_data()
+            let input = x
                 .iter()
                 .cloned()
-                .take(batch_size * self.dim * output.kind().size())
-                .collect()
+                .chain(std::iter::repeat(0u8))
+                .take(padded_batch_size * self.dim * graph.inputs_kind()[0].size())
+                .collect::<Vec<_>>();
+            graph.compute([&input], n_threads).unwrap()
         } else {
-            output.get_data().to_vec()
+            graph.compute([x], n_threads).unwrap()
         }
     }
 }

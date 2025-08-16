@@ -1,6 +1,11 @@
+mod ggml_safetensors;
+
 use ek_ggml::Kind;
 
-use crate::backend::{EkTensor, FromSafeTensor};
+use crate::backend::{
+    EkTensor, FromSafeTensor,
+    ggml::ggml_safetensors::{dtype_to_ggml_kind, write_safetensors},
+};
 
 impl From<crate::backend::DType> for Kind {
     fn from(value: crate::backend::DType) -> Self {
@@ -17,6 +22,7 @@ impl From<ek_ggml::Kind> for crate::backend::DType {
         match value {
             Kind::F32 => crate::backend::DType::Float,
             Kind::BF16 => crate::backend::DType::BFloat16,
+            _ => unimplemented!(),
         }
     }
 }
@@ -79,7 +85,7 @@ impl EkTensor for GgmlTensor {
     }
 
     fn serialize(&self) -> Vec<u8> {
-        self.data.clone()
+        write_safetensors(&[("data", self)]).unwrap()
     }
 
     fn from_raw(data: &[u8], shape: &[usize], dtype: crate::backend::DType) -> Self {
@@ -92,11 +98,7 @@ impl EkTensor for GgmlTensor {
 
     fn from_tensor_view(tv: &safetensors::tensor::TensorView<'_>) -> Self {
         let shape = tv.shape().iter().map(|&s| s as i64).collect::<Vec<_>>();
-        let kind = match tv.dtype() {
-            safetensors::tensor::Dtype::F32 => Kind::F32,
-            safetensors::tensor::Dtype::BF16 => Kind::BF16,
-            _ => unimplemented!(),
-        };
+        let kind = dtype_to_ggml_kind(tv.dtype()).unwrap();
         GgmlTensor {
             data: tv.data().to_vec(),
             shape,

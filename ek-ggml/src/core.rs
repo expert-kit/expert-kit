@@ -27,16 +27,12 @@ impl Context {
         }
     }
 
-    pub fn create_graph(&mut self) -> Graph {
-        let graph = unsafe { bindings::ggml_new_graph(self.ptr.as_ptr()) };
-
-        Graph {
-            ctx: NonNull::new(self.ptr.as_ptr()).unwrap(),
-            ptr: NonNull::new(graph).unwrap(),
-        }
-    }
-
-    pub fn create_tensor(&mut self, shape: &[i64], kind: Kind) -> Tensor {
+    pub fn create_tensor(
+        &self,
+        shape: &[i64],
+        kind: Kind,
+        data: Vec<u8>,
+    ) -> Result<SharedTensor, Error> {
         let ne = shape.iter().rev().cloned().collect::<Vec<_>>();
         let tensor = unsafe {
             bindings::ggml_new_tensor(
@@ -46,9 +42,36 @@ impl Context {
                 ne.as_ptr() as _,
             )
         };
+
+        let tensor = unsafe { &mut *tensor };
         Tensor {
-            ctx: NonNull::new(self.ptr.as_ptr()).unwrap(),
+            ctx: self.ptr,
             ptr: tensor,
+        }
+        .set_data(&data)?;
+
+        Ok(SharedTensor(Tensor {
+            ctx: self.ptr,
+            ptr: tensor,
+        }))
+    }
+
+    pub fn create_graph<const N: usize>(
+        &self,
+        compute: impl FnOnce(&TensorAllocator) -> ([Tensor; N], Tensor),
+    ) -> Graph<N> {
+        let graph = unsafe { bindings::ggml_new_graph(self.ptr.as_ptr()) };
+
+        let allocator = TensorAllocator { ctx: self.ptr };
+        let (inputs, output) = compute(&allocator);
+
+        unsafe { bindings::ggml_build_forward_expand(graph, output.ptr) };
+
+        Graph {
+            ctx: NonNull::new(self.ptr.as_ptr()).unwrap(),
+            ptr: NonNull::new(graph).unwrap(),
+            inputs: inputs.map(|input| input.ptr),
+            output: output.ptr,
         }
     }
 }
@@ -61,21 +84,53 @@ impl Drop for Context {
     }
 }
 
-pub struct Graph {
+pub struct Graph<const N: usize> {
     ctx: NonNull<bindings::ggml_context>,
     ptr: NonNull<bindings::ggml_cgraph>,
+    inputs: [*mut bindings::ggml_tensor; N],
+    output: *mut bindings::ggml_tensor,
 }
 
-impl Graph {
+impl<const N: usize> Graph<N> {
     pub fn overhead() -> usize {
         unsafe { bindings::ggml_graph_overhead() }
     }
 
-    pub fn build_forward(&mut self, tensor: &Tensor) {
-        unsafe { bindings::ggml_build_forward_expand(self.ptr.as_mut(), tensor.ptr) };
+    pub fn inputs_kind(&self) -> [Kind; N] {
+        self.inputs.map(|tensor| {
+            let inner = unsafe { &*tensor };
+            inner.type_.into()
+        })
     }
 
-    pub fn compute(&mut self, n_threads: usize) {
+    pub fn output_kind(&self) -> Kind {
+        let inner = unsafe { &*self.output };
+        inner.type_.into()
+    }
+
+    pub fn inputs_shape(&self) -> [Vec<i64>; N] {
+        self.inputs.map(|tensor| {
+            let n_dim = unsafe { ggml_n_dims(tensor) };
+            let inner = unsafe { &*tensor };
+            inner.ne.iter().take(n_dim as _).rev().cloned().collect()
+        })
+    }
+
+    pub fn output_shape(&self) -> Vec<i64> {
+        let n_dim = unsafe { ggml_n_dims(self.output) };
+        let inner = unsafe { &*self.output };
+        inner.ne.iter().take(n_dim as _).rev().cloned().collect()
+    }
+
+    pub fn compute(&mut self, inputs: [&[u8]; N], n_threads: usize) -> Result<Vec<u8>, Error> {
+        for (&tensor, &data) in self.inputs.iter().zip(inputs.iter()) {
+            let tensor = Tensor {
+                ctx: self.ctx,
+                ptr: tensor,
+            };
+            tensor.set_data(data)?;
+        }
+
         unsafe {
             bindings::ggml_graph_compute_with_ctx(
                 self.ctx.as_ptr(),
@@ -83,13 +138,22 @@ impl Graph {
                 n_threads as _,
             )
         };
+
+        let output = unsafe { &mut *self.output };
+        let output = Tensor {
+            ctx: self.ctx,
+            ptr: output,
+        };
+
+        Ok(output.get_data().to_vec())
     }
 }
 
-unsafe impl Send for Graph {}
+unsafe impl<const N: usize> Send for Graph<N> {}
 
 #[repr(u32)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum Kind {
     F32 = bindings::ggml_type_GGML_TYPE_F32,
     BF16 = bindings::ggml_type_GGML_TYPE_BF16,
@@ -114,6 +178,35 @@ impl From<bindings::ggml_type> for Kind {
     }
 }
 
+pub struct TensorAllocator {
+    ctx: NonNull<bindings::ggml_context>,
+}
+
+impl TensorAllocator {
+    pub fn borrow_shared<'a>(&self, tensor: &'a SharedTensor) -> &'a Tensor {
+        &tensor.0
+    }
+
+    pub fn alloc(&self, shape: &[i64], kind: Kind) -> Tensor {
+        let ne = shape.iter().rev().cloned().collect::<Vec<_>>();
+        let tensor = unsafe {
+            bindings::ggml_new_tensor(
+                self.ctx.as_ptr(),
+                kind as _,
+                ne.len() as _,
+                ne.as_ptr() as _,
+            )
+        };
+
+        Tensor {
+            ctx: self.ctx,
+            ptr: tensor,
+        }
+    }
+}
+
+pub struct SharedTensor(Tensor);
+
 #[derive(Debug)]
 pub struct Tensor {
     ctx: NonNull<bindings::ggml_context>,
@@ -124,35 +217,6 @@ impl Tensor {
     #[inline]
     pub fn overhead() -> usize {
         unsafe { ggml_tensor_overhead() }
-    }
-
-    pub fn set_data(&mut self, data: &[u8]) -> Result<(), (usize, usize)> {
-        let inner = unsafe { &mut *self.ptr };
-        let inner_size =
-            unsafe { ggml_type_size(inner.type_) * inner.ne.iter().product::<i64>() as usize };
-        if data.len() != inner_size {
-            return Err((data.len(), inner_size));
-        }
-        unsafe {
-            inner
-                .data
-                .copy_from_nonoverlapping(data.as_ptr() as _, data.len())
-        };
-        Ok(())
-    }
-
-    pub fn get_data(&self) -> &[u8] {
-        let inner = unsafe { &*self.ptr };
-        let numel = inner.ne.iter().product::<i64>() as usize;
-        unsafe {
-            std::slice::from_raw_parts(inner.data as *const u8, ggml_type_size(inner.type_) * numel)
-        }
-    }
-
-    pub fn shape(&self) -> Vec<i64> {
-        let n_dim = unsafe { ggml_n_dims(self.ptr) };
-        let inner = unsafe { &*self.ptr };
-        inner.ne.iter().take(n_dim as _).rev().cloned().collect()
     }
 
     pub fn matmul(&self, other: &Self) -> Self {
@@ -249,6 +313,30 @@ impl Tensor {
     }
 }
 
+impl Tensor {
+    fn set_data(&self, data: &[u8]) -> Result<(), Error> {
+        let inner = unsafe { &mut *self.ptr };
+        let numel = inner.ne.iter().product::<i64>() as usize;
+        let inner_size = unsafe { ggml_type_size(inner.type_) * numel };
+        if data.len() != inner_size {
+            return Err(Error::DimensionMismatch(data.len(), inner_size));
+        }
+        unsafe {
+            inner
+                .data
+                .copy_from_nonoverlapping(data.as_ptr() as _, data.len())
+        };
+        Ok(())
+    }
+
+    fn get_data(&self) -> &[u8] {
+        let inner = unsafe { &*self.ptr };
+        let numel = inner.ne.iter().product::<i64>() as usize;
+        let inner_size = unsafe { ggml_type_size(inner.type_) * numel };
+        unsafe { std::slice::from_raw_parts(inner.data as *const u8, inner_size) }
+    }
+}
+
 impl Clone for Tensor {
     fn clone(&self) -> Self {
         let ptr = unsafe { ggml_dup_tensor(self.ctx.as_ptr(), self.ptr) };
@@ -257,6 +345,24 @@ impl Clone for Tensor {
 }
 
 unsafe impl Send for Tensor {}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum Error {
+    DimensionMismatch(usize, usize),
+}
+
+impl std::error::Error for Error {}
+
+impl std::fmt::Display for Error {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Error::DimensionMismatch(got, expected) => {
+                write!(f, "Dimension mismatch: got {}, expected {}", got, expected)
+            }
+        }
+    }
+}
 
 #[cfg(test)]
 mod test {
@@ -272,51 +378,37 @@ mod test {
         c
     }
 
-    fn set_tensor(tensor: &mut Tensor, data: &[f32]) {
-        let tensor_data = unsafe {
-            std::slice::from_raw_parts_mut(data.as_ptr() as *mut _, std::mem::size_of_val(data))
-        };
-        tensor.set_data(tensor_data).unwrap();
-    }
-
-    fn chk_tensor(tensor: &Tensor, data: &[f32]) {
-        let tensor_data = tensor.get_data();
-        let result = unsafe {
-            std::slice::from_raw_parts_mut(
-                tensor_data.as_ptr() as *mut f32,
-                tensor_data.len() / std::mem::size_of::<f32>(),
-            )
-        };
-        assert_eq!(result, data);
+    fn slice_to_u8<T>(s: &[T]) -> &[u8] {
+        let len = std::mem::size_of_val(s);
+        let ptr = s.as_ptr() as *const u8;
+        unsafe { std::slice::from_raw_parts(ptr, len) }
     }
 
     #[test]
     fn test_tensor_mul() -> Result<(), Box<dyn std::error::Error>> {
-        let mut ctx = Context::new(1024 * 1024);
+        let ctx = Context::new(1024 * 1024);
 
         let a: [f32; 3] = [1.0, 2.0, 3.0];
         let b: [f32; 3] = [4.0, 5.0, 6.0];
 
         let expected_c = matmul(&a, &b);
 
-        let mut tensor_a = ctx.create_tensor(&[3, 1], Kind::F32);
-        let mut tensor_b = ctx.create_tensor(&[3, 1], Kind::F32);
+        let mut graph = ctx.create_graph(|allocator| {
+            let tensor_a = allocator.alloc(&[3, 1], Kind::F32);
+            let tensor_b = allocator.alloc(&[3, 1], Kind::F32);
+            let tensor_c = tensor_a.matmul(&tensor_b);
+            ([tensor_a, tensor_b], tensor_c)
+        });
 
-        assert_eq!(tensor_a.shape(), &[3, 1]);
-        assert_eq!(tensor_b.shape(), &[3, 1]);
+        let inputs_shape = graph.inputs_shape();
+        let output_shape = graph.output_shape();
 
-        let tensor_c = tensor_a.matmul(&tensor_b);
+        assert_eq!(inputs_shape, [&[3, 1], &[3, 1]]);
+        assert_eq!(output_shape, &[3, 3]);
 
-        let mut graph = ctx.create_graph();
+        let output = graph.compute([slice_to_u8(&a), slice_to_u8(&b)], 1)?;
 
-        graph.build_forward(&tensor_c);
-
-        set_tensor(&mut tensor_a, &a);
-        set_tensor(&mut tensor_b, &b);
-
-        graph.compute(1);
-
-        chk_tensor(&tensor_c, &expected_c);
+        assert_eq!(output, slice_to_u8(&expected_c));
 
         for _ in 0..32 {
             let mut a: [f32; 3] = [0.0; 3];
@@ -328,12 +420,9 @@ mod test {
 
             let expected_c = matmul(&a, &b);
 
-            set_tensor(&mut tensor_a, &a);
-            set_tensor(&mut tensor_b, &b);
+            let output = graph.compute([slice_to_u8(&a), slice_to_u8(&b)], 1)?;
 
-            graph.compute(1);
-
-            chk_tensor(&tensor_c, &expected_c);
+            assert_eq!(output, slice_to_u8(&expected_c));
         }
 
         Ok(())
