@@ -34,7 +34,8 @@ impl ExpertBackend {
                 ExpertBackend::Torch(TorchFFN::construct(instance, weight)?)
             }
             x::ExpertBackendType::Ggml => {
-                let weight = ExpertWeight::<GgmlTensor>::from_safetensor(tensor, instance.device)?;
+                let weight: ExpertWeight<GgmlTensor> =
+                    ExpertWeight::<GgmlTensor>::from_safetensor(tensor, instance.device)?;
                 ExpertBackend::Ggml(expert_ggml::GgmlFFN::construct(instance, weight)?)
             }
             x::ExpertBackendType::Onnx => todo!(),

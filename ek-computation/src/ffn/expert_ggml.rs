@@ -7,7 +7,7 @@ use crate::{
     ffn::meta::{Expert, ExpertShape, ExpertWeight},
 };
 
-const MAX_BATCH_SIZE_LOG2: usize = 9;
+const MAX_BATCH_SIZE_LOG2: usize = 6;
 
 pub struct GgmlFFN {
     dim: usize,
@@ -24,11 +24,12 @@ impl GgmlFFN {
         n_threads: usize,
     ) -> Self {
         let mut context_size = 0;
-        context_size += weight.up_w.shape.iter().sum::<i64>() as usize * weight.up_w.kind.size();
         context_size +=
-            weight.down_w.shape.iter().sum::<i64>() as usize * weight.down_w.kind.size();
+            weight.up_w.shape.iter().product::<i64>() as usize * weight.up_w.kind.size();
         context_size +=
-            weight.gate_w.shape.iter().sum::<i64>() as usize * weight.gate_w.kind.size();
+            weight.down_w.shape.iter().product::<i64>() as usize * weight.down_w.kind.size();
+        context_size +=
+            weight.gate_w.shape.iter().product::<i64>() as usize * weight.gate_w.kind.size();
         context_size += 3 * Tensor::overhead();
 
         for i in 0..=MAX_BATCH_SIZE_LOG2 {
@@ -44,8 +45,10 @@ impl GgmlFFN {
             context_size += Graph::<1>::overhead(); // overhead for graph
             context_size += 1024; // additional overhead
         }
+        let context_size = context_size.next_multiple_of(4096);
+        let context = Context::new(context_size);
 
-        let context = Context::new(context_size.next_multiple_of(4096));
+        log::debug!("Created context with size {}", context_size);
         let weights = [
             context
                 .create_tensor(&weight.up_w.shape, weight.up_w.kind, weight.up_w.data)
@@ -127,24 +130,40 @@ impl GgmlForwardInner {
         let graph = self.compute[index].get_or_insert_with(|| {
             self.context.create_graph(|allocator| {
                 let [w1, w2, w3] = &self.weights;
+
+                let [w1, w2, w3] = [
+                    allocator.borrow(w1),
+                    allocator.borrow(w2),
+                    allocator.borrow(w3),
+                ];
+
                 let input = allocator.alloc(&[padded_batch_size as _, self.dim as _], Kind::BF16); // [B, N] x bf16
-                let up = input.matmul(allocator.borrow_shared(w1)); // [I, B] x f32
-                let gate = input.matmul(allocator.borrow_shared(w3)); // [I, B] x f32
+                let up = input.matmul(w1); // [I, B] x f32
+                let gate = input.matmul(w3); // [I, B] x f32
                 let hidden = up.mul_inplace(&gate.silu_inplace()).cast(input.kind()); // [I, B] x bf16
                 let hidden = hidden.transpose(); // [B, I] x bf16
-                let output = allocator.borrow_shared(w2).matmul(&hidden); // [B, N] x f32
+                let output = w2.matmul(&hidden); // [B, N] x f32
                 let output = output.cast(input.kind()); // [B, N] x bf16
+
                 ([input], output)
             })
         });
+
         if padded_batch_size > batch_size {
+            let [input_kind] = graph.inputs_kind();
+            let output_kind = graph.output_kind();
             let input = x
                 .iter()
                 .cloned()
                 .chain(std::iter::repeat(0u8))
-                .take(padded_batch_size * self.dim * graph.inputs_kind()[0].size())
+                .take(padded_batch_size * self.dim * input_kind.size())
                 .collect::<Vec<_>>();
-            graph.compute([&input], n_threads).unwrap()
+            graph
+                .compute([&input], n_threads)
+                .unwrap()
+                .into_iter()
+                .take(batch_size * self.dim * output_kind.size())
+                .collect::<Vec<_>>()
         } else {
             graph.compute([x], n_threads).unwrap()
         }
@@ -155,6 +174,7 @@ impl GgmlForwardInner {
 mod test {
     use std::fs;
 
+    use ek_ggml::Kind;
     use safetensors::SafeTensors;
 
     use crate::{
@@ -191,6 +211,7 @@ mod test {
         let tv = gt_st.tensor("1-input").unwrap();
 
         let inp = GgmlTensor::from_tensor_view(&tv);
+        assert_eq!(inp.kind, Kind::BF16);
 
         let inp_tch = TchTensor::from_tensor_view(&tv);
 
@@ -202,9 +223,12 @@ mod test {
             )
         };
         assert_eq!(inp_data.len(), inp_tch_data.len());
-        assert_eq!(inp_data[..20], inp_tch_data[..20]);
+        assert_eq!(inp_data, inp_tch_data);
 
         let res = ffn.forward(&inp);
+
+        assert_eq!(inp.data.len(), res.data.len());
+        assert_eq!(inp.shape, res.shape);
 
         let truth = TchTensor::from_tensor_view(&gt_st.tensor("1-output").unwrap()).inner();
 

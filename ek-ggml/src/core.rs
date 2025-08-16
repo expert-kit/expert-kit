@@ -183,7 +183,7 @@ pub struct TensorAllocator {
 }
 
 impl TensorAllocator {
-    pub fn borrow_shared<'a>(&self, tensor: &'a SharedTensor) -> &'a Tensor {
+    pub fn borrow<'a>(&self, tensor: &'a SharedTensor) -> &'a Tensor {
         &tensor.0
     }
 
@@ -310,6 +310,12 @@ impl Tensor {
     pub fn kind(&self) -> Kind {
         let inner = unsafe { &*self.ptr };
         Kind::from(inner.type_)
+    }
+
+    pub fn shape(&self) -> Vec<i64> {
+        let n_dim = unsafe { ggml_n_dims(self.ptr) };
+        let inner = unsafe { &*self.ptr };
+        inner.ne.iter().take(n_dim as _).rev().cloned().collect()
     }
 }
 
