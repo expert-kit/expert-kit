@@ -7,11 +7,6 @@ license = { workspace = true }
 readme = { workspace = true }
 repository = { workspace = true }
 
-[features]
-cublas = []
-clblast = []
-metal = []
-
 [dependencies]
 
 [build-dependencies]
