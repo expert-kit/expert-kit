@@ -1,7 +1,5 @@
 use std::{pin::Pin, ptr::NonNull, rc::Rc};
 
-use crate::bindings::{ggml_graph_print, ggml_n_dims, ggml_tensor_overhead};
-
 #[allow(warnings)]
 pub(crate) mod bindings {
     include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
@@ -136,9 +134,7 @@ impl<const N: usize> Graph<N> {
     }
 
     pub fn print(&self) {
-        unsafe {
-            ggml_graph_print(self.ptr.as_ptr());
-        }
+        unsafe { bindings::ggml_graph_print(self.ptr.as_ptr()) };
     }
 }
 
@@ -212,7 +208,7 @@ pub struct Tensor {
 impl Tensor {
     #[inline]
     pub fn overhead() -> usize {
-        unsafe { ggml_tensor_overhead() }
+        unsafe { bindings::ggml_tensor_overhead() }
     }
 
     pub fn kind(&self) -> Kind {
@@ -221,7 +217,7 @@ impl Tensor {
     }
 
     pub fn shape(&self) -> Vec<i64> {
-        let n_dim = unsafe { ggml_n_dims(self.ptr) };
+        let n_dim = unsafe { bindings::ggml_n_dims(self.ptr) };
         let inner = unsafe { &*self.ptr };
         inner.ne.iter().take(n_dim as _).rev().cloned().collect()
     }
