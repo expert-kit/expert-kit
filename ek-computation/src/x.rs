@@ -1,4 +1,5 @@
 use std::{
+    fmt::Display,
     path::PathBuf,
     sync::{
         Arc, OnceLock,
@@ -23,13 +24,25 @@ pub enum ExpertBackendType {
     Ggml,
 }
 
-impl From<&str> for ExpertBackendType {
-    fn from(value: &str) -> Self {
+impl TryFrom<&str> for ExpertBackendType {
+    type Error = &'static str;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
         match value {
-            "torch" => ExpertBackendType::Torch,
-            "ort" => ExpertBackendType::Onnx,
-            "ggml" => ExpertBackendType::Ggml,
-            _ => unimplemented!(),
+            "torch" => Ok(ExpertBackendType::Torch),
+            "ort" => Ok(ExpertBackendType::Onnx),
+            "ggml" => Ok(ExpertBackendType::Ggml),
+            _ => Err("Unknown backend type"),
+        }
+    }
+}
+
+impl Display for ExpertBackendType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ExpertBackendType::Torch => write!(f, "torch"),
+            ExpertBackendType::Onnx => write!(f, "onnx"),
+            ExpertBackendType::Ggml => write!(f, "ggml"),
         }
     }
 }
@@ -52,7 +65,7 @@ impl Default for EKInstance {
         Self {
             hidden: settings.inference.hidden_dim,
             intermediate: settings.inference.intermediate_dim,
-            backend: ExpertBackendType::Torch,
+            backend: ExpertBackendType::try_from(settings.worker.backend.as_str()).unwrap(),
             device,
         }
     }
