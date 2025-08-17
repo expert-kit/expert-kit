@@ -32,6 +32,11 @@ pub async fn load_expert_task(
         let st = rg.load(expert_key).await?;
         let backend = ExpertBackend::build(instance, &st).await?;
 
+        if get_ek_settings().worker.drop_cache {
+            // If drop_cache is enabled, remove the tensor after building the backend
+            rg.remove(expert_key).await?;
+        }
+
         // Insert loaded expert into shared database (accessible by both async and sync gates)
         let mut edb_wg = expert_db.write().await;
         edb_wg.insert(&expert_str_key, backend).await?;

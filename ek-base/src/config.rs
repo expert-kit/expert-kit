@@ -86,6 +86,8 @@ pub struct WorkerSettings {
     pub broadcast: String,
     pub ports: WorkerPorts,
     pub device: String,
+    #[serde(default)]
+    pub drop_cache: bool,
     #[serde(default = "default_worker_metrics")]
     pub metrics: String,
     pub advanced: Option<WorkerAdvancedSettings>,

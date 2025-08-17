@@ -44,6 +44,12 @@ impl MemCache {
         let m = unsafe { &mut (*self.map.get()) };
         m.insert(key.to_owned(), value);
     }
+
+    pub fn remove(&self, key: &str) {
+        let _wg = self.mu.write().unwrap();
+        let m = unsafe { &mut (*self.map.get()) };
+        m.remove(key);
+    }
 }
 
 unsafe impl Send for MemCache {}
