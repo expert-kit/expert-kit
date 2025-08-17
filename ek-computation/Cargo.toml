@@ -17,8 +17,10 @@ diesel = { workspace = true }
 diesel-async = { workspace = true }
 env_logger = { workspace = true }
 half = { workspace = true }
+ibverbs = { workspace = true }
 lazy_static = { workspace = true }
 log = { workspace = true }
+memoffset = { workspace = true }
 mime = { workspace = true }
 ndarray = { workspace = true }
 ndarray-rand = { workspace = true }
