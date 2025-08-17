@@ -5,16 +5,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("cargo:rerun-if-changed=ggml");
 
     let dst = cmake::Config::new("ggml")
-        .profile("Release")
+        .define("BUILD_SHARED_LIBS", "OFF")
+        .define("GGML_STATIC", "ON")
         .define("GGML_LLAMAFILE", "ON")
         .define("GGML_CUDA", "ON")
         .build();
 
     println!("cargo:rustc-link-search=native={}/lib", dst.display());
-    println!("cargo:rustc-link-lib=dylib=ggml");
-    println!("cargo:rustc-link-lib=dylib=ggml-base");
-    println!("cargo:rustc-link-lib=dylib=ggml-cpu");
-    println!("cargo:rustc-link-lib=dylib=ggml-cuda");
+    println!("cargo:rustc-link-lib=static=ggml");
+    println!("cargo:rustc-link-lib=static=ggml-base");
+    println!("cargo:rustc-link-lib=static=ggml-cpu");
+    println!("cargo:rustc-link-lib=static=ggml-cuda");
+    println!("cargo:rustc-link-lib=dylib=gomp");
+    println!("cargo:rustc-link-lib=dylib=stdc++");
 
     let mut bindings = bindgen::Builder::default();
 
