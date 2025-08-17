@@ -265,7 +265,7 @@ impl TensorNode {
             Ok(Self::new_with_data_set(
                 inner.ctx,
                 tensor,
-                &[other.clone()],
+                std::slice::from_ref(&other.clone()),
                 inner.data,
             ))
         } else {
