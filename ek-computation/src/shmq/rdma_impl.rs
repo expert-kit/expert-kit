@@ -163,7 +163,7 @@ impl<T: RdmaBytes> RdmaQueue<T> {
         let mut qp_builder = pd.create_qp(&send_cq, &recv_cq, ibv_qp_type::IBV_QPT_RC)?;
 
         qp_builder
-            .set_gid_index(rand::random_range(0..5))
+            .set_gid_index(0)
             .set_max_send_wr(64)
             .set_max_recv_wr(64)
             .set_max_send_sge(1)
@@ -209,10 +209,12 @@ impl<T: RdmaBytes> RdmaQueue<T> {
     ) -> io::Result<()> {
         // Store remote memory region
         self.remote_region = Some(remote_region);
+        log::info!("🚀endpoints: {:?}", remote_endpoint);
 
         // Complete the QP handshake
         if let Some(prepared_qp) = self.prepared_qp.take() {
             let qp = prepared_qp.handshake(remote_endpoint).unwrap();
+            log::info!("🚀Connected to remote peer: {:?}", remote_endpoint);
             self.qp = Some(qp);
             Ok(())
         } else {
@@ -328,7 +330,7 @@ impl<T: RdmaBytes> RdmaQueue<T> {
         offset: usize,
         size: usize,
     ) -> Result<Vec<u8>, RdmaQueueError> {
-        // Use a temporary buffer in our memory region for reading
+        // Use a temporary buffer in memory region for reading
         let read_offset = std::mem::size_of::<RdmaQueueMeta>().next_multiple_of(128);
         let local_slice = self.memory_region.slice(read_offset..read_offset + size);
         let remote_slice = remote_region.slice(offset..offset + size);
@@ -430,19 +432,6 @@ impl<T> Drop for RdmaQueue<T> {
         if let Some(qp) = self.qp.take() {
             drop(qp);
         }
-    }
-}
-
-// Implement RdmaBytes for common types
-impl RdmaBytes for i32 {
-    const SIZE: usize = std::mem::size_of::<i32>();
-
-    fn as_bytes(&self) -> impl Iterator<Item = u8> + '_ {
-        self.to_le_bytes().into_iter()
-    }
-
-    fn from_bytes(bytes: &[u8]) -> Self {
-        i32::from_le_bytes(bytes[..Self::SIZE].try_into().unwrap())
     }
 }
 

@@ -31,17 +31,24 @@ message ExpertState {
   Stage stage = 1;
 }
 
+message RdmaEndpoint {
+  bytes qp_endpoint = 1;  // Serialized QueuePairEndpoint
+  bytes memory_region = 2;  // Serialized RemoteMemoryRegion
+}
+
 message ExchangeReq {
   string id = 1;
   string addr = 2;
   string channel = 3;
   string device = 4;
   bool last_will = 5;
+  RdmaEndpoint rdma_endpoint = 6;
 }
 
 message ExchangeResp {
   message ExpertWithState { ek.object.v1.ExpertSlice target = 1; }
   ExpertWithState state = 1;
+  RdmaEndpoint rdma_endpoint = 2;
 }
 
 service StateService {

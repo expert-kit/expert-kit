@@ -40,6 +40,7 @@ pub struct DBSettings {
 pub enum ExpertRegistryBackend {
     Grpc,
     Shm,
+    Rdma,
 }
 
 impl Default for ExpertRegistryBackend {

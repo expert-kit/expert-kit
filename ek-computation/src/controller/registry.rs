@@ -17,9 +17,17 @@ use tonic::transport::Channel;
 use tower::ServiceBuilder;
 
 use crate::{
-    shmq::{ShmBytes, ShmQueue},
-    state::io::{StateReader, StateReaderImpl},
+    shmq::{
+        ShmBytes, ShmQueue,
+        rdma_impl::{RdmaBytes, RdmaQueue},
+    },
+    state::{
+        io::{StateReader, StateReaderImpl},
+        models::NewNode,
+        writer::StateWriterImpl,
+    },
 };
+use serde_json;
 
 pub type ExpertId = String;
 pub type ExpertIdRef<'a> = &'a str;
@@ -29,10 +37,13 @@ pub type LocalShmChannel = (
     Arc<Mutex<ShmQueue<'static, LocalShmWorkerResp>>>,
 );
 
+pub type RdmaChannel<T, U> = (Arc<Mutex<RdmaQueue<T>>>, Arc<Mutex<RdmaQueue<U>>>);
+
 #[derive(Clone)]
 pub enum ExpertClient {
     Grpc(OTelGrpcClientMiddleware),
     Shm(LocalShmChannel),
+    Rdma(RdmaChannel<RdmaWorkerReq, RdmaWorkerResp>),
 }
 
 impl std::fmt::Debug for ExpertClient {
@@ -40,6 +51,7 @@ impl std::fmt::Debug for ExpertClient {
         match self {
             ExpertClient::Grpc(_) => write!(f, "ExpertClient::Grpc(..)"),
             ExpertClient::Shm(_) => write!(f, "ExpertClient::Shm(..)"),
+            ExpertClient::Rdma(_) => write!(f, "ExpertClient::Rdma(..)"),
         }
     }
 }
@@ -49,6 +61,7 @@ impl ExpertClient {
         match self {
             ExpertClient::Grpc(client) => Some(client),
             ExpertClient::Shm(_) => None,
+            ExpertClient::Rdma(_) => None,
         }
     }
 
@@ -56,6 +69,15 @@ impl ExpertClient {
         match self {
             ExpertClient::Grpc(_) => None,
             ExpertClient::Shm(channels) => Some(channels),
+            ExpertClient::Rdma(_) => None,
+        }
+    }
+
+    pub fn into_rdma_channels(self) -> Option<RdmaChannel<RdmaWorkerReq, RdmaWorkerResp>> {
+        match self {
+            ExpertClient::Grpc(_) => None,
+            ExpertClient::Shm(_) => None,
+            ExpertClient::Rdma(channels) => Some(channels),
         }
     }
 
@@ -65,6 +87,10 @@ impl ExpertClient {
 
     pub fn is_shm(&self) -> bool {
         matches!(self, ExpertClient::Shm(_))
+    }
+
+    pub fn is_rdma(&self) -> bool {
+        matches!(self, ExpertClient::Rdma(_))
     }
 }
 
@@ -312,6 +338,132 @@ impl ShmBytes for LocalShmWorkerResp {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RdmaWorkerReq {
+    id: usize,
+    expert_id: [u8; 64],
+    input_tensor: Vec<u8>,
+}
+
+impl RdmaWorkerReq {
+    pub fn new(expert_id: ExpertIdRef<'_>, input_tensor: &[u8]) -> Self {
+        static ID: AtomicUsize = AtomicUsize::new(1);
+
+        assert!(expert_id.len() < 64);
+        assert!(input_tensor.len() <= MAX_TENSOR_SIZE);
+
+        let mut expert_id_array = [0u8; 64];
+        let expert_id_bytes = expert_id.as_bytes();
+        let copy_len = std::cmp::min(expert_id_bytes.len(), 63);
+        expert_id_array[..copy_len].copy_from_slice(&expert_id_bytes[..copy_len]);
+
+        Self {
+            id: ID.fetch_add(1, Ordering::SeqCst),
+            expert_id: expert_id_array,
+            input_tensor: input_tensor.to_vec(),
+        }
+    }
+
+    pub fn id(&self) -> usize {
+        self.id
+    }
+
+    pub fn expert_id(&self) -> ExpertId {
+        let end = self.expert_id.iter().position(|&b| b == 0).unwrap_or(64);
+        String::from_utf8(self.expert_id[..end].to_vec()).unwrap()
+    }
+
+    pub fn input_tensor(&self) -> &[u8] {
+        &self.input_tensor
+    }
+}
+
+impl RdmaBytes for RdmaWorkerReq {
+    const SIZE: usize =
+        std::mem::size_of::<usize>() + 64 + std::mem::size_of::<usize>() + MAX_TENSOR_SIZE;
+
+    fn as_bytes(&self) -> impl Iterator<Item = u8> + '_ {
+        self.id
+            .to_le_bytes()
+            .into_iter()
+            .chain(self.expert_id)
+            .chain(self.input_tensor.len().to_le_bytes())
+            .chain(self.input_tensor.clone())
+    }
+
+    fn from_bytes(bytes: &[u8]) -> Self {
+        let id = usize::from_le_bytes(bytes[..std::mem::size_of::<usize>()].try_into().unwrap());
+        let expert_id = bytes[std::mem::size_of::<usize>()..std::mem::size_of::<usize>() + 64]
+            .try_into()
+            .unwrap();
+        let input_tensor_len = usize::from_le_bytes(
+            bytes[std::mem::size_of::<usize>() + 64
+                ..std::mem::size_of::<usize>() + 64 + std::mem::size_of::<usize>()]
+                .try_into()
+                .unwrap(),
+        );
+        let input_tensor = bytes
+            [std::mem::size_of::<usize>() + 64 + std::mem::size_of::<usize>()..]
+            [..input_tensor_len]
+            .to_vec();
+
+        Self {
+            id,
+            expert_id,
+            input_tensor,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RdmaWorkerResp {
+    id: usize,
+    output_tensor: Vec<u8>,
+}
+
+impl RdmaWorkerResp {
+    pub fn new(id: usize, output_tensor: Vec<u8>) -> Self {
+        assert!(output_tensor.len() <= MAX_TENSOR_SIZE);
+        Self { id, output_tensor }
+    }
+
+    pub fn id(&self) -> usize {
+        self.id
+    }
+
+    pub fn output_tensor(&self) -> &[u8] {
+        &self.output_tensor
+    }
+}
+
+impl RdmaBytes for RdmaWorkerResp {
+    const SIZE: usize =
+        std::mem::size_of::<usize>() + std::mem::size_of::<usize>() + MAX_TENSOR_SIZE;
+
+    fn as_bytes(&self) -> impl Iterator<Item = u8> + '_ {
+        self.id
+            .to_le_bytes()
+            .into_iter()
+            .chain(self.output_tensor.len().to_le_bytes())
+            .chain(self.output_tensor.clone())
+    }
+
+    fn from_bytes(bytes: &[u8]) -> Self {
+        let id = usize::from_le_bytes(bytes[..std::mem::size_of::<usize>()].try_into().unwrap());
+        let output_tensor_len = usize::from_le_bytes(
+            bytes[std::mem::size_of::<usize>()
+                ..std::mem::size_of::<usize>() + std::mem::size_of::<usize>()]
+                .try_into()
+                .unwrap(),
+        );
+        let output_tensor = bytes[std::mem::size_of::<usize>() + std::mem::size_of::<usize>()..]
+            [..output_tensor_len]
+            .to_vec();
+
+        Self { id, output_tensor }
+    }
+}
+
 #[expect(clippy::type_complexity)]
 pub struct LocalShmExpertRegistry {
     all_channels: HashMap<
@@ -409,6 +561,295 @@ impl ExpertRegistry for LocalShmExpertRegistry {
     }
 }
 
+/// RDMA connection state for a worker node
+struct RdmaNodeConnection {
+    req_queue: Arc<Mutex<RdmaQueue<RdmaWorkerReq>>>,
+    resp_queue: Arc<Mutex<RdmaQueue<RdmaWorkerResp>>>,
+    controller_endpoint_data: Vec<u8>, // Serialized controller endpoint info
+    connected: bool,
+}
+
+#[expect(clippy::type_complexity)]
+pub struct RdmaExpertRegistry {
+    all_connections: HashMap<String, RdmaNodeConnection>,
+    experts2channels: HashMap<
+        ExpertId,
+        Vec<(
+            String,
+            Arc<Mutex<RdmaQueue<RdmaWorkerReq>>>,
+            Arc<Mutex<RdmaQueue<RdmaWorkerResp>>>,
+        )>,
+    >,
+    reader: Box<dyn StateReader + Send + Sync>,
+    writer: StateWriterImpl,
+}
+
+impl Default for RdmaExpertRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl RdmaExpertRegistry {
+    pub fn new() -> Self {
+        Self {
+            all_connections: HashMap::default(),
+            experts2channels: HashMap::default(),
+            reader: Box::new(StateReaderImpl::new()),
+            writer: StateWriterImpl::new(),
+        }
+    }
+
+    /// Get controller RDMA endpoint data for a worker node
+    pub fn get_controller_endpoint(&self, hostname: &str) -> Option<Vec<u8>> {
+        self.all_connections
+            .get(hostname)
+            .map(|conn| conn.controller_endpoint_data.clone())
+    }
+
+    /// Establish RDMA connection to a worker node
+    async fn connect_to_worker(
+        &mut self,
+        hostname: &str,
+        worker_endpoint_info: &serde_json::Value,
+    ) -> EKResult<()> {
+        if let Some(connection) = self.all_connections.get_mut(hostname) {
+            if connection.connected {
+                return Ok(()); // Already connected
+            }
+
+            // Extract worker endpoint JSON strings from database
+            let worker_qp_json = worker_endpoint_info
+                .get("qp_endpoint")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| EKError::InvalidInput("Missing worker qp_endpoint".into()))?;
+            let worker_memory_json = worker_endpoint_info
+                .get("memory_region")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| EKError::InvalidInput("Missing worker memory_region".into()))?;
+
+            // Deserialize worker endpoint information
+            let worker_qp_endpoint: ibverbs::QueuePairEndpoint =
+                serde_json::from_str(worker_qp_json).map_err(|e| {
+                    EKError::InvalidInput(format!("Failed to deserialize worker QP endpoint: {e}"))
+                })?;
+            let worker_memory_region: ibverbs::RemoteMemoryRegion =
+                serde_json::from_str(worker_memory_json).map_err(|e| {
+                    EKError::InvalidInput(format!(
+                        "Failed to deserialize worker memory region: {e}"
+                    ))
+                })?;
+
+            log::info!(
+                "Establishing RDMA connection to worker {} using endpoint data",
+                hostname
+            );
+            log::debug!("Worker QP endpoint: {:?}", worker_qp_endpoint);
+            log::debug!("Worker memory region: {:?}", worker_memory_region);
+
+            // Establish connections from controller to worker
+            {
+                let mut req_queue = connection.req_queue.lock().await;
+                if let Err(e) =
+                    req_queue.connect(worker_qp_endpoint.clone(), worker_memory_region.clone())
+                {
+                    log::error!(
+                        "Failed to connect controller request queue to worker {}: {e}",
+                        hostname
+                    );
+                    return Err(EKError::IoError(std::io::Error::new(
+                        std::io::ErrorKind::Other,
+                        format!("Controller request queue connection failed: {e}"),
+                    )));
+                }
+                log::info!(
+                    "Controller request queue connected to worker {} successfully",
+                    hostname
+                );
+            }
+
+            {
+                let mut resp_queue = connection.resp_queue.lock().await;
+                if let Err(e) = resp_queue.connect(worker_qp_endpoint, worker_memory_region) {
+                    log::error!(
+                        "Failed to connect controller response queue to worker {}: {e}",
+                        hostname
+                    );
+                    return Err(EKError::IoError(std::io::Error::new(
+                        std::io::ErrorKind::Other,
+                        format!("Controller response queue connection failed: {e}"),
+                    )));
+                }
+                log::info!(
+                    "Controller response queue connected to worker {} successfully",
+                    hostname
+                );
+            }
+
+            // Mark connection as established
+            connection.connected = true;
+            log::info!(
+                "RDMA connection to worker {} established successfully",
+                hostname
+            );
+        }
+
+        Ok(())
+    }
+
+    /// Reset connection state and force reconnection on next use
+    pub async fn reset_connection(&mut self, hostname: &str) {
+        if let Some(connection) = self.all_connections.get_mut(hostname) {
+            connection.connected = false;
+            log::info!("Reset RDMA connection state for worker {}", hostname);
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl ExpertRegistry for RdmaExpertRegistry {
+    async fn select(&mut self, eid: ExpertIdRef<'_>) -> EKResult<ExpertClient> {
+        if !self.experts2channels.contains_key(eid) {
+            log::info!("🚀hello");
+
+            let nodes = self.reader.node_by_expert(eid).await?;
+            for node in nodes {
+                log::debug!(
+                    "registering RDMA channel for expert {eid} on node {}",
+                    node.hostname
+                );
+
+                let rdma_endpoint = node.config.get("worker_rdma_endpoint");
+                if rdma_endpoint.is_none() {
+                    log::warn!("No RDMA endpoint found for node {}", node.hostname);
+                    continue;
+                }
+
+                // Extract RDMA endpoint info from database
+                let rdma_endpoint_info = rdma_endpoint.unwrap();
+
+                // Check if we already have a connection for this node
+                let needs_new_connection = !self.all_connections.contains_key(&node.hostname);
+
+                if needs_new_connection {
+                    // Create controller-side RDMA queues (reverse roles from worker)
+                    let req_queue = RdmaQueue::<RdmaWorkerReq>::new(None, 128, true)
+                        .expect("Failed to create controller RDMA request queue");
+                    let resp_queue = RdmaQueue::<RdmaWorkerResp>::new(None, 128, false)
+                        .expect("Failed to create controller RDMA response queue");
+
+                    // Get controller endpoints for handshake
+                    let controller_req_endpoint = req_queue
+                        .endpoint()
+                        .expect("Failed to get controller request endpoint");
+                    let controller_req_memory = req_queue.memory_region();
+                    let controller_resp_endpoint = resp_queue
+                        .endpoint()
+                        .expect("Failed to get controller response endpoint");
+                    let _controller_resp_memory = resp_queue.memory_region();
+
+                    // Serialize controller endpoint info for sending back to worker
+                    let controller_endpoint_data = serde_json::to_vec(&(
+                        format!("{:?}", controller_req_endpoint),
+                        format!("{:?}", controller_resp_endpoint),
+                    ))
+                    .expect("Failed to serialize controller endpoints");
+
+                    // Store controller endpoint in database (serialize as JSON)
+                    let controller_qp_json = serde_json::to_string(&controller_req_endpoint)
+                        .expect("Failed to serialize controller QP endpoint");
+                    let controller_memory_json = serde_json::to_string(&controller_req_memory)
+                        .expect("Failed to serialize controller memory region");
+
+                    let mut updated_config = node.config.clone();
+                    updated_config["controller_rdma_endpoint"] = serde_json::json!({
+                        "qp_endpoint": controller_qp_json,
+                        "memory_region": controller_memory_json,
+                    });
+
+                    // Update database with controller endpoint info
+                    let node_update = NewNode {
+                        hostname: node.hostname.clone(),
+                        device: node.device.clone(),
+                        config: updated_config,
+                    };
+
+                    // Store controller endpoint in database
+                    if let Err(e) = self.writer.node_upsert(node_update).await {
+                        log::error!("Failed to store controller RDMA endpoint in database: {e:?}");
+                    }
+
+                    // Create connection entry
+                    let connection = RdmaNodeConnection {
+                        req_queue: Arc::new(Mutex::new(req_queue)),
+                        resp_queue: Arc::new(Mutex::new(resp_queue)),
+                        controller_endpoint_data,
+                        connected: false,
+                    };
+
+                    self.all_connections
+                        .insert(node.hostname.clone(), connection);
+                }
+
+                // Attempt to establish RDMA connection if worker endpoint is available
+                if let Err(e) = self
+                    .connect_to_worker(&node.hostname, rdma_endpoint_info)
+                    .await
+                {
+                    log::error!(
+                        "Failed to establish RDMA connection to worker {}: {e:?}",
+                        node.hostname
+                    );
+                }
+
+                let connection = self.all_connections.get(&node.hostname).unwrap();
+
+                let (req_channel, resp_channel) =
+                    (connection.req_queue.clone(), connection.resp_queue.clone());
+
+                self.experts2channels
+                    .entry(eid.to_owned())
+                    .or_default()
+                    .push((
+                        node.hostname.clone(),
+                        req_channel.clone(),
+                        resp_channel.clone(),
+                    ));
+            }
+        }
+        let channels = self
+            .experts2channels
+            .get(eid)
+            .ok_or(EKError::NotFound(format!(
+                "no channel found for expert {eid}"
+            )))?;
+        let idx = rand::random::<usize>() % channels.len();
+        Ok(ExpertClient::Rdma((
+            channels[idx].1.clone(),
+            channels[idx].2.clone(),
+        )))
+    }
+
+    async fn reset(&mut self) -> EKResult<()> {
+        self.experts2channels.clear();
+        Ok(())
+    }
+
+    async fn deregister(&mut self, host_id: &str) {
+        // Reset and remove RDMA connections
+        self.reset_connection(host_id).await;
+        self.all_connections
+            .retain(|hostname, _| hostname != host_id);
+
+        // Remove from expert channels mapping
+        for (_, channels) in self.experts2channels.iter_mut() {
+            channels.retain(|(id, _, _)| id != host_id);
+        }
+
+        log::info!("Deregistered RDMA worker: {}", host_id);
+    }
+}
+
 pub type GlobalWorkerRegistry = Arc<Mutex<dyn ExpertRegistry + Send + Sync>>;
 
 pub fn get_registry() -> GlobalWorkerRegistry {
@@ -426,6 +867,14 @@ pub fn get_registry() -> GlobalWorkerRegistry {
             static SHM_INSTANCE: OnceLock<Arc<Mutex<LocalShmExpertRegistry>>> = OnceLock::new();
             let res = SHM_INSTANCE.get_or_init(|| {
                 let inner = LocalShmExpertRegistry::new();
+                Arc::new(Mutex::new(inner))
+            });
+            (res.clone()) as _
+        }
+        ExpertRegistryBackend::Rdma => {
+            static RDMA_INSTANCE: OnceLock<Arc<Mutex<RdmaExpertRegistry>>> = OnceLock::new();
+            let res = RDMA_INSTANCE.get_or_init(|| {
+                let inner = RdmaExpertRegistry::new();
                 Arc::new(Mutex::new(inner))
             });
             (res.clone()) as _
