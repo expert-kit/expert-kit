@@ -8,14 +8,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .define("BUILD_SHARED_LIBS", "OFF")
         .define("GGML_STATIC", "ON")
         .define("GGML_LLAMAFILE", "ON")
-        .define("GGML_CUDA", "ON")
         .build();
 
     println!("cargo:rustc-link-search=native={}/lib", dst.display());
     println!("cargo:rustc-link-lib=static=ggml");
     println!("cargo:rustc-link-lib=static=ggml-base");
     println!("cargo:rustc-link-lib=static=ggml-cpu");
-    println!("cargo:rustc-link-lib=static=ggml-cuda");
     println!("cargo:rustc-link-lib=dylib=gomp");
     println!("cargo:rustc-link-lib=dylib=stdc++");
 
@@ -23,8 +21,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     for header in dst.join("include").read_dir()? {
         if let Ok(header) = header
-            && ["ggml.h", "ggml-cpu.h", "ggml-cuda.h"]
-                .contains(&header.file_name().to_str().unwrap())
+            && ["ggml.h", "ggml-cpu.h"].contains(&header.file_name().to_str().unwrap())
         {
             bindings = bindings.header(header.path().to_string_lossy());
         }
