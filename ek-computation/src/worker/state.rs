@@ -60,7 +60,7 @@ impl StateClient {
                 "http://{}:{}",
                 settings.worker.broadcast, settings.worker.ports.main
             ),
-            channel: "grpc".to_string(),
+            channel: settings.worker.channel.clone(),
             device: settings.worker.device.clone(),
             last_will: false,
         })

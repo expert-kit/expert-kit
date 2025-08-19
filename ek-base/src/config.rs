@@ -94,6 +94,8 @@ pub struct WorkerAdvancedSettings {
 pub struct WorkerSettings {
     #[serde(default = "default_worker_id")]
     pub id: String,
+    #[serde(default = "default_worker_channel")]
+    pub channel: String,
     pub listen: String,
     pub broadcast: String,
     pub ports: WorkerPorts,
@@ -105,6 +107,10 @@ pub struct WorkerSettings {
 
 fn default_worker_metrics() -> String {
     "0.0.0.0:9091".to_string()
+}
+
+fn default_worker_channel() -> String {
+    "grpc".to_string()
 }
 
 fn default_worker_id() -> String {

@@ -41,7 +41,6 @@ tower = { workspace = true }
 tracing = { workspace = true }
 tracing-opentelemetry = { workspace = true }
 
-
 [build-dependencies]
 tonic-build = { workspace = true }
 

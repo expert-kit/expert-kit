@@ -7,7 +7,6 @@ use std::{
 };
 
 use ek_base::{
-    config::{ExpertRegistryBackend, get_ek_settings},
     error::{EKError, EKResult},
     tracing::grpc::OTelGrpcClientMiddleware,
 };
@@ -75,13 +74,27 @@ pub trait ExpertRegistry {
     async fn deregister(&mut self, host_id: &str);
 }
 
-struct ChannelMeta {
+#[derive(Clone)]
+struct GrpcChannelMeta {
     host_id: String,
     ch: Channel,
 }
 
+#[derive(Clone)]
+struct ShmChannelMeta {
+    host_id: String,
+    ch: LocalShmChannel,
+}
+
+#[derive(Clone)]
+enum ChannelMeta {
+    Grpc(GrpcChannelMeta),
+    Shm(ShmChannelMeta),
+}
+
 pub struct ExpertRegistryImpl {
-    channels: HashMap<ExpertId, Vec<ChannelMeta>>,
+    eid2channels: HashMap<ExpertId, Vec<ChannelMeta>>,
+    all_shm_channels: HashMap<String, LocalShmChannel>,
     reader: Box<dyn StateReader + Send + Sync>,
 }
 
@@ -92,11 +105,15 @@ impl ExpertRegistry for ExpertRegistryImpl {
     }
     async fn select(&mut self, eid: ExpertIdRef<'_>) -> EKResult<ExpertClient> {
         let ch = self.inner_select(eid).await?;
-
-        let client = ServiceBuilder::new()
-            .layer_fn(OTelGrpcClientMiddleware::new)
-            .service(ch);
-        Ok(ExpertClient::Grpc(client))
+        match ch {
+            ChannelMeta::Grpc(meta) => {
+                let client = ServiceBuilder::new()
+                    .layer_fn(OTelGrpcClientMiddleware::new)
+                    .service(meta.ch.clone());
+                Ok(ExpertClient::Grpc(client))
+            }
+            ChannelMeta::Shm(meta) => Ok(ExpertClient::Shm(meta.ch.clone())),
+        }
     }
     async fn deregister(&mut self, host_id: &str) {
         self.inner_deregister(host_id).await;
@@ -105,12 +122,12 @@ impl ExpertRegistry for ExpertRegistryImpl {
 
 impl ExpertRegistryImpl {
     async fn inner_reset(&mut self) -> EKResult<()> {
-        self.channels.clear();
+        self.eid2channels.clear();
         Ok(())
     }
 
-    async fn inner_select(&mut self, eid: ExpertIdRef<'_>) -> EKResult<Channel> {
-        let channels = self.channels.get(eid);
+    async fn inner_select(&mut self, eid: ExpertIdRef<'_>) -> EKResult<ChannelMeta> {
+        let channels = self.eid2channels.get(eid);
         if let Some(channels) = channels {
             if channels.is_empty() {
                 return self.create_then_select_channel(eid).await;
@@ -121,36 +138,71 @@ impl ExpertRegistryImpl {
         }
     }
 
-    async fn select_random(&mut self, eid: ExpertIdRef<'_>) -> EKResult<Channel> {
-        let channels = self.channels.get_mut(eid);
+    async fn select_random(&mut self, eid: ExpertIdRef<'_>) -> EKResult<ChannelMeta> {
+        let channels = self.eid2channels.get(eid);
         if let Some(channels) = channels {
             if channels.is_empty() {
                 return self.create_then_select_channel(eid).await;
             }
             let idx = rand::random::<usize>() % channels.len();
-            Ok(channels[idx].ch.clone())
+            Ok(channels[idx].clone())
         } else {
             self.create_then_select_channel(eid).await
         }
     }
 
-    async fn create_then_select_channel(&mut self, eid: ExpertIdRef<'_>) -> EKResult<Channel> {
+    async fn create_then_select_channel(&mut self, eid: ExpertIdRef<'_>) -> EKResult<ChannelMeta> {
         let nodes = self.reader.node_by_expert(eid).await?;
         for node in nodes {
             let addr = node.config["addr"].as_str().unwrap().to_owned();
-            let end = Channel::from_shared(addr)
-                .map_err(|e| EKError::InvalidInput(format!("invalid url for gRPC: {e}")))?;
-            let channel = end.connect().await?;
-            let meta = ChannelMeta {
-                ch: channel,
-                host_id: node.hostname.clone(),
-            };
-            self.channels
-                .entry(eid.to_owned())
-                .or_insert_with(Vec::new)
-                .push(meta);
+            let channel = node.config["channel"].as_str().unwrap().to_owned();
+
+            match channel.as_str() {
+                "grpc" => {
+                    let end = Channel::from_shared(addr)
+                        .map_err(|e| EKError::InvalidInput(format!("invalid url for gRPC: {e}")))?;
+                    let channel = end.connect().await?;
+                    let meta = GrpcChannelMeta {
+                        ch: channel,
+                        host_id: node.hostname.clone(),
+                    };
+                    self.eid2channels
+                        .entry(eid.to_owned())
+                        .or_default()
+                        .push(ChannelMeta::Grpc(meta));
+                }
+                "shm" => {
+                    let shm_channel = self
+                        .all_shm_channels
+                        .entry(node.hostname.clone())
+                        .or_insert_with(|| {
+                            let req_queue = Arc::new(Mutex::new(ShmQueue::new(
+                                &format!("ek-shmq-req-{}", node.hostname),
+                                128,
+                            )));
+                            let resp_queue = Arc::new(Mutex::new(ShmQueue::new(
+                                &format!("ek-shmq-resp-{}", node.hostname),
+                                128,
+                            )));
+                            (req_queue, resp_queue)
+                        });
+                    let meta = ShmChannelMeta {
+                        ch: shm_channel.clone(),
+                        host_id: node.hostname.clone(),
+                    };
+                    self.eid2channels
+                        .entry(eid.to_owned())
+                        .or_default()
+                        .push(ChannelMeta::Shm(meta));
+                }
+                _ => {
+                    return Err(EKError::NotFound(format!(
+                        "unknown channel type {channel} for expert {eid}"
+                    )));
+                }
+            }
         }
-        let res = self.channels.get(eid).ok_or(EKError::NotFound(format!(
+        let res = self.eid2channels.get(eid).ok_or(EKError::NotFound(format!(
             "no channel found for expert {eid}"
         )))?;
         if res.is_empty() {
@@ -159,14 +211,19 @@ impl ExpertRegistryImpl {
             )));
         }
         let idx = rand::random::<usize>() % res.len();
-        Ok(res[idx].ch.clone())
+        Ok(res[idx].clone())
     }
 
     pub async fn inner_deregister(&mut self, host_id: &str) {
         log::info!("deregister host_id {host_id}");
-        for (_, channels) in self.channels.iter_mut() {
-            channels.retain(|meta| meta.host_id != host_id);
+        for (_, channels) in self.eid2channels.iter_mut() {
+            channels.retain(|meta| match meta {
+                ChannelMeta::Grpc(meta) => meta.host_id != host_id,
+                ChannelMeta::Shm(meta) => meta.host_id != host_id,
+            });
         }
+        self.all_shm_channels
+            .retain(|hostname, _| hostname != host_id);
     }
 }
 
@@ -179,7 +236,8 @@ impl Default for ExpertRegistryImpl {
 impl ExpertRegistryImpl {
     pub fn new() -> Self {
         Self {
-            channels: HashMap::new(),
+            eid2channels: HashMap::new(),
+            all_shm_channels: HashMap::new(),
             reader: Box::new(StateReaderImpl::new()),
         }
     }
@@ -316,123 +374,13 @@ impl ShmBytes for LocalShmWorkerResp {
     }
 }
 
-#[expect(clippy::type_complexity)]
-pub struct LocalShmExpertRegistry {
-    all_channels: HashMap<
-        String,
-        (
-            Arc<Mutex<ShmQueue<'static, LocalShmWorkerReq>>>,
-            Arc<Mutex<ShmQueue<'static, LocalShmWorkerResp>>>,
-        ),
-    >,
-    experts2channels: HashMap<
-        ExpertId,
-        Vec<(
-            String,
-            Arc<Mutex<ShmQueue<'static, LocalShmWorkerReq>>>,
-            Arc<Mutex<ShmQueue<'static, LocalShmWorkerResp>>>,
-        )>,
-    >,
-    reader: Box<dyn StateReader + Send + Sync>,
-}
-
-impl Default for LocalShmExpertRegistry {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl LocalShmExpertRegistry {
-    pub fn new() -> Self {
-        Self {
-            all_channels: HashMap::default(),
-            experts2channels: HashMap::default(),
-            reader: Box::new(StateReaderImpl::new()),
-        }
-    }
-}
-
-#[async_trait::async_trait]
-impl ExpertRegistry for LocalShmExpertRegistry {
-    async fn select(&mut self, eid: ExpertIdRef<'_>) -> EKResult<ExpertClient> {
-        if !self.experts2channels.contains_key(eid) {
-            let nodes = self.reader.node_by_expert(eid).await?;
-            for node in nodes {
-                log::debug!(
-                    "registering channel for expert {eid} on node {}",
-                    node.hostname
-                );
-                let (req_channel, resp_channel) = self
-                    .all_channels
-                    .entry(node.hostname.clone())
-                    .or_insert_with(|| {
-                        let req_queue = Arc::new(Mutex::new(ShmQueue::new(
-                            &format!("ek-shmq-req-{}", node.hostname),
-                            128,
-                        )));
-                        let resp_queue = Arc::new(Mutex::new(ShmQueue::new(
-                            &format!("ek-shmq-resp-{}", node.hostname),
-                            128,
-                        )));
-                        (req_queue, resp_queue)
-                    });
-                self.experts2channels
-                    .entry(eid.to_owned())
-                    .or_default()
-                    .push((
-                        node.hostname.clone(),
-                        req_channel.clone(),
-                        resp_channel.clone(),
-                    ));
-            }
-        }
-        let channels = self
-            .experts2channels
-            .get(eid)
-            .ok_or(EKError::NotFound(format!(
-                "no channel found for expert {eid}"
-            )))?;
-        let idx = rand::random::<usize>() % channels.len();
-        Ok(ExpertClient::Shm((
-            channels[idx].1.clone(),
-            channels[idx].2.clone(),
-        )))
-    }
-
-    async fn reset(&mut self) -> EKResult<()> {
-        self.experts2channels.clear();
-        Ok(())
-    }
-
-    async fn deregister(&mut self, host_id: &str) {
-        self.all_channels.retain(|hostname, _| hostname != host_id);
-
-        for (_, channels) in self.experts2channels.iter_mut() {
-            channels.retain(|(id, _, _)| id != host_id);
-        }
-    }
-}
-
 pub type GlobalWorkerRegistry = Arc<Mutex<dyn ExpertRegistry + Send + Sync>>;
 
 pub fn get_registry() -> GlobalWorkerRegistry {
-    let settings = get_ek_settings();
-    match settings.controller.registry_backend {
-        ExpertRegistryBackend::Grpc => {
-            static GRPC_INSTANCE: OnceLock<Arc<Mutex<ExpertRegistryImpl>>> = OnceLock::new();
-            let res = GRPC_INSTANCE.get_or_init(|| {
-                let inner = ExpertRegistryImpl::new();
-                Arc::new(Mutex::new(inner))
-            });
-            (res.clone()) as _
-        }
-        ExpertRegistryBackend::Shm => {
-            static SHM_INSTANCE: OnceLock<Arc<Mutex<LocalShmExpertRegistry>>> = OnceLock::new();
-            let res = SHM_INSTANCE.get_or_init(|| {
-                let inner = LocalShmExpertRegistry::new();
-                Arc::new(Mutex::new(inner))
-            });
-            (res.clone()) as _
-        }
-    }
+    static INSTANCE: OnceLock<Arc<Mutex<ExpertRegistryImpl>>> = OnceLock::new();
+    let res = INSTANCE.get_or_init(|| {
+        let inner = ExpertRegistryImpl::new();
+        Arc::new(Mutex::new(inner))
+    });
+    (res.clone()) as _
 }
