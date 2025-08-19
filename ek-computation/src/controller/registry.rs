@@ -108,7 +108,8 @@ impl ExpertRegistryImpl {
                 "no channel found for expert {eid}"
             )));
         }
-        Ok(res[0].ch.clone())
+        let idx = rand::random::<usize>() % res.len();
+        Ok(res[idx].ch.clone())
     }
 
     pub async fn inner_deregister(&mut self, host_id: &str) {
