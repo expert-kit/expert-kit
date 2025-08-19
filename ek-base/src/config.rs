@@ -37,25 +37,11 @@ pub struct DBSettings {
 }
 
 #[derive(Debug, Deserialize, Clone)]
-pub enum ExpertRegistryBackend {
-    Grpc,
-    Shm,
-}
-
-impl Default for ExpertRegistryBackend {
-    fn default() -> Self {
-        Self::Shm
-    }
-}
-
-#[derive(Debug, Deserialize, Clone)]
 #[allow(unused)]
 pub struct ControllerSettings {
     pub listen: String,
     pub broadcast: String,
     pub ports: ControllerPorts,
-    #[serde(default)]
-    pub registry_backend: ExpertRegistryBackend,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -257,7 +243,6 @@ controller:
   ports:
     intra: 5001
     inter: 5002
-  registry_backend: Grpc
 "#
     }
 
