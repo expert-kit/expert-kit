@@ -158,12 +158,9 @@ pub async fn worker_main() -> EKResult<()> {
         }
         let token = token.clone();
         async_srv = tokio::spawn(async move {
-            loop {
-                select! {
-                    _ = token.cancelled() => {
-                        log::info!("async service cancelled");
-                        break;
-                    }
+            select! {
+                _ = token.cancelled() => {
+                    log::info!("async service cancelled");
                 }
             }
         });
