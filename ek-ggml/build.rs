@@ -21,7 +21,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     for header in dst.join("include").read_dir()? {
         if let Ok(header) = header
-            && ["ggml.h", "ggml-cpu.h"].contains(&header.file_name().to_str().unwrap())
+            && ["ggml-cpu.h"].contains(&header.file_name().to_str().unwrap())
         {
             bindings = bindings.header(header.path().to_string_lossy());
         }
