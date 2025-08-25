@@ -2,8 +2,11 @@ import logging
 import os
 # from vllm import ModelRegistry
 
+if os.environ.get("EK_WITH_VLLM_MINDSPORE") == "1":
+    import mindspore
+else:
+    from expertkit_vllm.models.deepseek_v2 import ExpertKitMoE
 
-from expertkit_vllm.models.deepseek_v2 import ExpertKitMoE
 from expertkit_vllm.experts.grpc_expert import GrpcExpert
 
 logger = logging.getLogger(__name__)
@@ -20,8 +23,8 @@ def register():
     if os.getenv("EK_ENABLE") != "1":
         return
     print("🚀expertkit-vllm integration activated")
-    
-    mode = os.getenv("EXPERTKIT_MODE", "expert_mode")
+
+    mode = os.getenv("EK_MODE", "expert_mode")
     match mode:
         case "expert_mode":
             expert_mode_register()
@@ -33,17 +36,26 @@ def register():
 def expert_mode_register():
     print("🚀expertkit-vllm integration in expert_mode mode")
     #TODO: need test, cause A10 has limited GPU memory, too small for testing
-    
-    import vllm.model_executor.layers.fused_moe as fused_moe_module
-    import vllm.model_executor.layers.fused_moe.layer as fused_moe
-    
+
+    if os.environ.get("EK_WITH_VLLM_MINDSPORE") == "1":
+        from vllm_mindspore.model_executor.layers import fused_moe
+    else:
+        import vllm.model_executor.layers.fused_moe as fused_moe_module
+        import vllm.model_executor.layers.fused_moe.layer as fused_moe
+
     fused_moe.FusedMoE = GrpcExpert
-    fused_moe_module.FusedMoE = GrpcExpert
+    if os.environ.get("EK_WITH_VLLM_MINDSPORE") != "1":
+        fused_moe_module.FusedMoE = GrpcExpert
+    print("🚀expertkit-vllm replaced fused_moe like ", fused_moe.FusedMoE)
 
-def moe_mode_register():
-    print("🚀expertkit-vllm integration in moe_mode mode")
-    # Replace FusedMoE with ExpertKitFusedMoE
-    #TODO: hardcode for Deepseek
-    import vllm.model_executor.models.deepseek_v2 as ds_v2
+if os.environ.get("EK_WITH_VLLM_MINDSPORE") == "1":
+    def moe_mode_register():
+        raise NotImplementedError("moe_mode is not implemented for mindspore backend")
+else:
+    def moe_mode_register():
+        print("🚀expertkit-vllm integration in moe_mode mode")
+        # Replace FusedMoE with ExpertKitFusedMoE
+        #TODO: hardcode for Deepseek
+        import vllm.model_executor.models.deepseek_v2 as ds_v2
 
-    ds_v2.DeepseekV2MoE = ExpertKitMoE
+        ds_v2.DeepseekV2MoE = ExpertKitMoE

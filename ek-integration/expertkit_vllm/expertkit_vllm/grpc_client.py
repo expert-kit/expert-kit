@@ -8,8 +8,34 @@ import safetensors.torch as st
 from expertkit_vllm.pbpy.ek.worker.v1 import expert_pb2_grpc, expert_pb2
 from typing import List
 
+if os.environ.get("EK_WITH_VLLM_MINDSPORE") == "1":
+    import sys
+    from typing import Any, Dict
+    import mindspore as ms
+    from mindspore import nn, Parameter, Tensor as Tensor
+    import numpy as np
+    from safetensors import deserialize, serialize
+else:
+    from torch import Tensor as Tensor
+
 MAX_METADATA_SIZE = 20 * 1024  # 20 KB
 MAX_MESSAGE_LENGTH = 1024 * 1024 * 1024  # 100 MB
+
+if os.environ.get("EK_WITH_VLLM_MINDSPORE") == "1":
+    _TYPE = {
+        "F64": ms.float64,
+        "F32": ms.float32,
+        "F16": ms.float16,
+        "BF16": ms.bfloat16,
+        "I64": ms.int64,
+        "U64": ms.uint64,
+        "I32": ms.int32,
+        "U32": ms.uint32,
+        "I16": ms.int16,
+        "U16": ms.uint16,
+        "I8": ms.int8,
+        "U8": ms.uint8,
+    }
 
 
 class ExpertKitClient:
@@ -32,9 +58,44 @@ class ExpertKitClient:
         self.stub = expert_pb2_grpc.ComputationServiceStub(self.channel)
         self.timeout = timeout_sec
 
+    if os.environ.get("EK_WITH_VLLM_MINDSPORE") == "1":
+        # Since Mindspore does not support methods such as tensor.data_ptr and
+        # torch.frombuffer, the save and load of safetensors cannot operate
+        # correctly. Therefore, the following are the modified function to use
+        # safetensors format.
+        @staticmethod
+        def _flatten(tensors: Dict[str, torch.Tensor]) -> Dict[str, Dict[str, Any]]:
+            out = {
+                k: {
+                    "dtype": str(v.dtype).split(".")[-1].lower(),
+                    "shape": v.shape,
+                    # TODO: use mindspore unrelease api, change to stable
+                    "data": v.get_bytes(),
+                }
+                for k, v in tensors.items()
+            }
+            return out
+
+        @staticmethod
+        def _view2torch(safeview) -> Dict[str, Tensor]:
+            result = {}
+            for k, v in safeview:
+                if len(v["data"]) == 0:
+                    exit("No Data found from Expertkit controller!")
+                # TODO: use mindspore unrelease api, change to stable
+                t = Tensor.convert_bytes_to_tensor(
+                    bytes(v["data"]), torch.Size(v["shape"]), _TYPE[v["dtype"]]
+                )
+                # Need to translate again to get right class
+                t = ms.Tensor(t)
+                if sys.byteorder == "big":
+                    exit("Data byteorder big is no supported yet!")
+                result[k] = t
+            return result
+
     def forward_expert(
-        self, expert_ids: List[List[str]], hidden_state: torch.Tensor
-    ) -> torch.Tensor:
+        self, expert_ids: List[List[str]], hidden_state: Tensor
+    ) -> Tensor:
         """Blocking call to expert-kit. Raises on any failure.
 
         Args:
@@ -53,7 +114,12 @@ class ExpertKitClient:
         # tensor_data = buf.getvalue()
         origin_device = hidden_state.device
 
-        tensor_data = st.save({"data": hidden_state})
+        if os.environ.get("EK_WITH_VLLM_MINDSPORE") == "1":
+            tensor_data = serialize(
+                ExpertKitClient._flatten({"data": hidden_state})
+            )
+        else:
+            tensor_data = st.save({"data": hidden_state})
 
         # Generate expert ids info
         seq_infos = []
@@ -68,12 +134,19 @@ class ExpertKitClient:
                 timeout=self.timeout,
             )
 
-            return st.load(
-                response.output_tensor,
-            )[
-                "data"
-            ].to(origin_device)
+            if os.environ.get("EK_WITH_VLLM_MINDSPORE") == "1":
+                output_tensor = ExpertKitClient._view2torch(
+                    deserialize(response.output_tensor)
+                )["data"]
+                res = output_tensor.move_to(origin_device.type)
+            else:
+                res = st.load(
+                    response.output_tensor,
+                )[
+                    "data"
+                ].to(origin_device)
+            return res
         except grpc.RpcError as e:
             raise RuntimeError(f"gRPC failed: {e.code().name}") from e
         except (IOError, RuntimeError) as e:
-            raise RuntimeError(f"Tensor serialization failed: {str(e)}") from e
+            raise RuntimeError(f"Tensor deserialization failed: {str(e)}") from e
