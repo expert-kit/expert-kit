@@ -48,6 +48,7 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 tracing-opentelemetry = { workspace = true }
 tower = { workspace = true }
+ek_shm_rpc = { path = "../ek-shm_rpc"}
 
 
 [build-dependencies]
