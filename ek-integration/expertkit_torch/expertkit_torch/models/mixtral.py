@@ -1,23 +1,3 @@
-# coding=utf-8
-# Copyright 2025 The Qwen team, Alibaba Group and the HuggingFace Inc. team. All rights reserved.
-#
-# Modifications Copyright (c) 2025 expertkit-torch.
-#
-# This file is based on code from the Qwen3 project (originally licensed under Apache 2.0)
-# and has been modified.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-
 import argparse
 import json
 import os
@@ -31,7 +11,8 @@ from transformers import (
     AutoModelForCausalLM,
 )
 from transformers.utils.logging import set_verbosity_error
-from transformers.models.qwen3_moe import modeling_qwen3_moe as qwen3_moe
+from transformers.models.mixtral.modeling_mixtral import MixtralBlockSparseTop2MLP
+from transformers.models.mixtral import modeling_mixtral as mixtral
 from torch import nn
 from expertkit_torch.grpc_client import ExpertKitClient
 
@@ -53,37 +34,41 @@ else:
 
 
 def intercept_moe(
-    enable_ek: bool = True,
+    enable_ek=True,
     ek_addr: str = "localhost:5002",
-    ek_model_name: str = "qwen3",
+    ek_model_name: str = "mixtral",
 ):
-    class InterceptedMoE(nn.Module):
+
+    class InterceptedMOE(nn.Module):
+
         client: ExpertKitClient = None
 
         def __init__(self, config):
             super().__init__()
-            global layer_idx
-            if enable_ek and InterceptedMoE.client is None:
-                InterceptedMoE.client = ExpertKitClient(
+            if enable_ek and InterceptedMOE.client is None:
+                InterceptedMOE.client = ExpertKitClient(
                     ek_addr, DEFAULT_TIMEOUT_INTVAL)
+            self.hidden_dim = config.hidden_size
+            self.ffn_dim = config.intermediate_size
+            self.num_experts = config.num_local_experts
+            self.top_k = config.num_experts_per_tok
+            global layer_idx
             self.layer_id = layer_idx
             layer_idx += 1
             layer_idx = layer_idx % config.num_hidden_layers
-            self.num_experts = config.num_experts
-            self.top_k = config.num_experts_per_tok
-            self.norm_topk_prob = config.norm_topk_prob
 
-            self.gate = nn.Linear(config.hidden_size,
-                                  config.num_experts, bias=False)
+            # gating
+            self.gate = nn.Linear(
+                self.hidden_dim, self.num_experts, bias=False)
+
             if not enable_ek:
                 self.experts = nn.ModuleList(
-                    [
-                        qwen3_moe.Qwen3MoeMLP(
-                            config, intermediate_size=config.moe_intermediate_size
-                        )
-                        for _ in range(self.num_experts)
-                    ]
+                    [MixtralBlockSparseTop2MLP(config)
+                     for _ in range(self.num_experts)]
                 )
+
+            # Jitter parameters
+            self.jitter_noise = config.router_jitter_noise
 
         def ek_forward(
             self,
@@ -95,7 +80,6 @@ def intercept_moe(
             sequence_length: int,
             hidden_dim: int,
         ):
-            # Start timing for expert computation
             start_time = time.time()
 
             expert_ids = []
@@ -127,60 +111,50 @@ def intercept_moe(
 
         def normal_forward(
             self,
-            *,
             hidden_states: torch.Tensor,
-            routing_weights: torch.Tensor,
-            selected_experts: torch.Tensor,
             expert_mask: torch.Tensor,
-            batch_size: int,
-            sequence_length: int,
             hidden_dim: int,
+            routing_weights: torch.Tensor,
+            final_hidden_states: torch.Tensor,
         ):
-            # Start timing for expert computation
-            start_time = time.time()
-
-            final_hidden_states = torch.zeros(
-                (batch_size * sequence_length, hidden_dim),
-                dtype=hidden_states.dtype,
-                device=hidden_states.device,
-            )
             for expert_idx in range(self.num_experts):
                 expert_layer = self.experts[expert_idx]
                 idx, top_x = torch.where(expert_mask[expert_idx])
+
+                # Index the correct hidden states and compute the expert hidden state for
+                # the current expert. We need to make sure to multiply the output hidden
+                # states by `routing_weights` on the corresponding tokens (top-1 and top-2)
                 current_state = hidden_states[None,
                                               top_x].reshape(-1, hidden_dim)
                 current_hidden_states = (
                     expert_layer(current_state) *
                     routing_weights[top_x, idx, None]
                 )
+
+                # However `index_add_` only support torch tensors for indexing so we'll use
+                # the `top_x` tensor here.
                 final_hidden_states.index_add_(
                     0, top_x, current_hidden_states.to(hidden_states.dtype)
                 )
-            final_hidden_states = final_hidden_states.reshape(
-                batch_size, sequence_length, hidden_dim
-            )
-
-            # Record expert computation time if profiler is available
-            end_time = time.time()
-
-            return final_hidden_states
+            pass
 
         def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-            # Timing overall MoE forward pass
-            forward_start = time.time()
-
+            """ """
             batch_size, sequence_length, hidden_dim = hidden_states.shape
+            if self.training and self.jitter_noise > 0:
+                hidden_states *= torch.empty_like(hidden_states).uniform_(
+                    1.0 - self.jitter_noise, 1.0 + self.jitter_noise
+                )
             hidden_states = hidden_states.view(-1, hidden_dim)
-
-            # Process router logits (no need to time separately)
+            # router_logits: (batch * sequence_length, n_experts)
             router_logits = self.gate(hidden_states)
+
             routing_weights = F.softmax(
                 router_logits, dim=1, dtype=torch.float)
             routing_weights, selected_experts = torch.topk(
                 routing_weights, self.top_k, dim=-1
             )
-            if self.norm_topk_prob:  # only diff with mixtral sparse moe block!
-                routing_weights /= routing_weights.sum(dim=-1, keepdim=True)
+            routing_weights /= routing_weights.sum(dim=-1, keepdim=True)
             # we cast back to the input dtype
             routing_weights = routing_weights.to(hidden_states.dtype)
 
@@ -189,14 +163,25 @@ def intercept_moe(
                 dtype=hidden_states.dtype,
                 device=hidden_states.device,
             )
-
             # One hot encode the selected experts to create an expert mask
             # this will be used to easily index which expert is going to be sollicitated
             expert_mask = torch.nn.functional.one_hot(
                 selected_experts, num_classes=self.num_experts
             ).permute(2, 1, 0)
 
-            if enable_ek:
+            if not enable_ek:
+                final = self.normal_forward(
+                    hidden_states=hidden_states,
+                    expert_mask=expert_mask,
+                    hidden_dim=hidden_dim,
+                    routing_weights=routing_weights,
+                    final_hidden_states=final_hidden_states,
+                )
+
+                final = final_hidden_states.reshape(
+                    batch_size, sequence_length, hidden_dim
+                )
+            else:
                 final = self.ek_forward(
                     hidden_states=hidden_states,
                     routing_weights=routing_weights,
@@ -205,24 +190,11 @@ def intercept_moe(
                     sequence_length=sequence_length,
                     hidden_dim=hidden_dim,
                 )
-            else:
-                final = self.normal_forward(
-                    hidden_states=hidden_states,
-                    routing_weights=routing_weights,
-                    selected_experts=selected_experts,
-                    expert_mask=expert_mask,
-                    batch_size=batch_size,
-                    sequence_length=sequence_length,
-                    hidden_dim=hidden_dim,
-                )
-
-            # Record overall MoE time only if profiler is available
-            forward_end = time.time()
 
             return final, router_logits
 
-    delattr(qwen3_moe, "Qwen3MoeSparseMoeBlock")
-    setattr(qwen3_moe, "Qwen3MoeSparseMoeBlock", InterceptedMoE)
+    delattr(mixtral, "MixtralSparseMoeBlock")
+    setattr(mixtral, "MixtralSparseMoeBlock", InterceptedMOE)
 
 
 tokenizer: Optional[AutoTokenizer] = None
@@ -236,7 +208,7 @@ def evaluate_batch(
     output_max_length=64,
     enable_ek=True,
     ek_addr="localhost:5002",
-    ek_model_name="qwen3"
+    ek_model_name="mixtral"
 ) -> Dict[str, Any]:
     """
     Batch inference with performance profiling.
@@ -269,6 +241,8 @@ def evaluate_batch(
         tokenizer = AutoTokenizer.from_pretrained(
             pretrained_model_name_or_path=model_path,
         )
+        if tokenizer.pad_token is None:
+            tokenizer.pad_token = tokenizer.eos_token
     if model is None:
         model = AutoModelForCausalLM.from_pretrained(
             pretrained_model_name_or_path=model_path,
@@ -385,7 +359,7 @@ def main():
     parser.add_argument(
         "--ek_model_name",
         type=str,
-        default="qwen3",
+        default="mixtral",
         help="The name of the model used in ExpertKit.",
     )
     parser.add_argument(

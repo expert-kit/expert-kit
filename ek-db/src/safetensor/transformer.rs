@@ -58,6 +58,7 @@ impl ModelConfig {
         match self.model_type() {
             "deepseek_v3" => Some(self.map.get("n_routed_experts")?.as_u64()? as usize),
             "qwen3_moe" => Some(self.map.get("num_experts")?.as_u64()? as usize),
+            "mixtral" => Some(self.map.get("num_local_experts")?.as_u64()? as usize),
             _ => {
                 unimplemented!()
             }
@@ -66,7 +67,13 @@ impl ModelConfig {
 
     pub fn dim(&self) -> Option<(usize, usize)> {
         let hidden = self.map.get("hidden_size")?.as_u64()? as usize;
-        let intermediate = self.map.get("moe_intermediate_size")?.as_u64()? as usize;
+        let intermediate = match self.model_type() {
+            "deepseek_v3" | "qwen3_moe" => {
+                self.map.get("moe_intermediate_size")?.as_u64()? as usize
+            }
+            "mixtral" => self.map.get("intermediate_size")?.as_u64()? as usize,
+            _ => unimplemented!(),
+        };
         Some((hidden, intermediate))
     }
     pub fn normalized_vital(&self) -> EKResult<VitalMeta> {
@@ -250,28 +257,61 @@ where
         layer_id: usize,
         expert_id: usize,
     ) -> EKResult<Vec<String>> {
-        let key_up = format!("model.layers.{layer_id}.mlp.experts.{expert_id}.up_proj.weight");
-        let key_up_scale = format!("{key_up}_scale_inv");
+        match self.model_config.model_type() {
+            "deepseek_v3" | "qwen3_moe" => {
+                let key_up =
+                    format!("model.layers.{layer_id}.mlp.experts.{expert_id}.up_proj.weight");
+                let key_up_scale = format!("{key_up}_scale_inv");
 
-        let key_gate = format!("model.layers.{layer_id}.mlp.experts.{expert_id}.down_proj.weight");
-        let key_gate_scale = format!("{key_gate}_scale_inv");
-        let key_down = format!("model.layers.{layer_id}.mlp.experts.{expert_id}.gate_proj.weight");
+                let key_gate =
+                    format!("model.layers.{layer_id}.mlp.experts.{expert_id}.down_proj.weight");
+                let key_gate_scale = format!("{key_gate}_scale_inv");
+                let key_down =
+                    format!("model.layers.{layer_id}.mlp.experts.{expert_id}.gate_proj.weight");
 
-        let key_down_scale = format!("{key_down}_scale_inv");
+                let key_down_scale = format!("{key_down}_scale_inv");
 
-        Ok(vec![
-            key_down,
-            key_gate,
-            key_up,
-            key_up_scale,
-            key_gate_scale,
-            key_down_scale,
-        ])
+                Ok(vec![
+                    key_down,
+                    key_gate,
+                    key_up,
+                    key_up_scale,
+                    key_gate_scale,
+                    key_down_scale,
+                ])
+            }
+            "mixtral" => {
+                let key_up = format!(
+                    "model.layers.{layer_id}.block_sparse_moe.experts.{expert_id}.w1.weight"
+                );
+                let key_up_scale = String::new();
+
+                let key_gate = format!(
+                    "model.layers.{layer_id}.block_sparse_moe.experts.{expert_id}.w3.weight"
+                );
+                let key_gate_scale = String::new();
+
+                let key_down = format!(
+                    "model.layers.{layer_id}.block_sparse_moe.experts.{expert_id}.w2.weight"
+                );
+                let key_down_scale = String::new();
+
+                Ok(vec![
+                    key_down,
+                    key_gate,
+                    key_up,
+                    key_up_scale,
+                    key_gate_scale,
+                    key_down_scale,
+                ])
+            }
+            _ => unimplemented!(),
+        }
     }
 
     pub async fn get_expert(&self, layer_id: usize, eid: usize) -> EKResult<Vec<u8>> {
         let keys = self.construct_expert_key(layer_id, eid).await?;
-        let mut tensors = vec![];
+        let mut tensors: Vec<(String, TensorView<'data>)> = vec![];
 
         for key in keys.iter() {
             if !self.has_layer(key) {

@@ -37,26 +37,11 @@ pub struct DBSettings {
 }
 
 #[derive(Debug, Deserialize, Clone)]
-pub enum ExpertRegistryBackend {
-    Grpc,
-    Shm,
-    Rdma,
-}
-
-impl Default for ExpertRegistryBackend {
-    fn default() -> Self {
-        Self::Shm
-    }
-}
-
-#[derive(Debug, Deserialize, Clone)]
 #[allow(unused)]
 pub struct ControllerSettings {
     pub listen: String,
     pub broadcast: String,
     pub ports: ControllerPorts,
-    #[serde(default)]
-    pub registry_backend: ExpertRegistryBackend,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -95,10 +80,16 @@ pub struct WorkerAdvancedSettings {
 pub struct WorkerSettings {
     #[serde(default = "default_worker_id")]
     pub id: String,
+    #[serde(default = "default_worker_channel")]
+    pub channel: String,
     pub listen: String,
     pub broadcast: String,
     pub ports: WorkerPorts,
     pub device: String,
+    #[serde(default = "default_backend")]
+    pub backend: String,
+    #[serde(default)]
+    pub drop_cache: bool,
     #[serde(default = "default_worker_metrics")]
     pub metrics: String,
     pub advanced: Option<WorkerAdvancedSettings>,
@@ -106,6 +97,14 @@ pub struct WorkerSettings {
 
 fn default_worker_metrics() -> String {
     "0.0.0.0:9091".to_string()
+}
+
+fn default_worker_channel() -> String {
+    "grpc".to_string()
+}
+
+fn default_backend() -> String {
+    "torch".to_string()
 }
 
 fn default_worker_id() -> String {

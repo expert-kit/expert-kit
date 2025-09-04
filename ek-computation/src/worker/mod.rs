@@ -1,10 +1,11 @@
 mod core;
 
-use std::env;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, LazyLock, Mutex, OnceLock};
 use std::time;
 use std::time::Duration;
+use std::{env, panic};
 
+use ek_base::tracing::grpc::OTelGrpcServerMiddleware;
 use state::StateInspector;
 use tokio::select;
 use tokio::signal;
@@ -24,11 +25,8 @@ use crate::worker::core::EKInstanceGateSync;
 use crate::x::get_graceful_shutdown_ch;
 
 use super::worker::state::StateClient;
-use crate::proto::ek::worker::v1::RdmaEndpoint;
-use ek_base::{
-    config::{ExpertRegistryBackend, get_ek_settings},
-    error::EKResult,
-};
+use crate::proto::ek::worker::v1::{RdmaEndpoint, RdmaEndpointPair};
+use ek_base::{config::get_ek_settings, error::EKResult};
 
 // Global storage for RDMA queues
 static RDMA_REQ_QUEUE: OnceLock<Arc<Mutex<RdmaQueue<RdmaWorkerReq>>>> = OnceLock::new();
@@ -80,6 +78,14 @@ async fn create_rdma_queues() -> EKResult<RdmaEndpoint> {
         memory_region: memory_region_json.into_bytes(),
     })
 }
+use crate::proto::ek::worker::v1::computation_service_server::ComputationServiceServer;
+use crate::worker::server::BasicExpertImpl;
+
+static WORKER_PARALLEL: LazyLock<usize> = LazyLock::new(|| {
+    env::var("EK_WORKER_PARALLEL")
+        .map(|v| v.parse().unwrap_or(1))
+        .unwrap_or(1)
+});
 
 /// Main worker entry point
 pub async fn worker_main() -> EKResult<()> {
@@ -91,16 +97,15 @@ pub async fn worker_main() -> EKResult<()> {
     let cli_cancel = token.clone();
 
     // Determine queue type based on configuration
-    let use_rdma = matches!(
-        settings.controller.registry_backend,
-        ExpertRegistryBackend::Rdma
-    );
-    let rdma_endpoint = if use_rdma {
-        // Create RDMA queues and get endpoint info
+    // Note: Channel should be created before stateClient start for endpoint exchange
+    let rdma_endpoints: Option<RdmaEndpointPair> = if settings.worker.channel == "rdma" {
         match create_rdma_queues().await {
             Ok(endpoint) => {
                 log::info!("RDMA queues created successfully");
-                Some(endpoint)
+                Some(RdmaEndpointPair {
+                    request_endpoint: Some(endpoint),
+                    response_endpoint: None, // get from controller
+                })
             }
             Err(e) => {
                 log::error!("Failed to create RDMA queues: {e}");
@@ -118,98 +123,78 @@ pub async fn worker_main() -> EKResult<()> {
         let control_endpoint = x::get_controller_addr();
         log::info!("control endpoint {:}", control_endpoint.uri());
         let mut state_client =
-            StateClient::new_with_rdma(control_endpoint, &worker_id, rdma_endpoint);
+            StateClient::new_with_rdma(control_endpoint, &worker_id, rdma_endpoints);
         if let Err(e) = state_client.run(cli_cancel).await {
             log::error!("state client error {e:}");
         }
     });
 
-    let node_name = x::get_worker_id();
+    // Spawn state inspector task (monitors loading progress)
+    let state_inspect = StateInspector::spawn();
 
-    // Choose queue type based on configuration
-    enum QueueType {
-        Shm {
-            recv_channel: Arc<Mutex<ShmQueue<'static, LocalShmWorkerReq>>>,
-            send_channel: Arc<Mutex<ShmQueue<'static, LocalShmWorkerResp>>>,
-        },
-        Rdma {
-            recv_channel: Arc<Mutex<RdmaQueue<RdmaWorkerReq>>>,
-            send_channel: Arc<Mutex<RdmaQueue<RdmaWorkerResp>>>,
-        },
-    }
-
-    let queue_type = if use_rdma {
-        let recv_channel = get_rdma_req_queue()
-            .ok_or_else(|| {
-                ek_base::error::EKError::NotFound("RDMA request queue not found".into())
-            })?
-            .clone();
-        let send_channel = get_rdma_resp_queue()
-            .ok_or_else(|| {
-                ek_base::error::EKError::NotFound("RDMA response queue not found".into())
-            })?
-            .clone();
-        QueueType::Rdma {
-            recv_channel,
-            send_channel,
-        }
-    } else {
-        let recv_channel = loop {
-            if let Some(channel) =
-                ShmQueue::<LocalShmWorkerReq>::open(&format!("ek-shmq-req-{}", node_name))
-            {
-                break Arc::new(Mutex::new(channel));
-            }
-        };
-        let send_channel = loop {
-            if let Some(channel) =
-                ShmQueue::<LocalShmWorkerResp>::open(&format!("ek-shmq-resp-{}", node_name))
-            {
-                break Arc::new(Mutex::new(channel));
-            }
-        };
-        QueueType::Shm {
-            recv_channel,
-            send_channel,
-        }
-    };
-    let mut srvs = Vec::new();
-    let thread_count: usize = env::var("EK_WORKER_THREADS")
-        .map(|v| v.parse().unwrap_or(1))
-        .unwrap_or(1);
-
+    let async_srv;
+    let mut sync_srvs = Vec::new();
     let poison = Arc::new(Mutex::new(false));
+    tch::set_num_threads(*WORKER_PARALLEL as _);
 
-    for _ in 0..thread_count {
-        let queue_type = match &queue_type {
-            QueueType::Shm {
-                recv_channel,
-                send_channel,
-            } => QueueType::Shm {
-                recv_channel: recv_channel.clone(),
-                send_channel: send_channel.clone(),
-            },
-            QueueType::Rdma {
-                recv_channel,
-                send_channel,
-            } => QueueType::Rdma {
-                recv_channel: recv_channel.clone(),
-                send_channel: send_channel.clone(),
-            },
-        };
-        let gate = EKInstanceGateSync::default();
-        let poison = poison.clone();
-        let srv = std::thread::spawn(move || {
-            'main: loop {
-                if *poison.lock().unwrap() {
-                    break 'main;
+    match settings.worker.channel.as_str() {
+        "grpc" => {
+            // Spawn gRPC server task (handles computation requests)
+            let srv = tokio::task::spawn(async move {
+                let server = BasicExpertImpl::new(); // Uses both sync and async gates
+                let settings = &get_ek_settings().worker;
+                let addr = format!("{}:{}", settings.listen, settings.ports.main)
+                    .parse()
+                    .unwrap();
+                log::info!("worker server listening on {addr}");
+
+                // Set up gRPC server with OpenTelemetry middleware
+                let layer = tower::ServiceBuilder::new()
+                    .layer_fn(OTelGrpcServerMiddleware::new)
+                    .into_inner();
+
+                let err = tonic::transport::Server::builder()
+                    .layer(layer)
+                    .add_service(
+                        ComputationServiceServer::new(server)
+                            .max_decoding_message_size(200 * 1024 * 1024)
+                            .max_encoding_message_size(200 * 1024 * 1024),
+                    )
+                    .serve(addr)
+                    .await;
+                if let Err(e) = err {
+                    log::error!("server error {e:?}");
                 }
+            });
+            async_srv = srv;
+        }
+        "shm" => {
+            let node_name = x::get_worker_id();
+            let recv_channel = loop {
+                if let Some(channel) =
+                    ShmQueue::<LocalShmWorkerReq>::open(&format!("ek-shmq-req-{}", node_name))
+                {
+                    break Arc::new(Mutex::new(channel));
+                }
+            };
+            let send_channel = loop {
+                if let Some(channel) =
+                    ShmQueue::<LocalShmWorkerResp>::open(&format!("ek-shmq-resp-{}", node_name))
+                {
+                    break Arc::new(Mutex::new(channel));
+                }
+            };
+            let thread_count: usize = env::var("EK_WORKER_THREADS")
+                .map(|v| v.parse().unwrap_or(1))
+                .unwrap_or(1);
 
-                match &queue_type {
-                    QueueType::Shm {
-                        recv_channel,
-                        send_channel,
-                    } => {
+            for _ in 0..thread_count {
+                let recv_channel = recv_channel.clone();
+                let send_channel = send_channel.clone();
+                let gate = EKInstanceGateSync::default();
+                let poison = poison.clone();
+                let srv = std::thread::spawn(move || {
+                    'main: loop {
                         let req = loop {
                             if *poison.lock().unwrap() {
                                 break 'main;
@@ -219,9 +204,8 @@ pub async fn worker_main() -> EKResult<()> {
                             }
                             std::thread::sleep(Duration::from_micros(100));
                         };
-
                         log::debug!(
-                            "received SHM request: id={} expert={}",
+                            "received request: id={} expert={}",
                             req.id(),
                             req.expert_id()
                         );
@@ -247,16 +231,47 @@ pub async fn worker_main() -> EKResult<()> {
                             std::thread::sleep(Duration::from_micros(100));
                         }
                         log::info!(
-                            "SHM request id={} expert={} processed in {}us",
+                            "request id={} expert={} processed in {}us",
                             req.id(),
                             req.expert_id(),
                             now.elapsed().as_micros(),
                         );
                     }
-                    QueueType::Rdma {
-                        recv_channel,
-                        send_channel,
-                    } => {
+                });
+                sync_srvs.push(srv);
+            }
+            let token = token.clone();
+            async_srv = tokio::spawn(async move {
+                select! {
+                    _ = token.cancelled() => {
+                        log::info!("async service cancelled");
+                    }
+                }
+            });
+        }
+        "rdma" => {
+            let recv_channel = get_rdma_req_queue()
+                .ok_or_else(|| {
+                    ek_base::error::EKError::NotFound("RDMA request queue not found".into())
+                })?
+                .clone();
+            let send_channel = get_rdma_resp_queue()
+                .ok_or_else(|| {
+                    ek_base::error::EKError::NotFound("RDMA response queue not found".into())
+                })?
+                .clone();
+
+            let thread_count: usize = env::var("EK_WORKER_THREADS")
+                .map(|v| v.parse().unwrap_or(1))
+                .unwrap_or(1);
+
+            for _ in 0..thread_count {
+                let recv_channel = recv_channel.clone();
+                let send_channel = send_channel.clone();
+                let gate = EKInstanceGateSync::default();
+                let poison = poison.clone();
+                let srv = std::thread::spawn(move || {
+                    'main: loop {
                         let req = loop {
                             if *poison.lock().unwrap() {
                                 break 'main;
@@ -303,19 +318,27 @@ pub async fn worker_main() -> EKResult<()> {
                             now.elapsed().as_micros(),
                         );
                     }
-                }
+                });
+                sync_srvs.push(srv);
             }
-        });
-        srvs.push(srv);
+            let token = token.clone();
+            async_srv = tokio::spawn(async move {
+                select! {
+                    _ = token.cancelled() => {
+                        log::info!("async service cancelled");
+                    }
+                }
+            });
+        }
+        _ => {
+            panic!("Unsupported worker channel: {}", settings.worker.channel);
+        }
     }
-
-    // Spawn state inspector task (monitors loading progress)
-    let state_inspect = StateInspector::spawn();
 
     // Wait for any task to complete or receive shutdown signal
     select! {
         _ = cli => { },
-        // _ = srv => { },
+        _ = async_srv => { },
         _ = state_inspect => { },
         _ = signal::ctrl_c() => {
             log::info!("ctrl-c signal received, shutting down");
@@ -323,7 +346,7 @@ pub async fn worker_main() -> EKResult<()> {
             token.clone().cancel();
             let(_,rx) = get_graceful_shutdown_ch();
             rx.lock().await.recv().await;
-            for srv in srvs {
+            for srv in sync_srvs {
                 srv.join().unwrap();
             }
             log::info!("graceful shutdown channel received, shutting down now");

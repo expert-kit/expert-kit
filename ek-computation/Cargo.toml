@@ -10,9 +10,9 @@ repository = { workspace = true }
 [dependencies]
 ek-base = { workspace = true }
 ek-db = { workspace = true }
+ek-ggml = { workspace = true }
 actix-web = { workspace = true }
 async-trait = { workspace = true }
-base64 = { workspace = true }
 clap = { workspace = true }
 diesel = { workspace = true }
 diesel-async = { workspace = true }
@@ -44,7 +44,6 @@ tower = { workspace = true }
 tracing = { workspace = true }
 tracing-opentelemetry = { workspace = true }
 bincode = "2.0.1"
-
 
 [build-dependencies]
 tonic-build = { workspace = true }

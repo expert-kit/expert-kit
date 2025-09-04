@@ -172,6 +172,12 @@ impl SafeTensorDB {
         let st = self.as_safetensor(&key)?;
         Ok(st)
     }
+
+    pub async fn remove(&self, desc: &ExpertKey) -> EKResult<()> {
+        let key = desc.as_object_key();
+        self.data.remove(&key);
+        Ok(())
+    }
 }
 
 #[cfg(test)]

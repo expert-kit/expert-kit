@@ -1,0 +1,3 @@
+[submodule "ek-ggml/ggml"]
+	path = ek-ggml/ggml
+	url = https://github.com/ggml-org/ggml.git

@@ -545,6 +545,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "bindgen"
+version = "0.72.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "993776b509cfb49c750f11b8f07a46fa23e0a1386ffc01fb1e7d343efc387895"
+dependencies = [
+ "bitflags",
+ "cexpr",
+ "clang-sys",
+ "itertools 0.13.0",
+ "log",
+ "prettyplease",
+ "proc-macro2",
+ "quote",
+ "regex",
+ "rustc-hash",
+ "shlex",
+ "syn",
+]
+
+[[package]]
 name = "bitflags"
 version = "2.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1412,7 +1432,6 @@ version = "0.1.0"
 dependencies = [
  "actix-web",
  "async-trait",
- "base64 0.22.1",
  "bincode 2.0.1",
  "clap",
  "criterion",
@@ -1420,6 +1439,7 @@ dependencies = [
  "diesel-async",
  "ek-base",
  "ek-db",
+ "ek-ggml",
  "env_logger",
  "half",
  "ibverbs",
@@ -1465,6 +1485,15 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+]
+
+[[package]]
+name = "ek-ggml"
+version = "0.1.0"
+dependencies = [
+ "bindgen 0.72.1",
+ "cmake",
+ "rand 0.9.2",
 ]
 
 [[package]]
@@ -2123,7 +2152,7 @@ name = "ibverbs-sys"
 version = "0.3.2+55.0"
 source = "git+https://github.com/jonhoo/rust-ibverbs?rev=fa92aa3878151eb7ac44496fb36caa9d0197da6d#fa92aa3878151eb7ac44496fb36caa9d0197da6d"
 dependencies = [
- "bindgen",
+ "bindgen 0.71.1",
  "cmake",
 ]
 

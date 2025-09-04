@@ -1,5 +1,6 @@
 use safetensors::tensor::TensorView;
 
+pub mod ggml;
 pub mod ort;
 pub mod torch;
 
@@ -14,7 +15,20 @@ pub enum DType {
     Float8e4m3fnuz,
 }
 
-#[derive(Clone, Copy, Debug)]
+impl DType {
+    pub fn size(&self) -> usize {
+        match self {
+            DType::Uint8 => 1,
+            DType::Int8 => 1,
+            DType::Int16 => 2,
+            DType::BFloat16 => 2,
+            DType::Float => 4,
+            DType::Float8e4m3fn | DType::Float8e4m3fnuz => 1, // Assuming these are packed formats
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Device {
     CPU,
     CUDA(usize),
@@ -45,7 +59,6 @@ impl From<&str> for Device {
 
 pub trait EkTensor: Sized {
     fn rand(shape: Vec<usize>, dtype: DType, dev: Device) -> Self;
-    fn stack(tensors: &[Self], dim: usize) -> Self;
     fn shape(&self) -> Vec<usize>;
     fn serialize(&self) -> Vec<u8>;
     fn from_raw(data: &[u8], shape: &[usize], dtype: DType) -> Self;

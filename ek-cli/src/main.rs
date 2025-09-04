@@ -1,4 +1,4 @@
-use std::{env, mem::transmute, path::PathBuf};
+use std::{env, mem::transmute, path::PathBuf, sync::LazyLock};
 mod db;
 mod doctor;
 mod model;
@@ -183,7 +183,13 @@ fn get_command_name(cmd: &Command) -> &'static str {
     }
 }
 
-const DEFAULT_THREAD_NUM: usize = 48;
+const DEFAULT_THREAD_NUM: usize = 6;
+static WORKER_THREAD_NUM: LazyLock<usize> = LazyLock::new(|| {
+    env::var("EK_WORKER_THREADS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1)
+});
 
 /// Init tokio runtime based on command
 fn init_tokio_runtime(command: &Command) -> Result<Runtime, std::io::Error> {
@@ -214,11 +220,9 @@ fn init_tokio_runtime(command: &Command) -> Result<Runtime, std::io::Error> {
 
             log::info!("Creating Tokio runtime with {worker_threads} worker threads");
 
-            // TODO: hardcoded threadnum for now, need to be improved later
-            // Create runtime with limited worker threads
             tokio::runtime::Builder::new_multi_thread()
                 .worker_threads(worker_threads)
-                .max_blocking_threads(64)
+                .max_blocking_threads(*WORKER_THREAD_NUM)
                 .enable_all()
                 .build()
         }

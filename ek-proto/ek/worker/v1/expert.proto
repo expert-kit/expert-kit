@@ -36,7 +36,7 @@ message RdmaEndpoint {
   bytes memory_region = 2;  // Serialized RemoteMemoryRegion
 }
 
-message RdmaEndpoints {
+message RdmaEndpointPair {
   RdmaEndpoint request_endpoint = 1;  // For request queue
   RdmaEndpoint response_endpoint = 2; // For response queue  
 }
@@ -47,13 +47,13 @@ message ExchangeReq {
   string channel = 3;
   string device = 4;
   bool last_will = 5;
-  RdmaEndpoints rdma_endpoints = 6;
+  RdmaEndpointPair rdma_endpoints = 6;
 }
 
 message ExchangeResp {
   message ExpertWithState { ek.object.v1.ExpertSlice target = 1; }
   ExpertWithState state = 1;
-  RdmaEndpoints rdma_endpoints = 2;
+  RdmaEndpointPair rdma_endpoints = 2;
 }
 
 service StateService {

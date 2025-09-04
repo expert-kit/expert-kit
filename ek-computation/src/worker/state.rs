@@ -35,7 +35,7 @@ pub struct StateClient {
     worker_id: String,
     gate_async: &'static EKInstanceGateAsync, // Use async gate for state management
     controller_addr: Endpoint,
-    rdma_endpoints: Option<crate::proto::ek::worker::v1::RdmaEndpoints>,
+    rdma_endpoints: Option<crate::proto::ek::worker::v1::RdmaEndpointPair>,
 }
 
 impl StateClient {
@@ -56,7 +56,7 @@ impl StateClient {
     pub fn new_with_rdma(
         addr: Endpoint,
         worker_id: &str,
-        rdma_endpoints: Option<crate::proto::ek::worker::v1::RdmaEndpoints>,
+        rdma_endpoints: Option<crate::proto::ek::worker::v1::RdmaEndpointPair>,
     ) -> Self {
         let edb = get_expert_db();
         let gate_async = get_instance_gate();
@@ -74,7 +74,7 @@ impl StateClient {
     /// Generate request stream for state exchange
     fn get_request_stream(
         worker_id: String,
-        rdma_endpoints: Option<crate::proto::ek::worker::v1::RdmaEndpoints>,
+        rdma_endpoints: Option<crate::proto::ek::worker::v1::RdmaEndpointPair>,
     ) -> impl Stream<Item = ExchangeReq> {
         let settings = get_ek_settings();
         tokio_stream::iter(1..usize::MAX).map(move |_| ExchangeReq {
@@ -86,7 +86,7 @@ impl StateClient {
             channel: if rdma_endpoints.is_some() {
                 "rdma".to_string()
             } else {
-                "grpc".to_string()
+                settings.worker.channel.clone()
             },
             device: settings.worker.device.clone(),
             last_will: false,
@@ -127,7 +127,7 @@ impl StateClient {
     /// Handle controller RDMA endpoints and establish bidirectional connection
     async fn handle_controller_rdma_endpoints(
         &mut self,
-        controller_endpoints: crate::proto::ek::worker::v1::RdmaEndpoints,
+        controller_endpoints: crate::proto::ek::worker::v1::RdmaEndpointPair,
     ) -> EKResult<()> {
         // Get RDMA queues from global storage
         let _req_queue = crate::worker::get_rdma_req_queue().ok_or_else(|| {

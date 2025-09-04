@@ -1,9 +1,5 @@
 use super::manager::{ExpertDB, ExpertDBSync, get_expert_db, get_expert_db_sync};
-use crate::{
-    backend::{EkTensor, torch::TchTensor},
-    controller::registry::ExpertIdRef,
-    proto::ek,
-};
+use crate::{controller::registry::ExpertIdRef, proto::ek};
 use core::fmt;
 use ek_base::error::EKResult;
 use std::sync::{Arc, OnceLock};
@@ -113,18 +109,9 @@ impl EKInstanceGateSync {
             now.elapsed()
         );
 
-        // Serialize output
-        let output_tensor = res.inner();
-        let size = output_tensor.size();
-        let kind = output_tensor.kind();
-        let output_bytes = TchTensor::from(output_tensor).serialize();
+        let output_bytes = res;
 
-        tracing::debug!(
-            "output shape={:?} dtype={:?} bytes_len={}",
-            size,
-            kind,
-            output_bytes.len()
-        );
+        tracing::debug!("output bytes_len={}", output_bytes.len());
 
         let resp = ek::worker::v1::ForwardResp {
             output_tensor: output_bytes,
@@ -148,7 +135,7 @@ impl EKInstanceGateSync {
         let st = safetensors::SafeTensors::deserialize(input_tensor)?;
         let tv = st.tensor("data")?;
         let res = exp.forward(&tv)?;
-        Ok(res.serialize())
+        Ok(res)
     }
 
     /// Get list of currently loaded experts (sync version)

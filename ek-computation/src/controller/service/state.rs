@@ -7,7 +7,7 @@ use crate::{
     },
     proto::ek::{
         object::v1::ExpertSlice,
-        worker::v1::{self, ExchangeResp, RdmaEndpoint, RdmaEndpoints},
+        worker::v1::{self, ExchangeResp, RdmaEndpoint, RdmaEndpointPair},
     },
     state::{
         models::NewNode,
@@ -15,7 +15,7 @@ use crate::{
         io::{StateReader, StateReaderImpl},
     },
 };
-use ek_base::config::{ExpertRegistryBackend, get_ek_settings};
+use ek_base::config::get_ek_settings;
 use tokio::{sync::mpsc, time::timeout};
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Response, Result, Status, Streaming};
@@ -115,6 +115,9 @@ impl StateService for StateServerImpl {
         &self,
         mut request: tonic::Request<Streaming<v1::ExchangeReq>>,
     ) -> Result<Response<Self::ExchangeStream>> {
+        let settings = get_ek_settings();
+        let worker_hostname = settings.worker.id.clone();
+
         let mut dispather_guard = DISPATCHER.lock().await;
         let (stream_tx, stream_rx) = mpsc::channel(4);
         let first_message = request
@@ -134,16 +137,12 @@ impl StateService for StateServerImpl {
         let mut rx = dispather_guard.subscribe(&first_message.id).await;
 
         // Handle outgoing messages to the worker: New Experts
-        let worker_hostname = first_message.id.clone();
         tokio::spawn(async move {
             let reader = StateReaderImpl::new();
             
             while let Some(t) = rx.recv().await {
                 // Check if we're using RDMA backend and should include controller endpoints
-                let rdma_endpoints = if matches!(
-                    get_ek_settings().controller.registry_backend,
-                    ExpertRegistryBackend::Rdma
-                ) {
+                let rdma_endpoints = if settings.worker.channel == "rdma" {
                     // Fetch real controller endpoints from database
                     match reader.node_by_hostname(&worker_hostname).await {
                         Ok(Some(node)) => {
@@ -174,7 +173,7 @@ impl StateService for StateServerImpl {
                             } else { None };
 
                             if req_endpoint.is_some() || resp_endpoint.is_some() {
-                                Some(RdmaEndpoints {
+                                Some(RdmaEndpointPair {
                                     request_endpoint: req_endpoint,
                                     response_endpoint: resp_endpoint,
                                 })
