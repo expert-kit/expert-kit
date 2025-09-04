@@ -35,7 +35,7 @@ pub struct StateClient {
     worker_id: String,
     gate_async: &'static EKInstanceGateAsync, // Use async gate for state management
     controller_addr: Endpoint,
-    rdma_endpoint: Option<crate::proto::ek::worker::v1::RdmaEndpoint>,
+    rdma_endpoints: Option<crate::proto::ek::worker::v1::RdmaEndpoints>,
 }
 
 impl StateClient {
@@ -49,14 +49,14 @@ impl StateClient {
             worker_id: worker_id.to_owned(),
             gate_async,
             controller_addr: addr,
-            rdma_endpoint: None,
+            rdma_endpoints: None,
         }
     }
 
     pub fn new_with_rdma(
         addr: Endpoint,
         worker_id: &str,
-        rdma_endpoint: Option<crate::proto::ek::worker::v1::RdmaEndpoint>,
+        rdma_endpoints: Option<crate::proto::ek::worker::v1::RdmaEndpoints>,
     ) -> Self {
         let edb = get_expert_db();
         let gate_async = get_instance_gate();
@@ -67,14 +67,14 @@ impl StateClient {
             worker_id: worker_id.to_owned(),
             gate_async,
             controller_addr: addr,
-            rdma_endpoint,
+            rdma_endpoints,
         }
     }
 
     /// Generate request stream for state exchange
     fn get_request_stream(
         worker_id: String,
-        rdma_endpoint: Option<crate::proto::ek::worker::v1::RdmaEndpoint>,
+        rdma_endpoints: Option<crate::proto::ek::worker::v1::RdmaEndpoints>,
     ) -> impl Stream<Item = ExchangeReq> {
         let settings = get_ek_settings();
         tokio_stream::iter(1..usize::MAX).map(move |_| ExchangeReq {
@@ -83,14 +83,14 @@ impl StateClient {
                 "http://{}:{}",
                 settings.worker.broadcast, settings.worker.ports.main
             ),
-            channel: if rdma_endpoint.is_some() {
+            channel: if rdma_endpoints.is_some() {
                 "rdma".to_string()
             } else {
                 "grpc".to_string()
             },
             device: settings.worker.device.clone(),
             last_will: false,
-            rdma_endpoint: rdma_endpoint.clone(),
+            rdma_endpoints: rdma_endpoints.clone(),
         })
     }
 
@@ -110,11 +110,11 @@ impl StateClient {
                 }
             }
 
-            // Handle controller RDMA endpoint for bidirectional connection
-            if let Some(controller_rdma_endpoint) = msg.rdma_endpoint {
-                log::info!("Received controller RDMA endpoint, establishing connection...");
+            // Handle controller RDMA endpoints for bidirectional connection
+            if let Some(controller_rdma_endpoints) = msg.rdma_endpoints {
+                log::info!("Received controller RDMA endpoints, establishing connection...");
                 if let Err(e) = self
-                    .handle_controller_rdma_endpoint(controller_rdma_endpoint)
+                    .handle_controller_rdma_endpoints(controller_rdma_endpoints)
                     .await
                 {
                     log::error!("Failed to establish RDMA connection with controller: {e:?}");
@@ -124,10 +124,10 @@ impl StateClient {
         Ok(())
     }
 
-    /// Handle controller RDMA endpoint and establish bidirectional connection
-    async fn handle_controller_rdma_endpoint(
+    /// Handle controller RDMA endpoints and establish bidirectional connection
+    async fn handle_controller_rdma_endpoints(
         &mut self,
-        controller_endpoint: crate::proto::ek::worker::v1::RdmaEndpoint,
+        controller_endpoints: crate::proto::ek::worker::v1::RdmaEndpoints,
     ) -> EKResult<()> {
         // Get RDMA queues from global storage
         let _req_queue = crate::worker::get_rdma_req_queue().ok_or_else(|| {
@@ -137,22 +137,26 @@ impl StateClient {
             ek_base::error::EKError::NotFound("Worker RDMA response queue not found".into())
         })?;
 
-        // Deserialize controller endpoint information
+        // Extract controller's response endpoint (where worker should send responses)
+        let controller_resp_endpoint = controller_endpoints.response_endpoint.ok_or_else(|| {
+            ek_base::error::EKError::InvalidInput("Missing controller response endpoint".into())
+        })?;
+
         log::info!("Establishing RDMA connection with controller");
         log::debug!(
-            "Controller QP endpoint size: {} bytes",
-            controller_endpoint.qp_endpoint.len()
+            "Controller response QP endpoint size: {} bytes",
+            controller_resp_endpoint.qp_endpoint.len()
         );
         log::debug!(
-            "Controller memory region size: {} bytes",
-            controller_endpoint.memory_region.len()
+            "Controller response memory region size: {} bytes",
+            controller_resp_endpoint.memory_region.len()
         );
 
-        // Deserialize controller endpoint JSON data
-        let qp_json = String::from_utf8(controller_endpoint.qp_endpoint).map_err(|e| {
+        // Deserialize controller response endpoint JSON data
+        let qp_json = String::from_utf8(controller_resp_endpoint.qp_endpoint).map_err(|e| {
             ek_base::error::EKError::InvalidInput(format!("Invalid QP endpoint JSON: {e}"))
         })?;
-        let memory_json = String::from_utf8(controller_endpoint.memory_region).map_err(|e| {
+        let memory_json = String::from_utf8(controller_resp_endpoint.memory_region).map_err(|e| {
             ek_base::error::EKError::InvalidInput(format!("Invalid memory region JSON: {e}"))
         })?;
 
@@ -174,21 +178,8 @@ impl StateClient {
         log::debug!("Controller QP endpoint: {:?}", controller_qp_endpoint);
         log::debug!("Controller memory region: {:?}", controller_memory_region);
 
-        // Establish RDMA connections on both queues
-        {
-            let mut req_queue_lock = _req_queue.lock().unwrap();
-            if let Err(e) = req_queue_lock.connect(
-                controller_qp_endpoint.clone(),
-                controller_memory_region.clone(),
-            ) {
-                log::error!("Failed to connect worker request queue to controller: {e}");
-                return Err(ek_base::error::EKError::IoError(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    format!("RDMA request queue connection failed: {e}"),
-                )));
-            }
-            log::info!("Worker request queue connected to controller successfully");
-        }
+        // NOTE: Worker's request queue will be connected TO by the controller
+        // The controller connects its request queue to this worker's request queue endpoint
 
         {
             let mut resp_queue_lock = _resp_queue.lock().unwrap();
@@ -212,7 +203,7 @@ impl StateClient {
     async fn run_inner(&mut self, token: CancellationToken) -> EKResult<()> {
         let mut cli = StateServiceClient::connect(self.controller_addr.clone()).await?;
         let req_stream =
-            Self::get_request_stream(self.worker_id.clone(), self.rdma_endpoint.clone())
+            Self::get_request_stream(self.worker_id.clone(), self.rdma_endpoints.clone())
                 .throttle(std::time::Duration::from_secs(3));
         let res = cli.exchange(req_stream).await?;
         let mut stream = res.into_inner();

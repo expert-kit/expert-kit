@@ -383,12 +383,24 @@ impl RdmaBytes for RdmaWorkerReq {
         std::mem::size_of::<usize>() + 64 + std::mem::size_of::<usize>() + MAX_TENSOR_SIZE;
 
     fn as_bytes(&self) -> impl Iterator<Item = u8> + '_ {
-        self.id
-            .to_le_bytes()
-            .into_iter()
-            .chain(self.expert_id)
-            .chain(self.input_tensor.len().to_le_bytes())
-            .chain(self.input_tensor.clone())
+        let mut result = Vec::with_capacity(Self::SIZE);
+
+        // Add id (8 bytes)
+        result.extend_from_slice(&self.id.to_le_bytes());
+
+        // Add expert_id (64 bytes)
+        result.extend_from_slice(&self.expert_id);
+
+        // Add input_tensor length (8 bytes)
+        result.extend_from_slice(&self.input_tensor.len().to_le_bytes());
+
+        // Add input_tensor data
+        result.extend_from_slice(&self.input_tensor);
+
+        // Pad to exact SIZE with zeros
+        result.resize(Self::SIZE, 0);
+
+        result.into_iter()
     }
 
     fn from_bytes(bytes: &[u8]) -> Self {
@@ -441,11 +453,21 @@ impl RdmaBytes for RdmaWorkerResp {
         std::mem::size_of::<usize>() + std::mem::size_of::<usize>() + MAX_TENSOR_SIZE;
 
     fn as_bytes(&self) -> impl Iterator<Item = u8> + '_ {
-        self.id
-            .to_le_bytes()
-            .into_iter()
-            .chain(self.output_tensor.len().to_le_bytes())
-            .chain(self.output_tensor.clone())
+        let mut result = Vec::with_capacity(Self::SIZE);
+
+        // Add id (8 bytes)
+        result.extend_from_slice(&self.id.to_le_bytes());
+
+        // Add output_tensor length (8 bytes)
+        result.extend_from_slice(&self.output_tensor.len().to_le_bytes());
+
+        // Add output_tensor data
+        result.extend_from_slice(&self.output_tensor);
+
+        // Pad to exact SIZE with zeros
+        result.resize(Self::SIZE, 0);
+
+        result.into_iter()
     }
 
     fn from_bytes(bytes: &[u8]) -> Self {
@@ -668,24 +690,6 @@ impl RdmaExpertRegistry {
                 );
             }
 
-            {
-                let mut resp_queue = connection.resp_queue.lock().await;
-                if let Err(e) = resp_queue.connect(worker_qp_endpoint, worker_memory_region) {
-                    log::error!(
-                        "Failed to connect controller response queue to worker {}: {e}",
-                        hostname
-                    );
-                    return Err(EKError::IoError(std::io::Error::new(
-                        std::io::ErrorKind::Other,
-                        format!("Controller response queue connection failed: {e}"),
-                    )));
-                }
-                log::info!(
-                    "Controller response queue connected to worker {} successfully",
-                    hostname
-                );
-            }
-
             // Mark connection as established
             connection.connected = true;
             log::info!(
@@ -719,14 +723,15 @@ impl ExpertRegistry for RdmaExpertRegistry {
                     node.hostname
                 );
 
-                let rdma_endpoint = node.config.get("worker_rdma_endpoint");
-                if rdma_endpoint.is_none() {
-                    log::warn!("No RDMA endpoint found for node {}", node.hostname);
+                let worker_rdma_req_endpoint = node.config.get("worker_rdma_request_endpoint");
+                let worker_rdma_resp_endpoint = node.config.get("worker_rdma_response_endpoint");
+                if worker_rdma_req_endpoint.is_none() {
+                    log::warn!("No worker RDMA request endpoint found for node {}", node.hostname);
                     continue;
                 }
 
-                // Extract RDMA endpoint info from database
-                let rdma_endpoint_info = rdma_endpoint.unwrap();
+                // Extract worker's request endpoint info from database (where controller sends requests)
+                let worker_req_endpoint_info = worker_rdma_req_endpoint.unwrap();
 
                 // Check if we already have a connection for this node
                 let needs_new_connection = !self.all_connections.contains_key(&node.hostname);
@@ -746,7 +751,7 @@ impl ExpertRegistry for RdmaExpertRegistry {
                     let controller_resp_endpoint = resp_queue
                         .endpoint()
                         .expect("Failed to get controller response endpoint");
-                    let _controller_resp_memory = resp_queue.memory_region();
+                    let controller_resp_memory = resp_queue.memory_region();
 
                     // Serialize controller endpoint info for sending back to worker
                     let controller_endpoint_data = serde_json::to_vec(&(
@@ -755,14 +760,22 @@ impl ExpertRegistry for RdmaExpertRegistry {
                     ))
                     .expect("Failed to serialize controller endpoints");
 
-                    // Store controller endpoint in database (serialize as JSON)
-                    let controller_qp_json = serde_json::to_string(&controller_req_endpoint)
+                    // Store controller RESPONSE endpoint in database (for worker to send responses to)
+                    let controller_qp_json = serde_json::to_string(&controller_resp_endpoint)
                         .expect("Failed to serialize controller QP endpoint");
-                    let controller_memory_json = serde_json::to_string(&controller_req_memory)
+                    let controller_memory_json = serde_json::to_string(&controller_resp_memory)
                         .expect("Failed to serialize controller memory region");
 
                     let mut updated_config = node.config.clone();
-                    updated_config["controller_rdma_endpoint"] = serde_json::json!({
+                    
+                    // Store controller's request endpoint (for worker to connect its request queue to)
+                    updated_config["controller_rdma_request_endpoint"] = serde_json::json!({
+                        "qp_endpoint": serde_json::to_string(&controller_req_endpoint).unwrap(),
+                        "memory_region": serde_json::to_string(&controller_req_memory).unwrap(),
+                    });
+                    
+                    // Store controller's response endpoint (for worker to connect its response queue to)
+                    updated_config["controller_rdma_response_endpoint"] = serde_json::json!({
                         "qp_endpoint": controller_qp_json,
                         "memory_region": controller_memory_json,
                     });
@@ -793,7 +806,7 @@ impl ExpertRegistry for RdmaExpertRegistry {
 
                 // Attempt to establish RDMA connection if worker endpoint is available
                 if let Err(e) = self
-                    .connect_to_worker(&node.hostname, rdma_endpoint_info)
+                    .connect_to_worker(&node.hostname, worker_req_endpoint_info)
                     .await
                 {
                     log::error!(

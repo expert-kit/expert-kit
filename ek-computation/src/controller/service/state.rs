@@ -7,7 +7,7 @@ use crate::{
     },
     proto::ek::{
         object::v1::ExpertSlice,
-        worker::v1::{self, ExchangeResp, RdmaEndpoint},
+        worker::v1::{self, ExchangeResp, RdmaEndpoint, RdmaEndpoints},
     },
     state::{
         models::NewNode,
@@ -37,17 +37,32 @@ impl StateServerImpl {
                         "channel": msg.channel.clone(),
                     });
 
-                    if let Some(rdma_endpoint) = &msg.rdma_endpoint {
-                        // Worker endpoint data is now JSON strings in bytes format
-                        let qp_json = String::from_utf8(rdma_endpoint.qp_endpoint.clone())
-                            .unwrap_or_else(|_| "invalid_qp_data".to_string());
-                        let memory_json = String::from_utf8(rdma_endpoint.memory_region.clone())
-                            .unwrap_or_else(|_| "invalid_memory_data".to_string());
-                        
-                        config["worker_rdma_endpoint"] = serde_json::json!({
-                            "qp_endpoint": qp_json,
-                            "memory_region": memory_json,
-                        });
+                    if let Some(rdma_endpoints) = &msg.rdma_endpoints {
+                        // Extract worker's request endpoint (where controller sends requests)
+                        if let Some(worker_req_endpoint) = &rdma_endpoints.request_endpoint {
+                            let req_qp_json = String::from_utf8(worker_req_endpoint.qp_endpoint.clone())
+                                .unwrap_or_else(|_| "invalid_req_qp_data".to_string());
+                            let req_memory_json = String::from_utf8(worker_req_endpoint.memory_region.clone())
+                                .unwrap_or_else(|_| "invalid_req_memory_data".to_string());
+                            
+                            config["worker_rdma_request_endpoint"] = serde_json::json!({
+                                "qp_endpoint": req_qp_json,
+                                "memory_region": req_memory_json,
+                            });
+                        }
+
+                        // Extract worker's response endpoint (where worker sends responses)
+                        if let Some(worker_resp_endpoint) = &rdma_endpoints.response_endpoint {
+                            let resp_qp_json = String::from_utf8(worker_resp_endpoint.qp_endpoint.clone())
+                                .unwrap_or_else(|_| "invalid_resp_qp_data".to_string());
+                            let resp_memory_json = String::from_utf8(worker_resp_endpoint.memory_region.clone())
+                                .unwrap_or_else(|_| "invalid_resp_memory_data".to_string());
+                            
+                            config["worker_rdma_response_endpoint"] = serde_json::json!({
+                                "qp_endpoint": resp_qp_json,
+                                "memory_region": resp_memory_json,
+                            });
+                        }
                     }
 
                     let err = w
@@ -124,31 +139,47 @@ impl StateService for StateServerImpl {
             let reader = StateReaderImpl::new();
             
             while let Some(t) = rx.recv().await {
-                // Check if we're using RDMA backend and should include controller endpoint
-                let rdma_endpoint = if matches!(
+                // Check if we're using RDMA backend and should include controller endpoints
+                let rdma_endpoints = if matches!(
                     get_ek_settings().controller.registry_backend,
                     ExpertRegistryBackend::Rdma
                 ) {
-                    // Fetch real controller endpoint from database
+                    // Fetch real controller endpoints from database
                     match reader.node_by_hostname(&worker_hostname).await {
                         Ok(Some(node)) => {
-                            if let Some(controller_endpoint_data) = node.config.get("controller_rdma_endpoint") {
-                                // Extract controller endpoint JSON from database
+                            // Extract controller request endpoint data
+                            let req_endpoint = if let Some(controller_req_data) = node.config.get("controller_rdma_request_endpoint") {
                                 if let (Some(qp_json), Some(memory_json)) = (
-                                    controller_endpoint_data.get("qp_endpoint").and_then(|v| v.as_str()),
-                                    controller_endpoint_data.get("memory_region").and_then(|v| v.as_str())
+                                    controller_req_data.get("qp_endpoint").and_then(|v| v.as_str()),
+                                    controller_req_data.get("memory_region").and_then(|v| v.as_str())
                                 ) {
-                                    // Convert JSON strings to bytes for protobuf transport
                                     Some(RdmaEndpoint {
                                         qp_endpoint: qp_json.as_bytes().to_vec(),
                                         memory_region: memory_json.as_bytes().to_vec(),
                                     })
-                                } else {
-                                    log::warn!("Failed to extract controller RDMA endpoint JSON for worker {}", worker_hostname);
-                                    None
-                                }
+                                } else { None }
+                            } else { None };
+
+                            // Extract controller response endpoint data
+                            let resp_endpoint = if let Some(controller_resp_data) = node.config.get("controller_rdma_response_endpoint") {
+                                if let (Some(qp_json), Some(memory_json)) = (
+                                    controller_resp_data.get("qp_endpoint").and_then(|v| v.as_str()),
+                                    controller_resp_data.get("memory_region").and_then(|v| v.as_str())
+                                ) {
+                                    Some(RdmaEndpoint {
+                                        qp_endpoint: qp_json.as_bytes().to_vec(),
+                                        memory_region: memory_json.as_bytes().to_vec(),
+                                    })
+                                } else { None }
+                            } else { None };
+
+                            if req_endpoint.is_some() || resp_endpoint.is_some() {
+                                Some(RdmaEndpoints {
+                                    request_endpoint: req_endpoint,
+                                    response_endpoint: resp_endpoint,
+                                })
                             } else {
-                                log::debug!("No controller RDMA endpoint found for worker {}", worker_hostname);
+                                log::debug!("No controller RDMA endpoints found for worker {}", worker_hostname);
                                 None
                             }
                         }
@@ -169,7 +200,7 @@ impl StateService for StateServerImpl {
                     state: Some(v1::exchange_resp::ExpertWithState {
                         target: Some(ExpertSlice::from(t)),
                     }),
-                    rdma_endpoint: rdma_endpoint.clone(),
+                    rdma_endpoints: rdma_endpoints.clone(),
                 };
                 if let Err(e) = stream_tx.send(Ok(resp)).await {
                     log::error!("stream error: {e}")
