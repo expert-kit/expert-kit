@@ -243,7 +243,10 @@ impl StateWriterImpl {
         // Set last seen to zero time
         diesel::update(schema::node::table)
             .filter(dsl::hostname.eq(hostname))
-            .set((dsl::last_seen_at.eq(std::time::SystemTime::UNIX_EPOCH),))
+            .set((
+                dsl::last_seen_at.eq(std::time::SystemTime::UNIX_EPOCH),
+                dsl::config.eq(serde_json::json!({})),
+            ))
             .execute(&mut conn)
             .await?;
         Ok(())
@@ -279,6 +282,17 @@ impl StateWriterImpl {
             res.push(new_expert);
         }
         Ok(res)
+    }
+
+    pub async fn clear_node_config_by_hostname(&self, hostname: &str) -> EKResult<()> {
+        let mut conn = POOL.get().await?;
+        use schema::node::dsl;
+        diesel::update(schema::node::table)
+            .filter(dsl::hostname.eq(hostname))
+            .set(dsl::config.eq(serde_json::json!({})))
+            .execute(&mut conn)
+            .await?;
+        Ok(())
     }
 }
 pub fn get_state_writer() -> Arc<RwLock<dyn StateWriter + Send + Sync>> {

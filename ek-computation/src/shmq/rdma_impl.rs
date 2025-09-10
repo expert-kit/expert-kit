@@ -113,6 +113,11 @@ fn offset_of_tail() -> usize {
 }
 
 impl<T: RdmaBytes> RdmaQueue<T> {
+    /// Check if the queue is connected to a remote peer
+    pub fn is_connected(&self) -> bool {
+        self.remote_region.is_some() && self.qp.is_some()
+    }
+
     pub fn new(device_index: Option<usize>, capacity: usize, is_sender: bool) -> io::Result<Self> {
         // Get RDMA devices
         let devices = devices()?;
@@ -209,7 +214,6 @@ impl<T: RdmaBytes> RdmaQueue<T> {
     ) -> io::Result<()> {
         // Store remote memory region
         self.remote_region = Some(remote_region);
-        log::info!("🚀endpoints: {:?}", remote_endpoint);
 
         // Complete the QP handshake
         if let Some(prepared_qp) = self.prepared_qp.take() {

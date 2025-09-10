@@ -1,6 +1,9 @@
 mod core;
 
-use std::sync::{Arc, LazyLock, Mutex, OnceLock};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    {Arc, LazyLock, Mutex, OnceLock},
+};
 use std::time;
 use std::time::Duration;
 use std::{env, panic};
@@ -10,7 +13,6 @@ use state::StateInspector;
 use tokio::select;
 use tokio::signal;
 use tokio_util::sync::CancellationToken;
-
 mod manager;
 pub mod server;
 pub mod state;
@@ -31,6 +33,7 @@ use ek_base::{config::get_ek_settings, error::EKResult};
 // Global storage for RDMA queues
 static RDMA_REQ_QUEUE: OnceLock<Arc<Mutex<RdmaQueue<RdmaWorkerReq>>>> = OnceLock::new();
 static RDMA_RESP_QUEUE: OnceLock<Arc<Mutex<RdmaQueue<RdmaWorkerResp>>>> = OnceLock::new();
+static RDMA_CONNECTION_STATUS: AtomicBool = AtomicBool::new(false);
 
 /// Get the global RDMA request queue
 pub fn get_rdma_req_queue() -> Option<&'static Arc<Mutex<RdmaQueue<RdmaWorkerReq>>>> {
@@ -42,15 +45,25 @@ pub fn get_rdma_resp_queue() -> Option<&'static Arc<Mutex<RdmaQueue<RdmaWorkerRe
     RDMA_RESP_QUEUE.get()
 }
 
+/// Get the global RDMA connection status
+pub fn is_rdma_queue_connected() -> bool {
+    RDMA_CONNECTION_STATUS.load(Ordering::Relaxed)
+}
+
+pub fn update_rdma_connection_status(connected: bool) {
+    RDMA_CONNECTION_STATUS.store(connected, Ordering::Relaxed);
+}
+
 /// Create RDMA queues and return endpoint information
-async fn create_rdma_queues() -> EKResult<RdmaEndpoint> {
-    let req_queue = RdmaQueue::<RdmaWorkerReq>::new(None, 128, true)?;
-    let resp_queue = RdmaQueue::<RdmaWorkerResp>::new(None, 128, false)?;
+async fn create_rdma_queues() -> EKResult<RdmaEndpointPair> {
+    // Worker receives requests (sender=false) and sends responses (sender=true)
+    let req_queue = RdmaQueue::<RdmaWorkerReq>::new(None, 256, false)?;
+    let resp_queue = RdmaQueue::<RdmaWorkerResp>::new(None, 256, true)?;
 
     let req_endpoint = req_queue.endpoint()?;
     let req_memory = req_queue.memory_region();
-    let _resp_endpoint = resp_queue.endpoint()?;
-    let _resp_memory = resp_queue.memory_region();
+    let resp_endpoint = resp_queue.endpoint()?;
+    let resp_memory = resp_queue.memory_region();
 
     // Store the queues globally
     RDMA_REQ_QUEUE
@@ -65,17 +78,31 @@ async fn create_rdma_queues() -> EKResult<RdmaEndpoint> {
         })?;
 
     // Serialize endpoint and memory region data as JSON strings
-    let qp_endpoint_json = serde_json::to_string(&req_endpoint).map_err(|e| {
+    let req_endpoint_json = serde_json::to_string(&req_endpoint).map_err(|e| {
         ek_base::error::EKError::InvalidInput(format!("Failed to serialize QP endpoint: {e}"))
     })?;
 
-    let memory_region_json = serde_json::to_string(&req_memory).map_err(|e| {
+    let req_memory_json = serde_json::to_string(&req_memory).map_err(|e| {
         ek_base::error::EKError::InvalidInput(format!("Failed to serialize memory region: {e}"))
     })?;
 
-    Ok(RdmaEndpoint {
-        qp_endpoint: qp_endpoint_json.into_bytes(),
-        memory_region: memory_region_json.into_bytes(),
+    let resp_endpoint_json = serde_json::to_string(&resp_endpoint).map_err(|e| {
+        ek_base::error::EKError::InvalidInput(format!("Failed to serialize QP endpoint: {e}"))
+    })?;
+
+    let resp_memory_json = serde_json::to_string(&resp_memory).map_err(|e| {
+        ek_base::error::EKError::InvalidInput(format!("Failed to serialize memory region: {e}"))
+    })?;
+
+    Ok(RdmaEndpointPair {
+        request_endpoint: Some(RdmaEndpoint {
+            qp_endpoint: req_endpoint_json,
+            memory_region: req_memory_json,
+        }),
+        response_endpoint: Some(RdmaEndpoint {
+            qp_endpoint: resp_endpoint_json,
+            memory_region: resp_memory_json,
+        }),
     })
 }
 use crate::proto::ek::worker::v1::computation_service_server::ComputationServiceServer;
@@ -100,12 +127,9 @@ pub async fn worker_main() -> EKResult<()> {
     // Note: Channel should be created before stateClient start for endpoint exchange
     let rdma_endpoints: Option<RdmaEndpointPair> = if settings.worker.channel == "rdma" {
         match create_rdma_queues().await {
-            Ok(endpoint) => {
+            Ok(endpoint_pair) => {
                 log::info!("RDMA queues created successfully");
-                Some(RdmaEndpointPair {
-                    request_endpoint: Some(endpoint),
-                    response_endpoint: None, // get from controller
-                })
+                Some(endpoint_pair)
             }
             Err(e) => {
                 log::error!("Failed to create RDMA queues: {e}");
@@ -275,6 +299,9 @@ pub async fn worker_main() -> EKResult<()> {
                         let req = loop {
                             if *poison.lock().unwrap() {
                                 break 'main;
+                            }
+                            if !is_rdma_queue_connected() {
+                                std::thread::sleep(Duration::from_secs(2));
                             }
                             match recv_channel.lock().unwrap().recv() {
                                 Ok(req) => break req,

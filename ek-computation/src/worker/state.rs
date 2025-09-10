@@ -27,6 +27,7 @@ use super::{
     core::get_instance_gate,
     manager::{ExpertDB, get_expert_db},
     x::{self},
+    {is_rdma_queue_connected, update_rdma_connection_status},
 };
 
 pub struct StateClient {
@@ -109,15 +110,18 @@ impl StateClient {
                     }
                 }
             }
-
             // Handle controller RDMA endpoints for bidirectional connection
             if let Some(controller_rdma_endpoints) = msg.rdma_endpoints {
-                log::info!("Received controller RDMA endpoints, establishing connection...");
-                if let Err(e) = self
-                    .handle_controller_rdma_endpoints(controller_rdma_endpoints)
-                    .await
-                {
-                    log::error!("Failed to establish RDMA connection with controller: {e:?}");
+                if is_rdma_queue_connected() {
+                    log::debug!("Rdma connection already established, skip connect logic")
+                } else {
+                    log::info!("Received controller RDMA endpoints, establishing connection...");
+                    if let Err(e) = self
+                        .handle_controller_rdma_endpoints(controller_rdma_endpoints)
+                        .await
+                    {
+                        log::error!("Failed to establish RDMA connection with controller: {e:?}");
+                    }
                 }
             }
         }
@@ -137,65 +141,104 @@ impl StateClient {
             ek_base::error::EKError::NotFound("Worker RDMA response queue not found".into())
         })?;
 
-        // Extract controller's response endpoint (where worker should send responses)
+        // Extract controller endpoints
+        let controller_req_endpoint = controller_endpoints.request_endpoint.ok_or_else(|| {
+            ek_base::error::EKError::InvalidInput("Missing controller request endpoint".into())
+        })?;
+
         let controller_resp_endpoint = controller_endpoints.response_endpoint.ok_or_else(|| {
             ek_base::error::EKError::InvalidInput("Missing controller response endpoint".into())
         })?;
 
-        log::info!("Establishing RDMA connection with controller");
-        log::debug!(
-            "Controller response QP endpoint size: {} bytes",
-            controller_resp_endpoint.qp_endpoint.len()
-        );
-        log::debug!(
-            "Controller response memory region size: {} bytes",
-            controller_resp_endpoint.memory_region.len()
-        );
-
-        // Deserialize controller response endpoint JSON data
-        let qp_json = String::from_utf8(controller_resp_endpoint.qp_endpoint).map_err(|e| {
-            ek_base::error::EKError::InvalidInput(format!("Invalid QP endpoint JSON: {e}"))
-        })?;
-        let memory_json = String::from_utf8(controller_resp_endpoint.memory_region).map_err(|e| {
-            ek_base::error::EKError::InvalidInput(format!("Invalid memory region JSON: {e}"))
-        })?;
-
-        let controller_qp_endpoint: ibverbs::QueuePairEndpoint = serde_json::from_str(&qp_json)
-            .map_err(|e| {
+        // Deserialize controller request endpoint (where worker receives requests)
+        let controller_req_qp_endpoint: ibverbs::QueuePairEndpoint =
+            serde_json::from_str(&controller_req_endpoint.qp_endpoint).map_err(|e| {
                 ek_base::error::EKError::InvalidInput(format!(
-                    "Failed to deserialize controller QP endpoint: {e}"
+                    "Failed to deserialize controller request QP endpoint: {e}"
                 ))
             })?;
 
-        let controller_memory_region: ibverbs::RemoteMemoryRegion =
-            serde_json::from_str(&memory_json).map_err(|e| {
+        let controller_req_memory_region: ibverbs::RemoteMemoryRegion =
+            serde_json::from_str(&controller_req_endpoint.memory_region).map_err(|e| {
                 ek_base::error::EKError::InvalidInput(format!(
-                    "Failed to deserialize controller memory region: {e}"
+                    "Failed to deserialize controller request memory region: {e}"
+                ))
+            })?;
+
+        // Deserialize controller response endpoint (where worker sends responses)
+        let controller_resp_qp_endpoint: ibverbs::QueuePairEndpoint =
+            serde_json::from_str(&controller_resp_endpoint.qp_endpoint).map_err(|e| {
+                ek_base::error::EKError::InvalidInput(format!(
+                    "Failed to deserialize controller response QP endpoint: {e}"
+                ))
+            })?;
+
+        let controller_resp_memory_region: ibverbs::RemoteMemoryRegion =
+            serde_json::from_str(&controller_resp_endpoint.memory_region).map_err(|e| {
+                ek_base::error::EKError::InvalidInput(format!(
+                    "Failed to deserialize controller response memory region: {e}"
                 ))
             })?;
 
         log::info!("Establishing RDMA connection with controller");
-        log::debug!("Controller QP endpoint: {:?}", controller_qp_endpoint);
-        log::debug!("Controller memory region: {:?}", controller_memory_region);
+        log::info!(
+            "Controller request QP endpoint: {:?}",
+            controller_req_qp_endpoint
+        );
+        log::info!(
+            "Controller request memory region: {:?}",
+            controller_req_memory_region
+        );
+        log::info!(
+            "Controller response QP endpoint: {:?}",
+            controller_resp_qp_endpoint
+        );
+        log::info!(
+            "Controller response memory region: {:?}",
+            controller_resp_memory_region
+        );
 
-        // NOTE: Worker's request queue will be connected TO by the controller
-        // The controller connects its request queue to this worker's request queue endpoint
-
+        // Connect worker's request queue to controller's request queue (for receiving requests)
         {
-            let mut resp_queue_lock = _resp_queue.lock().unwrap();
-            if let Err(e) =
-                resp_queue_lock.connect(controller_qp_endpoint, controller_memory_region)
-            {
-                log::error!("Failed to connect worker response queue to controller: {e}");
-                return Err(ek_base::error::EKError::IoError(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    format!("RDMA response queue connection failed: {e}"),
-                )));
+            let mut req_queue_lock = _req_queue.lock().unwrap();
+            if req_queue_lock.is_connected() {
+                log::info!("Worker request queue already connected to controller, skipping");
+            } else {
+                if let Err(e) = req_queue_lock.connect(
+                    controller_req_qp_endpoint.clone(),
+                    controller_req_memory_region.clone(),
+                ) {
+                    log::error!("Failed to connect worker request queue to controller: {e}");
+                    return Err(ek_base::error::EKError::IoError(std::io::Error::new(
+                        std::io::ErrorKind::Other,
+                        format!("RDMA request queue connection failed: {e}"),
+                    )));
+                }
+                log::info!("🚀Worker request queue connected to controller successfully");
             }
-            log::info!("Worker response queue connected to controller successfully");
         }
 
-        log::info!("RDMA bidirectional connection established successfully");
+        // Connect worker's response queue to controller's response queue (for sending responses)
+        {
+            let mut resp_queue_lock = _resp_queue.lock().unwrap();
+            if resp_queue_lock.is_connected() {
+                log::info!("Worker response queue already connected to controller, skipping");
+            } else {
+                if let Err(e) = resp_queue_lock
+                    .connect(controller_resp_qp_endpoint, controller_resp_memory_region)
+                {
+                    log::error!("Failed to connect worker response queue to controller: {e}");
+                    return Err(ek_base::error::EKError::IoError(std::io::Error::new(
+                        std::io::ErrorKind::Other,
+                        format!("RDMA response queue connection failed: {e}"),
+                    )));
+                }
+                log::info!("🚀Worker response queue connected to controller successfully");
+            }
+        }
+
+        update_rdma_connection_status(true);
+        log::info!("🚀RDMA bidirectional connection established successfully");
         Ok(())
     }
 
@@ -273,9 +316,9 @@ impl StateClient {
 
     /// Remove experts that are no longer needed
     async fn remove_stale_experts(&mut self, incoming: &[Metadata], current: &[String]) {
-        let mut lg = self.expert_db.write().await;
         let incoming_ids: Vec<String> = incoming.iter().map(|e| e.id.clone()).collect();
         for e in current.iter().filter(|e| !incoming_ids.contains(e)) {
+            let mut lg = self.expert_db.write().await;
             if let Err(e) = lg.remove(e).await {
                 log::error!("remove expert error {e:?}");
             }

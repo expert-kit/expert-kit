@@ -32,13 +32,13 @@ message ExpertState {
 }
 
 message RdmaEndpoint {
-  bytes qp_endpoint = 1;  // Serialized QueuePairEndpoint
-  bytes memory_region = 2;  // Serialized RemoteMemoryRegion
+  string qp_endpoint = 1;   // JSON-serialized QueuePairEndpoint
+  string memory_region = 2; // JSON-serialized RemoteMemoryRegion
 }
 
 message RdmaEndpointPair {
   RdmaEndpoint request_endpoint = 1;  // For request queue
-  RdmaEndpoint response_endpoint = 2; // For response queue  
+  RdmaEndpoint response_endpoint = 2; // For response queue
 }
 
 message ExchangeReq {

@@ -16,14 +16,13 @@ use tokio::sync::{Mutex, mpsc};
 use tracing::{Instrument, instrument, span};
 
 use crate::{
-    backend::{torch::TchTensor, EkTensor},
-    metrics::METRIC_CONTROLLER_INTRA_REQ, 
+    backend::{EkTensor, torch::TchTensor},
     controller::registry::{
-        ExpertId, ExpertIdRef, LocalShmWorkerReq, LocalShmWorkerResp, RdmaWorkerReq, ExpertClient,
+        ExpertClient, ExpertId, ExpertIdRef, LocalShmWorkerReq, LocalShmWorkerResp, RdmaWorkerReq,
         RdmaWorkerResp,
     },
+    metrics::METRIC_CONTROLLER_INTRA_REQ,
     proto::ek::worker::v1::{self},
-    shmq::rdma_impl::RdmaQueueError,
 };
 
 use super::registry::{GlobalWorkerRegistry, get_registry};
@@ -60,6 +59,7 @@ struct EgressMeta {
 enum ForwardResponse {
     Grpc(v1::ForwardResp),
     Shm(LocalShmWorkerResp),
+    Rdma(RdmaWorkerResp),
 }
 
 impl ForwardResponse {
@@ -67,6 +67,29 @@ impl ForwardResponse {
         match self {
             ForwardResponse::Grpc(resp) => &resp.output_tensor,
             ForwardResponse::Shm(resp) => resp.output_tensor(),
+            ForwardResponse::Rdma(resp) => resp.output_tensor(),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+enum PendingResponse {
+    Shm(LocalShmWorkerResp),
+    Rdma(RdmaWorkerResp),
+}
+
+impl PendingResponse {
+    fn into_shm(self) -> Option<LocalShmWorkerResp> {
+        match self {
+            PendingResponse::Shm(resp) => Some(resp),
+            PendingResponse::Rdma(_) => None,
+        }
+    }
+
+    fn into_rdma(self) -> Option<RdmaWorkerResp> {
+        match self {
+            PendingResponse::Shm(_) => None,
+            PendingResponse::Rdma(resp) => Some(resp),
         }
     }
 }
@@ -74,7 +97,7 @@ impl ForwardResponse {
 pub struct NaiveExecutor {
     pending_egress: BTreeMap<ExpertId, Vec<EgressMeta>>,
     pending_ingress: BTreeMap<ReqId, IngressMeta>,
-    pending_resp: Arc<Mutex<HashMap<usize, LocalShmWorkerResp>>>,
+    pending_resp: Arc<Mutex<HashMap<usize, PendingResponse>>>,
 
     seq_mapping: BTreeMap<GlobalSeqId, (ReqId, LocalSeqIdx)>,
     seq_gid_cursor: u64,
@@ -255,8 +278,11 @@ impl NaiveExecutor {
                             expert_id
                         );
                         let resp = loop {
-                            if let Some(resp) = pending_resp.lock().await.remove(&req.id()) {
-                                break resp;
+                            if let Some(pending_resp) = pending_resp.lock().await.remove(&req.id())
+                            {
+                                if let Some(resp) = pending_resp.into_shm() {
+                                    break resp;
+                                }
                             }
                             match recv_channel.lock().await.recv() {
                                 Ok(resp) => {
@@ -265,7 +291,10 @@ impl NaiveExecutor {
                                             "received response for expert {} but id not correct",
                                             expert_id
                                         );
-                                        pending_resp.lock().await.insert(resp.id(), resp);
+                                        pending_resp
+                                            .lock()
+                                            .await
+                                            .insert(resp.id(), PendingResponse::Shm(resp));
                                         tokio::task::yield_now().await;
                                         continue;
                                     }
@@ -281,11 +310,60 @@ impl NaiveExecutor {
                     .in_current_span();
                     handles.push(tokio::spawn(fu));
                 }
-                ExpertClient::Rdma(_rdma_channel) => {
-                    unimplemented!("rdma not implemented yet");
-            }
-        }
+                ExpertClient::Rdma((send_channel, recv_channel)) => {
+                    let fu = async move {
+                        let req = RdmaWorkerReq::new(expert_id.as_ref(), &serialized_tensor);
 
+                        let start = time::Instant::now();
+                        let _d = Defers::defer(Box::new(move || {
+                            let elapsed = start.elapsed();
+                            METRIC_CONTROLLER_INTRA_REQ
+                                .with_label_values(&[settings.inference.model_name.as_str()])
+                                .observe(elapsed.as_micros() as f64);
+                        }));
+
+                        // Send request via RDMA
+                        while send_channel.lock().await.send(&req).is_err() {
+                            log::warn!("failed to send RDMA request to expert {expert_id}");
+                            tokio::time::sleep(tokio::time::Duration::from_micros(100)).await;
+                        }
+
+                        log::debug!(
+                            "RDMA request sent for expert {}, waiting for response",
+                            expert_id
+                        );
+
+                        // Wait for response via RDMA
+                        let resp = loop {
+                            if let Some(pending_resp) = pending_resp.lock().await.remove(&req.id()) {
+                                if let Some(resp) = pending_resp.into_rdma() {
+                                    break resp;
+                                }
+                            }
+                            match recv_channel.lock().await.recv() {
+                                Ok(resp) => {
+                                    if resp.id() != req.id() {
+                                        log::debug!(
+                                            "received RDMA response for expert {} but id not correct",
+                                            expert_id
+                                        );
+                                        pending_resp.lock().await.insert(resp.id(), PendingResponse::Rdma(resp));
+                                        tokio::task::yield_now().await;
+                                        continue;
+                                    }
+                                    break resp;
+                                }
+                                Err(_) => {
+                                    tokio::task::yield_now().await;
+                                }
+                            }
+                        };
+                        Ok(ForwardResponse::Rdma(resp))
+                    }
+                    .in_current_span();
+                    handles.push(tokio::spawn(fu));
+                }
+            }
         }
 
         tit.stop("egress_req_sent");
@@ -417,622 +495,6 @@ impl NaiveExecutor {
         }
     }
 }
-
-pub struct LocalShmExecutor {
-    pending_egress: BTreeMap<ExpertId, Vec<EgressMeta>>,
-    pending_ingress: BTreeMap<ReqId, IngressMeta>,
-
-    seq_mapping: BTreeMap<GlobalSeqId, (ReqId, LocalSeqIdx)>,
-    seq_gid_cursor: u64,
-    req_id_cursor: u64,
-    registry: GlobalWorkerRegistry,
-    pending_resp: Arc<Mutex<HashMap<usize, LocalShmWorkerResp>>>,
-}
-
-impl Default for LocalShmExecutor {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl LocalShmExecutor {
-    pub fn new() -> Self {
-        Self {
-            pending_egress: BTreeMap::new(),
-            pending_ingress: BTreeMap::new(),
-            seq_mapping: BTreeMap::new(),
-            seq_gid_cursor: 0,
-            req_id_cursor: 0,
-            registry: get_registry(),
-            pending_resp: Arc::new(Mutex::new(HashMap::new())),
-        }
-    }
-}
-
-impl fmt::Debug for LocalShmExecutor {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("LocalShmExecutor").finish()
-    }
-}
-
-#[async_trait::async_trait]
-impl Executor for LocalShmExecutor {
-    async fn submit(
-        &mut self,
-        req: &v1::ForwardReq,
-    ) -> EKResult<mpsc::Receiver<Arc<v1::ForwardResp>>> {
-        self.inner_submit(req).await
-    }
-
-    async fn exec(&mut self) -> EKResult<()> {
-        self.inner_execute().await
-    }
-}
-
-impl LocalShmExecutor {
-    async fn inner_submit(
-        &mut self,
-        req: &v1::ForwardReq,
-    ) -> EKResult<mpsc::Receiver<Arc<v1::ForwardResp>>> {
-        let (sender, receiver) = mpsc::channel(1);
-        log::debug!("submit request, seq_len {:?}", req.sequences.len());
-        let span = span!(
-            tracing::Level::INFO,
-            "naive_executor_submit",
-            seq_len = req.sequences.len(),
-            instance_id = req.instance_id.as_str()
-        );
-        let _enter = span.enter();
-
-        let inp_safetensor = SafeTensors::deserialize(&req.tensor)?;
-        let inp_view = inp_safetensor.tensor("data")?;
-        let inp_tensor = TchTensor::from(&inp_view);
-        let mut result = vec![];
-
-        for i in &req.sequences {
-            let mut experts = Vec::new();
-            for _ in &i.experts {
-                experts.push(None);
-            }
-            result.push(experts);
-        }
-
-        let meta = IngressMeta {
-            tensor: inp_tensor.inner(),
-            sender,
-            result,
-        };
-
-        self.req_id_cursor += 1;
-
-        self.pending_ingress.insert(self.req_id_cursor, meta);
-        self.break_down_to_egress(req, self.req_id_cursor);
-
-        log::trace!("submit done");
-        Ok(receiver)
-    }
-
-    async fn inner_execute(&mut self) -> EKResult<()> {
-        let mut handles = vec![];
-        let mut chips: Vec<(ExpertId, Vec<EgressMeta>)> = vec![];
-        let settings = get_ek_settings();
-
-        while let Some((expert_id, egress_meta)) = self.pending_egress.pop_first() {
-            let expert_id: ExpertIdRef = expert_id.as_ref();
-            let Ok(client) = self.registry.lock().await.select(expert_id).await else {
-                log::warn!("failed to select client for expert {expert_id}");
-                continue;
-            };
-
-            let Some((send_channel, recv_channel)) = client.into_shm_channels() else {
-                log::warn!("expert {expert_id} is not available via shared memory, skipping");
-                continue;
-            };
-            chips.push((expert_id.to_owned(), egress_meta.to_owned()));
-
-            let seq_gids = egress_meta
-                .iter()
-                .map(|e| e.seq_gid)
-                .collect::<Vec<GlobalSeqId>>();
-
-            let egress_tensor = self.assemble_seq_tensors(seq_gids)?;
-            let tensor_shape = egress_tensor.size();
-            log::debug!("egress tensor shape={:?}", egress_tensor.size());
-            let serialized_tensor = TchTensor::from(egress_tensor).serialize();
-
-            let expert_id = expert_id.to_owned();
-            let pending_resp = self.pending_resp.clone();
-            let f = tokio::spawn(
-                async move {
-                    let req = LocalShmWorkerReq::new(expert_id.as_ref(), &serialized_tensor);
-
-                    let start = time::Instant::now();
-                    let _d = Defers::defer(Box::new(move || {
-                        let elapsed = start.elapsed();
-                        // TODO: hardcode metric name
-                        METRIC_CONTROLLER_INTRA_REQ
-                            .with_label_values(&[settings.inference.model_name.as_str()])
-                            .observe(elapsed.as_micros() as f64);
-                    }));
-
-                    while send_channel.lock().await.send(&req).is_err() {
-                        log::warn!("failed to send request to expert {expert_id}");
-                        tokio::time::sleep(tokio::time::Duration::from_micros(100)).await;
-                    }
-
-                    log::debug!(
-                        "request sent for expert {}, waiting for response",
-                        expert_id
-                    );
-                    let resp = loop {
-                        if let Some(resp) = pending_resp.lock().await.remove(&req.id()) {
-                            break resp;
-                        }
-                        match recv_channel.lock().await.recv() {
-                            Ok(resp) => {
-                                if resp.id() != req.id() {
-                                    log::debug!(
-                                        "received response for expert {} but id not correct",
-                                        expert_id
-                                    );
-                                    pending_resp.lock().await.insert(resp.id(), resp);
-                                    tokio::task::yield_now().await;
-                                    continue;
-                                }
-                                break resp;
-                            }
-                            Err(_) => {
-                                tokio::task::yield_now().await;
-                            }
-                        }
-                    };
-                    log::info!(
-                        "received response of {} for {} (shape: {:?}) in {}us",
-                        resp.id(),
-                        expert_id,
-                        tensor_shape,
-                        start.elapsed().as_micros(),
-                    );
-                    resp
-                }
-                .in_current_span(),
-            );
-            handles.push(f);
-        }
-
-        for (egress_idx, handle) in handles.into_iter().enumerate() {
-            let egress = &chips[egress_idx];
-            let res = handle.await?;
-            let res_safetensor = SafeTensors::deserialize(res.output_tensor())?;
-            // TODO: hardcode safe tensor name
-            let view = res_safetensor.tensor("data")?;
-            let res_tensor = TchTensor::from(&view).inner();
-
-            log::debug!("received tensor shape={:?}", res_tensor.size());
-            for (seq_idx, egress_meta) in egress.1.iter().enumerate() {
-                let id_mapping = self
-                    .seq_mapping
-                    .get(&egress_meta.seq_gid)
-                    .ok_or(EKError::NotFound("no seq mapping".into()))?;
-                assert!(id_mapping.0 == egress_meta.req_id);
-                let lid = id_mapping.1;
-                let meta = self
-                    .pending_ingress
-                    .get_mut(&egress_meta.req_id)
-                    .ok_or(EKError::NotFound("no ingress req found".into()))?;
-                let seq_completion = &mut meta.result[lid];
-                seq_completion[egress_meta.expert_idx] = Some(res_tensor.i(seq_idx as i64));
-            }
-        }
-
-        self.output().await;
-        Ok(())
-    }
-
-    #[instrument(skip(self, req))]
-    fn break_down_to_egress(&mut self, req: &v1::ForwardReq, req_id: ReqId) {
-        for (idx, seq) in req.sequences.iter().enumerate() {
-            // update pending_seq
-            let seq_gid = self.add_seq(req_id, idx as LocalSeqIdx);
-            // update pending_req
-            for (idx, expert) in seq.experts.iter().enumerate() {
-                self.pending_egress
-                    .entry(expert.clone())
-                    .or_default()
-                    .push(EgressMeta {
-                        req_id,
-                        seq_gid,
-                        expert_idx: idx,
-                    });
-            }
-        }
-    }
-    fn add_seq(&mut self, rid: ReqId, seq_lid: LocalSeqIdx) -> GlobalSeqId {
-        self.seq_gid_cursor += 1;
-        self.seq_mapping.insert(self.seq_gid_cursor, (rid, seq_lid));
-        self.seq_gid_cursor
-    }
-
-    fn assemble_seq_tensors(&self, gids: Vec<GlobalSeqId>) -> EKResult<Tensor> {
-        let mut tensors = vec![];
-        for gid in gids {
-            let (rid, lid) = self
-                .seq_mapping
-                .get(&gid)
-                .ok_or(EKError::NotFound("seq not found".into()))?;
-            let ingress_meta = self
-                .pending_ingress
-                .get(rid)
-                .ok_or(EKError::NotFound("req tensor not found".into()))?;
-            let hidden = ingress_meta.tensor.i(*lid as i64);
-            tensors.push(hidden);
-        }
-        let out = Tensor::stack(&tensors, 0);
-        log::debug!(
-            "assemble seq tensor, vec_len={} shape={:?}",
-            tensors.len(),
-            out.size()
-        );
-        Ok(out)
-    }
-
-    async fn output(&mut self) {
-        let mut removed = vec![];
-        for (req_id, meta) in self.pending_ingress.iter() {
-            let completed = meta.result.iter().all(|x| x.iter().all(|v| v.is_some()));
-            if !completed {
-                continue;
-            }
-            let res_tensors = meta
-                .result
-                .iter()
-                .map(|x| {
-                    let must_tensor = x.iter().map(|x| x.as_ref().unwrap()).collect::<Vec<_>>();
-                    Tensor::stack(&must_tensor, 0)
-                })
-                .collect::<Vec<_>>();
-
-            let output_tensor = Tensor::stack(&res_tensors, 0);
-            log::debug!("output tensor shape: {:?}", output_tensor.size());
-            let serialized_tensor = TchTensor::from(output_tensor).serialize();
-
-            let resp = v1::ForwardResp {
-                output_tensor: serialized_tensor,
-            };
-
-            let send_res = meta
-                .sender
-                .send_timeout(Arc::new(resp), std::time::Duration::from_secs(5))
-                .await;
-            if let Err(e) = send_res {
-                log::error!("send forward response  error: {e}");
-            }
-            removed.push(*req_id);
-        }
-
-        for rid in removed {
-            self.pending_ingress.remove(&rid);
-            let gids_to_remove = self
-                .seq_mapping
-                .iter()
-                .filter(|x| x.1.0 == rid)
-                .map(|x| *x.0)
-                .collect::<Vec<_>>();
-            for key in gids_to_remove {
-                self.seq_mapping.remove(&key);
-            }
-        }
-    }
-}
-
-pub struct RdmaExecutor {
-    pending_egress: BTreeMap<ExpertId, Vec<EgressMeta>>,
-    pending_ingress: BTreeMap<ReqId, IngressMeta>,
-
-    seq_mapping: BTreeMap<GlobalSeqId, (ReqId, LocalSeqIdx)>,
-    seq_gid_cursor: u64,
-    req_id_cursor: u64,
-    registry: GlobalWorkerRegistry,
-    pending_resp: Arc<Mutex<HashMap<usize, RdmaWorkerResp>>>,
-}
-
-impl Default for RdmaExecutor {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl RdmaExecutor {
-    pub fn new() -> Self {
-        Self {
-            pending_egress: BTreeMap::new(),
-            pending_ingress: BTreeMap::new(),
-            seq_mapping: BTreeMap::new(),
-            seq_gid_cursor: 0,
-            req_id_cursor: 0,
-            registry: get_registry(),
-            pending_resp: Arc::new(Mutex::new(HashMap::new())),
-        }
-    }
-}
-
-impl fmt::Debug for RdmaExecutor {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("RdmaExecutor").finish()
-    }
-}
-
-#[async_trait::async_trait]
-impl Executor for RdmaExecutor {
-    async fn submit(
-        &mut self,
-        req: &v1::ForwardReq,
-    ) -> EKResult<mpsc::Receiver<Arc<v1::ForwardResp>>> {
-        self.inner_submit(req).await
-    }
-
-    async fn exec(&mut self) -> EKResult<()> {
-        self.inner_execute().await
-    }
-}
-
-impl RdmaExecutor {
-    async fn inner_submit(
-        &mut self,
-        req: &v1::ForwardReq,
-    ) -> EKResult<mpsc::Receiver<Arc<v1::ForwardResp>>> {
-        let (sender, receiver) = mpsc::channel(1);
-        log::debug!("submit RDMA request, seq_len {:?}", req.sequences.len());
-        let span = span!(
-            tracing::Level::INFO,
-            "rdma_executor_submit",
-            seq_len = req.sequences.len(),
-            instance_id = req.instance_id.as_str()
-        );
-        let _enter = span.enter();
-
-        let inp_safetensor = SafeTensors::deserialize(&req.tensor)?;
-        let inp_view = inp_safetensor.tensor("data")?;
-        let inp_tensor = TchTensor::from(&inp_view);
-        let mut result = vec![];
-
-        for i in &req.sequences {
-            let mut experts = Vec::new();
-            for _ in &i.experts {
-                experts.push(None);
-            }
-            result.push(experts);
-        }
-
-        let meta = IngressMeta {
-            tensor: inp_tensor.inner(),
-            sender,
-            result,
-        };
-
-        self.req_id_cursor += 1;
-
-        self.pending_ingress.insert(self.req_id_cursor, meta);
-        self.break_down_to_egress(req, self.req_id_cursor);
-
-        log::trace!("RDMA submit done");
-        Ok(receiver)
-    }
-
-    async fn inner_execute(&mut self) -> EKResult<()> {
-        let mut handles = vec![];
-        let mut chips: Vec<(ExpertId, Vec<EgressMeta>)> = vec![];
-        let settings = get_ek_settings();
-
-        while let Some((expert_id, egress_meta)) = self.pending_egress.pop_first() {
-            let expert_id: ExpertIdRef = expert_id.as_ref();
-            let Ok(client) = self.registry.lock().await.select(expert_id).await else {
-                log::warn!("failed to select client for expert {expert_id}");
-                continue;
-            };
-
-            let Some((send_channel, recv_channel)) = client.into_rdma_channels() else {
-                log::warn!("expert {expert_id} is not available via RDMA, skipping");
-                continue;
-            };
-            chips.push((expert_id.to_owned(), egress_meta.to_owned()));
-
-            let seq_gids = egress_meta
-                .iter()
-                .map(|e| e.seq_gid)
-                .collect::<Vec<GlobalSeqId>>();
-
-            let egress_tensor = self.assemble_seq_tensors(seq_gids)?;
-            let tensor_shape = egress_tensor.size();
-            log::debug!("RDMA egress tensor shape={:?}", egress_tensor.size());
-            let serialized_tensor = TchTensor::from(egress_tensor).serialize();
-
-            let expert_id = expert_id.to_owned();
-            let pending_resp = self.pending_resp.clone();
-            let f = tokio::spawn(
-                async move {
-                    let req = RdmaWorkerReq::new(expert_id.as_ref(), &serialized_tensor);
-
-                    let start = time::Instant::now();
-                    let _d = Defers::defer(Box::new(move || {
-                        let elapsed = start.elapsed();
-                        METRIC_CONTROLLER_INTRA_REQ
-                            .with_label_values(&[settings.inference.model_name.as_str()])
-                            .observe(elapsed.as_micros() as f64);
-                    }));
-
-                    while let Err(err) = send_channel.lock().await.send(&req) {
-                        log::warn!("failed to send RDMA request to expert {expert_id}: {err}");
-                        tokio::time::sleep(tokio::time::Duration::from_micros(100)).await;
-                    }
-
-                    log::debug!(
-                        "RDMA request sent for expert {}, waiting for response",
-                        expert_id
-                    );
-                    let resp = loop {
-                        if let Some(resp) = pending_resp.lock().await.remove(&req.id()) {
-                            break resp;
-                        }
-                        match recv_channel.lock().await.recv() {
-                            Ok(resp) => {
-                                if resp.id() != req.id() {
-                                    log::debug!(
-                                        "received RDMA response for expert {} but id not correct",
-                                        expert_id
-                                    );
-                                    pending_resp.lock().await.insert(resp.id(), resp);
-                                    tokio::task::yield_now().await;
-                                    continue;
-                                }
-                                break resp;
-                            }
-                            Err(RdmaQueueError::Empty) => {
-                                tokio::task::yield_now().await;
-                            }
-                            Err(e) => {
-                                log::error!("RDMA receive error: {:?}", e);
-                                tokio::task::yield_now().await;
-                            }
-                        }
-                    };
-                    log::info!(
-                        "received RDMA response of {} for {} (shape: {:?}) in {}us",
-                        resp.id(),
-                        expert_id,
-                        tensor_shape,
-                        start.elapsed().as_micros(),
-                    );
-                    resp
-                }
-                .in_current_span(),
-            );
-            handles.push(f);
-        }
-
-        for (egress_idx, handle) in handles.into_iter().enumerate() {
-            let egress = &chips[egress_idx];
-            let res = handle.await?;
-            let res_safetensor = SafeTensors::deserialize(res.output_tensor())?;
-            let view = res_safetensor.tensor("data")?;
-            let res_tensor = TchTensor::from(&view).inner();
-
-            log::debug!("received RDMA tensor shape={:?}", res_tensor.size());
-            for (seq_idx, egress_meta) in egress.1.iter().enumerate() {
-                let id_mapping = self
-                    .seq_mapping
-                    .get(&egress_meta.seq_gid)
-                    .ok_or(EKError::NotFound("no seq mapping".into()))?;
-                assert!(id_mapping.0 == egress_meta.req_id);
-                let lid = id_mapping.1;
-                let meta = self
-                    .pending_ingress
-                    .get_mut(&egress_meta.req_id)
-                    .ok_or(EKError::NotFound("no ingress req found".into()))?;
-                let seq_completion = &mut meta.result[lid];
-                seq_completion[egress_meta.expert_idx] = Some(res_tensor.i(seq_idx as i64));
-            }
-        }
-
-        self.output().await;
-        Ok(())
-    }
-
-    #[instrument(skip(self, req))]
-    fn break_down_to_egress(&mut self, req: &v1::ForwardReq, req_id: ReqId) {
-        for (idx, seq) in req.sequences.iter().enumerate() {
-            let seq_gid = self.add_seq(req_id, idx as LocalSeqIdx);
-            for (idx, expert) in seq.experts.iter().enumerate() {
-                self.pending_egress
-                    .entry(expert.clone())
-                    .or_default()
-                    .push(EgressMeta {
-                        req_id,
-                        seq_gid,
-                        expert_idx: idx,
-                    });
-            }
-        }
-    }
-
-    fn add_seq(&mut self, rid: ReqId, seq_lid: LocalSeqIdx) -> GlobalSeqId {
-        self.seq_gid_cursor += 1;
-        self.seq_mapping.insert(self.seq_gid_cursor, (rid, seq_lid));
-        self.seq_gid_cursor
-    }
-
-    fn assemble_seq_tensors(&self, gids: Vec<GlobalSeqId>) -> EKResult<Tensor> {
-        let mut tensors = vec![];
-        for gid in gids {
-            let (rid, lid) = self
-                .seq_mapping
-                .get(&gid)
-                .ok_or(EKError::NotFound("seq not found".into()))?;
-            let ingress_meta = self
-                .pending_ingress
-                .get(rid)
-                .ok_or(EKError::NotFound("req tensor not found".into()))?;
-            let hidden = ingress_meta.tensor.i(*lid as i64);
-            tensors.push(hidden);
-        }
-        let out = Tensor::stack(&tensors, 0);
-        log::debug!(
-            "assemble RDMA seq tensor, vec_len={} shape={:?}",
-            tensors.len(),
-            out.size()
-        );
-        Ok(out)
-    }
-
-    async fn output(&mut self) {
-        let mut removed = vec![];
-        for (req_id, meta) in self.pending_ingress.iter() {
-            let completed = meta.result.iter().all(|x| x.iter().all(|v| v.is_some()));
-            if !completed {
-                continue;
-            }
-            let res_tensors = meta
-                .result
-                .iter()
-                .map(|x| {
-                    let must_tensor = x.iter().map(|x| x.as_ref().unwrap()).collect::<Vec<_>>();
-                    Tensor::stack(&must_tensor, 0)
-                })
-                .collect::<Vec<_>>();
-
-            let output_tensor = Tensor::stack(&res_tensors, 0);
-            log::debug!("RDMA output tensor shape: {:?}", output_tensor.size());
-            let serialized_tensor = TchTensor::from(output_tensor).serialize();
-
-            let resp = v1::ForwardResp {
-                output_tensor: serialized_tensor,
-            };
-
-            let send_res = meta
-                .sender
-                .send_timeout(Arc::new(resp), std::time::Duration::from_secs(5))
-                .await;
-            if let Err(e) = send_res {
-                log::error!("send RDMA forward response error: {e}");
-            }
-            removed.push(*req_id);
-        }
-
-        for rid in removed {
-            self.pending_ingress.remove(&rid);
-            let gids_to_remove = self
-                .seq_mapping
-                .iter()
-                .filter(|x| x.1.0 == rid)
-                .map(|x| *x.0)
-                .collect::<Vec<_>>();
-            for key in gids_to_remove {
-                self.seq_mapping.remove(&key);
-            }
-        }
-    }
-}
-
 
 pub fn get_executor() -> Arc<Mutex<dyn Executor + Send>> {
     static INSTANCE: OnceLock<Arc<Mutex<dyn Executor + Send>>> = OnceLock::new();
