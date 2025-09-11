@@ -566,6 +566,8 @@ impl ExpertRegistryImpl {
                     );
                 }
             }
+            // Sleep for a while
+            std::thread::sleep(std::time::Duration::from_secs(2));
 
             // Mark connection as established
             connection.connected = true;
@@ -805,25 +807,30 @@ impl RdmaBytes for RdmaWorkerReq {
     const SIZE: usize =
         std::mem::size_of::<usize>() + 64 + std::mem::size_of::<usize>() + MAX_TENSOR_SIZE;
 
-    fn as_bytes(&self) -> impl Iterator<Item = u8> + '_ {
-        let mut result = Vec::with_capacity(Self::SIZE);
+    fn write_to_slice(&self, slice: &mut [u8]) {
+        let mut offset = 0;
 
         // Add id (8 bytes)
-        result.extend_from_slice(&self.id.to_le_bytes());
+        slice[offset..offset + 8].copy_from_slice(&self.id.to_le_bytes());
+        offset += 8;
 
         // Add expert_id (64 bytes)
-        result.extend_from_slice(&self.expert_id);
+        slice[offset..offset + 64].copy_from_slice(&self.expert_id);
+        offset += 64;
 
         // Add input_tensor length (8 bytes)
-        result.extend_from_slice(&self.input_tensor.len().to_le_bytes());
+        slice[offset..offset + 8].copy_from_slice(&self.input_tensor.len().to_le_bytes());
+        offset += 8;
 
         // Add input_tensor data
-        result.extend_from_slice(&self.input_tensor);
+        let tensor_len = self.input_tensor.len();
+        slice[offset..offset + tensor_len].copy_from_slice(&self.input_tensor);
+        offset += tensor_len;
 
-        // Pad to exact SIZE with zeros
-        result.resize(Self::SIZE, 0);
-
-        result.into_iter()
+        // Pad remaining bytes with zeros
+        if offset < slice.len() {
+            slice[offset..].fill(0);
+        }
     }
 
     fn from_bytes(bytes: &[u8]) -> Self {
@@ -875,22 +882,26 @@ impl RdmaBytes for RdmaWorkerResp {
     const SIZE: usize =
         std::mem::size_of::<usize>() + std::mem::size_of::<usize>() + MAX_TENSOR_SIZE;
 
-    fn as_bytes(&self) -> impl Iterator<Item = u8> + '_ {
-        let mut result = Vec::with_capacity(Self::SIZE);
+    fn write_to_slice(&self, slice: &mut [u8]) {
+        let mut offset = 0;
 
         // Add id (8 bytes)
-        result.extend_from_slice(&self.id.to_le_bytes());
+        slice[offset..offset + 8].copy_from_slice(&self.id.to_le_bytes());
+        offset += 8;
 
         // Add output_tensor length (8 bytes)
-        result.extend_from_slice(&self.output_tensor.len().to_le_bytes());
+        slice[offset..offset + 8].copy_from_slice(&self.output_tensor.len().to_le_bytes());
+        offset += 8;
 
         // Add output_tensor data
-        result.extend_from_slice(&self.output_tensor);
+        let tensor_len = self.output_tensor.len();
+        slice[offset..offset + tensor_len].copy_from_slice(&self.output_tensor);
+        offset += tensor_len;
 
-        // Pad to exact SIZE with zeros
-        result.resize(Self::SIZE, 0);
-
-        result.into_iter()
+        // Pad remaining bytes with zeros
+        if offset < slice.len() {
+            slice[offset..].fill(0);
+        }
     }
 
     fn from_bytes(bytes: &[u8]) -> Self {

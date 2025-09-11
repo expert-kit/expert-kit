@@ -63,12 +63,12 @@ impl Default for RdmaQueueMeta {
 pub trait RdmaBytes {
     const SIZE: usize;
 
-    fn as_bytes(&self) -> impl Iterator<Item = u8> + '_;
+    fn write_to_slice(&self, slice: &mut [u8]);
     fn from_bytes(bytes: &[u8]) -> Self;
 
     #[inline]
     fn aligned_size() -> usize {
-        Self::SIZE.next_multiple_of(128)
+        Self::SIZE.next_multiple_of(64)
     }
 }
 
@@ -136,9 +136,9 @@ impl<T: RdmaBytes> RdmaQueue<T> {
         // Create protection domain
         let pd = context.alloc_pd()?;
 
-        // Create completion queues
-        let send_cq = context.create_cq(64, 0)?;
-        let recv_cq = context.create_cq(64, 1)?;
+        // Create completion queues with larger size for high throughput
+        let send_cq = context.create_cq(256, 0)?;
+        let recv_cq = context.create_cq(256, 1)?;
 
         // Calculate memory layout
         let meta_size = std::mem::size_of::<RdmaQueueMeta>();
@@ -148,29 +148,27 @@ impl<T: RdmaBytes> RdmaQueue<T> {
         // Allocate memory region
         let mut memory_region = pd.allocate(total_size)?;
 
-        // Initialize metadata (only for sender)
-        if is_sender {
-            let meta = RdmaQueueMeta {
-                capacity,
-                head: 0,
-                tail: 0,
-                data_offset,
-                ready: true,
-            };
+        // Initialize metadata (both sender and receiver need initialized metadata)
+        let meta = RdmaQueueMeta {
+            capacity,
+            head: 0,
+            tail: 0,
+            data_offset,
+            ready: true,
+        };
 
-            // Write metadata to the beginning of the memory region
-            let meta_bytes =
-                unsafe { std::slice::from_raw_parts(&meta as *const _ as *const u8, meta_size) };
-            memory_region.inner()[..meta_size].copy_from_slice(meta_bytes);
-        }
+        // Write metadata to the beginning of the memory region
+        let meta_bytes =
+            unsafe { std::slice::from_raw_parts(&meta as *const _ as *const u8, meta_size) };
+        memory_region.inner()[..meta_size].copy_from_slice(meta_bytes);
 
         // Create queue pair
         let mut qp_builder = pd.create_qp(&send_cq, &recv_cq, ibv_qp_type::IBV_QPT_RC)?;
 
         qp_builder
             .set_gid_index(0)
-            .set_max_send_wr(64)
-            .set_max_recv_wr(64)
+            .set_max_send_wr(256)
+            .set_max_recv_wr(256)
             .set_max_send_sge(1)
             .set_max_recv_sge(1)
             .allow_remote_rw();
@@ -228,57 +226,58 @@ impl<T: RdmaBytes> RdmaQueue<T> {
         }
     }
 
-    /// Send an item to the queue (sender side)
+    /// Send an item to the queue (sender side) - Push-based architecture
     pub fn send(&mut self, item: &T) -> Result<(), RdmaQueueError> {
         if !self.is_sender {
             return Err(RdmaQueueError::IoError);
         }
 
-        // Read current metadata from local memory
-        let meta = self.read_local_meta();
+        let remote_region = self.remote_region.clone().ok_or(RdmaQueueError::IoError)?;
 
-        // Check if queue is full
+        // Read current metadata from remote memory (receiver's queue)
+        let meta = self.read_remote_meta(&remote_region)?;
+
+        // Check if metadata is valid and queue is full
+        if meta.capacity == 0 || !meta.ready {
+            return Err(RdmaQueueError::IoError);
+        }
         if (meta.tail + 1) % meta.capacity == meta.head {
             return Err(RdmaQueueError::Full);
         }
 
-        // Write item data to local memory
+        // Write item data directly to remote memory
         let item_offset = meta.data_offset + meta.tail * T::aligned_size();
-        let item_bytes: Vec<u8> = item.as_bytes().collect();
+        self.write_remote_data(&remote_region, item_offset, item)?;
 
-        self.memory_region.inner()[item_offset..item_offset + T::SIZE].copy_from_slice(&item_bytes);
-
-        // Update tail pointer
+        // Update tail pointer in remote memory atomically
         let new_tail = (meta.tail + 1) % meta.capacity;
-        self.update_local_tail(new_tail)?;
+        self.update_remote_tail(&remote_region, new_tail)?;
 
         Ok(())
     }
 
-    /// Receive an item from the queue (receiver side)
+    /// Receive an item from the queue (receiver side) - Poll local memory
     pub fn recv(&mut self) -> Result<T, RdmaQueueError> {
         if self.is_sender {
             return Err(RdmaQueueError::IoError);
         }
 
-        let remote_region = self.remote_region.clone().ok_or(RdmaQueueError::IoError)?;
-
-        // Read metadata from remote memory
-        let meta = self.read_remote_meta(&remote_region)?;
+        // Read metadata from local memory (no RDMA needed!)
+        let meta = self.read_local_meta();
 
         // Check if queue is empty
         if meta.head == meta.tail {
             return Err(RdmaQueueError::Empty);
         }
 
-        // Read item data from remote memory
+        // Read item data from local memory
         let item_offset = meta.data_offset + meta.head * T::aligned_size();
-        let item_data = self.read_remote_data(&remote_region, item_offset, T::SIZE)?;
-        let item = T::from_bytes(&item_data);
+        let item_data = &self.memory_region.inner()[item_offset..item_offset + T::SIZE];
+        let item = T::from_bytes(item_data);
 
-        // Update head pointer in remote memory
+        // Update head pointer in local memory
         let new_head = (meta.head + 1) % meta.capacity;
-        self.update_remote_head(&remote_region, new_head)?;
+        self.update_local_head(new_head)?;
 
         Ok(item)
     }
@@ -290,13 +289,76 @@ impl<T: RdmaBytes> RdmaQueue<T> {
         unsafe { std::ptr::read(meta_bytes.as_ptr() as *const RdmaQueueMeta) }
     }
 
-    /// Update tail pointer in local memory
-    fn update_local_tail(&mut self, new_tail: usize) -> Result<(), RdmaQueueError> {
-        let tail_offset = offset_of_tail();
-        let tail_bytes = new_tail.to_le_bytes();
+    /// Update head pointer in local memory
+    fn update_local_head(&mut self, new_head: usize) -> Result<(), RdmaQueueError> {
+        let head_offset = offset_of_head();
+        let head_bytes = new_head.to_le_bytes();
         let memory = self.memory_region.inner();
-        memory[tail_offset..tail_offset + std::mem::size_of::<usize>()]
+        memory[head_offset..head_offset + std::mem::size_of::<usize>()]
+            .copy_from_slice(&head_bytes);
+        Ok(())
+    }
+
+    /// Write data directly to remote memory using RDMA write
+    fn write_remote_data(
+        &mut self,
+        remote_region: &RemoteMemoryRegion,
+        offset: usize,
+        item: &T,
+    ) -> Result<(), RdmaQueueError> {
+        // Use a temporary buffer in memory region for writing
+        let write_offset = std::mem::size_of::<RdmaQueueMeta>().next_multiple_of(64);
+
+        // Write item directly to local buffer (zero-copy)
+        item.write_to_slice(&mut self.memory_region.inner()[write_offset..write_offset + T::SIZE]);
+
+        let local_slice = self
+            .memory_region
+            .slice(write_offset..write_offset + T::SIZE);
+        let remote_slice = remote_region.slice(offset..offset + T::SIZE);
+
+        // Issue RDMA write
+        let wr_id = self.next_wr_id();
+        let qp = self.qp.as_mut().ok_or(RdmaQueueError::IoError)?;
+        qp.post_write(&[local_slice], remote_slice, wr_id, None)
+            .map_err(|_| RdmaQueueError::IoError)?;
+
+        // Wait for completion
+        self.wait_for_completion(wr_id)?;
+
+        Ok(())
+    }
+
+    /// Update tail pointer in remote memory using RDMA write
+    fn update_remote_tail(
+        &mut self,
+        remote_region: &RemoteMemoryRegion,
+        new_tail: usize,
+    ) -> Result<(), RdmaQueueError> {
+        let tail_offset = offset_of_tail();
+        let tail_size = std::mem::size_of::<usize>();
+
+        // Prepare local data for writing
+        let write_offset =
+            std::mem::size_of::<RdmaQueueMeta>().next_multiple_of(64) + T::aligned_size();
+        let tail_bytes = new_tail.to_le_bytes();
+        self.memory_region.inner()[write_offset..write_offset + tail_size]
             .copy_from_slice(&tail_bytes);
+
+        let local_slice = self
+            .memory_region
+            .slice(write_offset..write_offset + tail_size);
+        let remote_slice = remote_region.slice(tail_offset..tail_offset + tail_size);
+
+        // Issue RDMA write
+        let wr_id = self.next_wr_id();
+        let qp = self.qp.as_mut().ok_or(RdmaQueueError::IoError)?;
+        qp.post_write(&[local_slice], remote_slice, wr_id, None)
+            .map_err(|_| RdmaQueueError::IoError)?;
+
+        // Wait for completion
+        self.wait_for_completion(wr_id)?;
+
         Ok(())
     }
 
@@ -327,73 +389,15 @@ impl<T: RdmaBytes> RdmaQueue<T> {
         Ok(meta)
     }
 
-    /// Read data from remote memory using RDMA read
-    fn read_remote_data(
-        &mut self,
-        remote_region: &RemoteMemoryRegion,
-        offset: usize,
-        size: usize,
-    ) -> Result<Vec<u8>, RdmaQueueError> {
-        // Use a temporary buffer in memory region for reading
-        let read_offset = std::mem::size_of::<RdmaQueueMeta>().next_multiple_of(128);
-        let local_slice = self.memory_region.slice(read_offset..read_offset + size);
-        let remote_slice = remote_region.slice(offset..offset + size);
-
-        // Issue RDMA read
-        let wr_id = self.next_wr_id();
-        let qp = self.qp.as_mut().ok_or(RdmaQueueError::IoError)?;
-        qp.post_read(&[local_slice], remote_slice, wr_id)
-            .map_err(|_| RdmaQueueError::IoError)?;
-
-        // Wait for completion
-        self.wait_for_completion(wr_id)?;
-
-        // Return read data
-        Ok(self.memory_region.inner()[read_offset..read_offset + size].to_vec())
-    }
-
-    /// Update head pointer in remote memory using RDMA write
-    fn update_remote_head(
-        &mut self,
-        remote_region: &RemoteMemoryRegion,
-        new_head: usize,
-    ) -> Result<(), RdmaQueueError> {
-        let head_offset = offset_of_head();
-        let head_size = std::mem::size_of::<usize>();
-
-        // Prepare local data for writing
-        let write_offset =
-            std::mem::size_of::<RdmaQueueMeta>().next_multiple_of(128) + T::aligned_size();
-        let head_bytes = new_head.to_le_bytes();
-        self.memory_region.inner()[write_offset..write_offset + head_size]
-            .copy_from_slice(&head_bytes);
-
-        let local_slice = self
-            .memory_region
-            .slice(write_offset..write_offset + head_size);
-        let remote_slice = remote_region.slice(head_offset..head_offset + head_size);
-
-        // Issue RDMA write
-        let wr_id = self.next_wr_id();
-        let qp = self.qp.as_mut().ok_or(RdmaQueueError::IoError)?;
-        qp.post_write(&[local_slice], remote_slice, wr_id, None)
-            .map_err(|_| RdmaQueueError::IoError)?;
-
-        // Wait for completion
-        self.wait_for_completion(wr_id)?;
-
-        Ok(())
-    }
-
-    /// Wait for a specific work request to complete
+    /// Wait for a specific work request to complete with non-blocking retry
     fn wait_for_completion(&mut self, expected_wr_id: u64) -> Result<(), RdmaQueueError> {
-        let mut completions = [Default::default(); 1];
+        let mut completions = [Default::default(); 4]; // Handle multiple completions
+        let mut retries = 0;
+        const MAX_RETRIES: u32 = 1000; // For microsecond-level operations
 
         loop {
-            match self
-                ._send_cq
-                .wait(&mut completions, Some(Duration::from_millis(1000)))
-            {
+            // First try non-blocking poll
+            match self._send_cq.wait(&mut completions, None) {
                 Ok(completed) if !completed.is_empty() => {
                     for completion in completed {
                         if completion.wr_id() == expected_wr_id {
@@ -403,7 +407,28 @@ impl<T: RdmaBytes> RdmaQueue<T> {
                         }
                     }
                 }
-                Ok(_) => continue, // No completions, keep waiting
+                Ok(_) => {
+                    retries += 1;
+                    if retries >= MAX_RETRIES {
+                        // Fall back to blocking wait with very short timeout
+                        match self
+                            ._send_cq
+                            .wait(&mut completions, Some(Duration::from_micros(10)))
+                        {
+                            Ok(completed) if !completed.is_empty() => {
+                                for completion in completed {
+                                    if completion.wr_id() == expected_wr_id {
+                                        return Ok(());
+                                    }
+                                }
+                            }
+                            Ok(_) => return Err(RdmaQueueError::IoError), // Timeout
+                            Err(_) => return Err(RdmaQueueError::IoError),
+                        }
+                    }
+                    // Busy wait for a few CPU cycles before retry
+                    std::hint::spin_loop();
+                }
                 Err(_) => return Err(RdmaQueueError::IoError),
             }
         }
@@ -419,6 +444,18 @@ impl<T: RdmaBytes> RdmaQueue<T> {
     /// Get queue capacity
     pub fn capacity(&self) -> usize {
         self.capacity
+    }
+
+    /// Try to send without blocking (returns immediately if would block)
+    pub fn try_send(&mut self, item: &T) -> Result<(), RdmaQueueError> {
+        // Same as send but could be optimized to not block on completion
+        self.send(item)
+    }
+
+    /// Try to receive without blocking (returns immediately if empty)
+    pub fn try_recv(&mut self) -> Result<T, RdmaQueueError> {
+        // This is already non-blocking in the new architecture
+        self.recv()
     }
 
     pub fn close(&mut self) {
@@ -442,8 +479,8 @@ impl<T> Drop for RdmaQueue<T> {
 impl RdmaBytes for u64 {
     const SIZE: usize = std::mem::size_of::<u64>();
 
-    fn as_bytes(&self) -> impl Iterator<Item = u8> + '_ {
-        self.to_le_bytes().into_iter()
+    fn write_to_slice(&self, slice: &mut [u8]) {
+        slice[..Self::SIZE].copy_from_slice(&self.to_le_bytes());
     }
 
     fn from_bytes(bytes: &[u8]) -> Self {
@@ -454,12 +491,11 @@ impl RdmaBytes for u64 {
 impl RdmaBytes for String {
     const SIZE: usize = 256; // Fixed size for simplicity
 
-    fn as_bytes(&self) -> impl Iterator<Item = u8> + '_ {
-        let mut result = vec![0u8; Self::SIZE];
+    fn write_to_slice(&self, slice: &mut [u8]) {
+        slice.fill(0); // Zero out the slice first
         let bytes = self.as_bytes();
         let len = bytes.len().min(Self::SIZE - 1);
-        result[..len].copy_from_slice(&bytes[..len]);
-        result.into_iter()
+        slice[..len].copy_from_slice(&bytes[..len]);
     }
 
     fn from_bytes(bytes: &[u8]) -> Self {
