@@ -2,14 +2,13 @@ name: Rust Test and Clippy on PR
 
 on:
   pull_request:
-    branches: [ "dev" ]
+    branches: ["dev"]
     types: [opened, synchronize, reopened, closed]
 
 env:
   CARGO_TERM_COLOR: always
   TORCH_VERSION: 2.7.0
   ONNXRUNTIME_VERSION: 1.20.1
-  
   LIBTORCH_BASE_DIR: ${{ github.workspace }}/opt/torch
   ONNXRUNTIME_BASE_DIR: ${{ github.workspace }}/opt/onnxruntime
   LFS_BASE_URL: https://media.githubusercontent.com/media/expert-kit/expert-kit/refs/heads/dev
@@ -22,6 +21,8 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
       - name: Install git-lfs
         run: |
@@ -53,7 +54,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ${{ steps.lfs.outputs.paths }}
-          key:  ${{ steps.lfs.outputs.key }}
+          key: ${{ steps.lfs.outputs.key }}
           restore-keys: |
             ${{ runner.os }}-lfs-
 
@@ -111,7 +112,7 @@ jobs:
       - name: Set up Rust
         uses: actions-rs/toolchain@v1
         with:
-          toolchain: nightly-2024-12-31
+          toolchain: stable
           override: true
           components: rustfmt, clippy
 
@@ -122,7 +123,7 @@ jobs:
           curl -sSL https://download.pytorch.org/libtorch/cpu/libtorch-cxx11-abi-shared-with-deps-${{ env.TORCH_VERSION }}%2Bcpu.zip  --output libtorch.zip
           unzip -q libtorch.zip -d ${{ env.LIBTORCH_BASE_DIR }}
           rm libtorch.zip
-      
+
       - name: Download and extract onnxruntime (if cache miss)
         if: steps.cache-onnxruntime.outputs.cache-hit != 'true'
         run: |
@@ -130,7 +131,7 @@ jobs:
           curl -sSL https://github.com/microsoft/onnxruntime/releases/download/v${{ env.ONNXRUNTIME_VERSION }}/onnxruntime-linux-x64-${{ env.ONNXRUNTIME_VERSION }}.tgz --output onnxruntime.tgz
           tar -xzf onnxruntime.tgz -C ${{ env.ONNXRUNTIME_BASE_DIR }}
           rm onnxruntime.tgz
-      
+
       - name: Set up environment variables
         run: |
           echo "LIBTORCH=${{ env.LIBTORCH_BASE_DIR }}/libtorch" >> $GITHUB_ENV
@@ -166,7 +167,7 @@ jobs:
   #   name: Build and push Docker image (dev)
   #   needs: rust-check
   #   if: github.event_name == 'pull_request' && github.event.action == 'synchronize'
-  #   # if: github.event_name == 'pull_request' && github.event.action == 
+  #   # if: github.event_name == 'pull_request' && github.event.action ==
   #   # 'closed' && github.event.pull_request.merged == true && github.event.
   #   # pull_request.base.ref == 'dev'
   #   env:
