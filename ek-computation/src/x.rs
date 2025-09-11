@@ -1,29 +1,48 @@
-use std::{path::PathBuf, sync::Arc};
+use std::{
+    fmt::Display,
+    path::PathBuf,
+    sync::{
+        Arc, OnceLock,
+        atomic::{AtomicUsize, Ordering},
+    },
+};
 
 use clap::ValueEnum;
 use ek_base::config::get_ek_settings;
-use once_cell::sync::OnceCell;
 use tokio::sync::{
     Mutex,
     mpsc::{Receiver, Sender},
 };
 
 use super::backend::Device;
-use std::sync::atomic::{AtomicUsize, Ordering};
 
 static INSTANCE_COUNTER: AtomicUsize = AtomicUsize::new(0);
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, ValueEnum, Debug)]
 pub enum ExpertBackendType {
     Torch,
     Onnx,
+    Ggml,
 }
 
-impl From<&str> for ExpertBackendType {
-    fn from(value: &str) -> Self {
+impl TryFrom<&str> for ExpertBackendType {
+    type Error = &'static str;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
         match value {
-            "torch" => ExpertBackendType::Torch,
-            "ort" => ExpertBackendType::Onnx,
-            _ => unimplemented!(),
+            "torch" => Ok(ExpertBackendType::Torch),
+            "ort" => Ok(ExpertBackendType::Onnx),
+            "ggml" => Ok(ExpertBackendType::Ggml),
+            _ => Err("Unknown backend type"),
+        }
+    }
+}
+
+impl Display for ExpertBackendType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ExpertBackendType::Torch => write!(f, "torch"),
+            ExpertBackendType::Onnx => write!(f, "onnx"),
+            ExpertBackendType::Ggml => write!(f, "ggml"),
         }
     }
 }
@@ -41,13 +60,13 @@ impl Default for EKInstance {
         let settings = get_ek_settings();
         let _ = INSTANCE_COUNTER.fetch_add(1, Ordering::SeqCst);
 
-        let device = Device::from(settings.worker.device.as_str());        
+        let device = Device::from(settings.worker.device.as_str());
 
         Self {
             hidden: settings.inference.hidden_dim,
             intermediate: settings.inference.intermediate_dim,
-            backend: ExpertBackendType::Torch,
-            device: device,
+            backend: ExpertBackendType::try_from(settings.worker.backend.as_str()).unwrap(),
+            device,
         }
     }
 }
@@ -60,7 +79,7 @@ pub fn test_root() -> PathBuf {
 type GracefulChannelPair = (Sender<()>, Arc<Mutex<Receiver<()>>>);
 
 pub fn get_graceful_shutdown_ch() -> GracefulChannelPair {
-    static GRACEFUL_SHUTDOWN: OnceCell<GracefulChannelPair> = OnceCell::new();
+    static GRACEFUL_SHUTDOWN: OnceLock<GracefulChannelPair> = OnceLock::new();
     let res = GRACEFUL_SHUTDOWN.get_or_init(|| {
         let (tx, rx) = tokio::sync::mpsc::channel(1);
         (tx, Arc::new(Mutex::new(rx)))
@@ -79,7 +98,7 @@ mod test {
 
     #[test]
     fn test_force_cuda() {
-        let _ = tch::Tensor::zeros(&[1, 2], (tch::Kind::Float, tch::Device::Cuda(0)));
+        let _ = tch::Tensor::zeros([1, 2], (tch::Kind::Float, tch::Device::Cuda(0)));
         println!("Tensor on CUDA successfully created.");
     }
 }

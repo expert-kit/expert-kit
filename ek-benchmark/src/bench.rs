@@ -23,6 +23,7 @@ impl ExpertBenchmark {
         match &self.0 {
             ExpertBackend::Torch(exp) => exp.backend(),
             ExpertBackend::OnnxF32(onnx_exp) => onnx_exp.backend(),
+            _ => todo!(),
         }
     }
 
@@ -30,6 +31,7 @@ impl ExpertBenchmark {
         match &self.0 {
             ExpertBackend::Torch(exp) => exp.shape(),
             ExpertBackend::OnnxF32(onnx_exp) => onnx_exp.shape(),
+            _ => todo!(),
         }
     }
 
@@ -48,6 +50,7 @@ impl ExpertBenchmark {
                 let _ = onnx_exp.forward(&input);
                 start
             }
+            _ => todo!(),
         }
     }
 }
@@ -76,7 +79,7 @@ impl Benchmarker {
         let mut rows: Vec<Row> = Vec::new();
         let system_info = sysinfo::System::new_all();
         let cpu_brand = system_info.cpus()[0].brand();
-        info!("Running batch scan on CPU: {}", cpu_brand);
+        info!("Running batch scan on CPU: {cpu_brand}");
 
         // Warm up all experts
         for expert in self.experts.iter() {

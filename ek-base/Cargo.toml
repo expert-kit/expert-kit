@@ -1,33 +1,32 @@
 [package]
-name = "ek_base"
-version = "0.1.0"
-edition = "2024"
+name = "ek-base"
+version = { workspace = true }
+edition = { workspace = true }
+authors = { workspace = true }
+license = { workspace = true }
+readme = { workspace = true }
+repository = { workspace = true }
 
 [dependencies]
-thiserror = "2.0.12"
-opendal = { workspace = true }
-safetensors = { workspace = true }
-tch = { workspace = true }
-tonic = { workspace = true }
-diesel = { workspace = true }
-serde_json = { workspace = true }
-diesel-async = { workspace = true }
-tokio = { workspace = true }
-config = { workspace = true }
-once_cell = { workspace = true }
-log = { workspace = true }
 actix-web = { workspace = true }
-reqwest = { workspace = true }
-serde_derive = { workspace = true }
-serde = { workspace = true }
-ort = { workspace = true }
-
-gethostname = "1.0.1"
-
-tracing = { workspace = true }
-tracing-subscriber = { workspace = true }
-
-tracing-opentelemetry = { workspace = true }
-opentelemetry = { workspace = true }
-tower = { workspace = true }
+config = { workspace = true }
+diesel = { workspace = true }
+diesel-async = { workspace = true }
+gethostname = { workspace = true }
 http = { workspace = true }
+log = { workspace = true }
+opendal = { workspace = true }
+opentelemetry = { workspace = true }
+ort = { workspace = true }
+ort-sys = { workspace = true }
+reqwest = { workspace = true }
+safetensors = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tch = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tonic = { workspace = true }
+tower = { workspace = true }
+tracing = { workspace = true }
+tracing-opentelemetry = { workspace = true }

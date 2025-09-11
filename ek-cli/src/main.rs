@@ -1,22 +1,24 @@
-#![feature(random)]
-use std::{env, mem::transmute, path::PathBuf};
+use std::{env, mem::transmute, path::PathBuf, sync::LazyLock};
 mod db;
 mod doctor;
 mod model;
 mod pretrain;
 mod schedule;
 
+mod affinity;
 mod onnx;
+use affinity::try_apply_cpu_affinity;
 use db::execute_db;
 use doctor::doctor_main;
 use ek_base::config::get_ek_settings_base;
 use ek_computation::{controller::controller_main, worker::worker_main};
-use env_logger::fmt::{default_kv_format, style};
+use env_logger::fmt::default_kv_format;
 use opentelemetry::{
     KeyValue, propagation::TextMapCompositePropagator, trace::TracerProvider as _,
 };
 use std::io::Write;
 
+use tokio::runtime::Runtime;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 use ek_db::weight_srv;
@@ -181,19 +183,71 @@ fn get_command_name(cmd: &Command) -> &'static str {
     }
 }
 
-#[tokio::main(flavor = "multi_thread", worker_threads = 48)]
-async fn main() {
+const DEFAULT_THREAD_NUM: usize = 6;
+static WORKER_THREAD_NUM: LazyLock<usize> = LazyLock::new(|| {
+    env::var("EK_WORKER_THREADS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1)
+});
+
+/// Init tokio runtime based on command
+fn init_tokio_runtime(command: &Command) -> Result<Runtime, std::io::Error> {
+    match command {
+        Command::Worker {} => {
+            // Apply CPU affinity before creating runtime for worker
+            let settings = ek_base::config::get_ek_settings();
+            if let Err(e) = try_apply_cpu_affinity(&settings.worker) {
+                log::warn!("Failed to apply CPU affinity before runtime creation: {e}");
+            } else {
+                log::debug!("✅ CPU affinity applied before Tokio runtime creation");
+            }
+
+            // Determine worker thread count based on CPU affinity configuration
+            let worker_threads = if let Some(advanced) = &settings.worker.advanced {
+                if let Some(cpu_config) = &advanced.cpu_affinity {
+                    cpu_config
+                        .cores
+                        .as_ref()
+                        .map(|cores| cores.len())
+                        .unwrap_or_else(|| DEFAULT_THREAD_NUM)
+                } else {
+                    DEFAULT_THREAD_NUM
+                }
+            } else {
+                DEFAULT_THREAD_NUM
+            };
+
+            log::info!("Creating Tokio runtime with {worker_threads} worker threads");
+
+            tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(worker_threads)
+                .max_blocking_threads(*WORKER_THREAD_NUM)
+                .enable_all()
+                .build()
+        }
+        _ => {
+            // Use default runtime for other commands
+            tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(DEFAULT_THREAD_NUM)
+                .enable_all()
+                .build()
+        }
+    }
+}
+
+fn main() {
     let cli = RootCli::parse();
     if cli.debug {
         unsafe { std::env::set_var("RUST_LOG", "debug") };
     }
     let command_name = get_command_name(&cli.command);
 
+    // Init config
     let mut config_src = vec![];
     if let Ok(path) = std::env::var("EK_CONFIG") {
         config_src.push(path);
     }
-
     if let Some(path) = cli.config {
         config_src.push(path.to_string());
     }
@@ -204,25 +258,43 @@ async fn main() {
             .map(|x| x.as_str())
             .collect::<Vec<_>>(),
     );
-    init_tracing_subscriber(command_name);
+    log::info!("config source: {config_src:?}");
+    let settings = ek_base::config::get_ek_settings();
+    log::info!("settings: {settings:?}");
+
+    // Init log
     init_log();
-    log::info!("config source: {:?}", config_src);
-    let res = match cli.command {
-        Command::Onnx { command } => onnx::execute_onnx(command).await,
-        Command::Pretrain { command } => execute_pretrain(command).await,
-        Command::Worker {} => worker_main().await,
-        Command::Controller {} => controller_main().await,
-        Command::Doctor {} => doctor_main().await,
-        Command::WeightServer { host, port, model } => {
-            let model: &[PathBuf] = unsafe { transmute(model.as_slice()) };
-            weight_srv::server::listen(model, (host, port)).await
+
+    // Init tokio runtime (Prepare for cpu affinity settings)
+    let tokio_rt = match init_tokio_runtime(&cli.command) {
+        Ok(rt) => rt,
+        Err(e) => {
+            eprintln!("Failed to create Tokio runtime: {e}");
+            std::process::exit(1);
         }
-        Command::DB { command } => execute_db(command).await,
-        Command::Model { command } => execute_model(command).await,
-        Command::Schedule { command } => execute_schedule(command).await,
     };
+
+    let res = tokio_rt.block_on(async {
+        // Must place tracing subscriber init in tokio runtime block
+        init_tracing_subscriber(command_name);
+        match cli.command {
+            Command::Onnx { command } => onnx::execute_onnx(command).await,
+            Command::Pretrain { command } => execute_pretrain(command).await,
+            Command::Worker {} => worker_main().await,
+            Command::Controller {} => controller_main().await,
+            Command::Doctor {} => doctor_main().await,
+            Command::WeightServer { host, port, model } => {
+                let model: &[PathBuf] = unsafe { transmute(model.as_slice()) };
+                weight_srv::server::listen(model, (host, port)).await
+            }
+            Command::DB { command } => execute_db(command).await,
+            Command::Model { command } => execute_model(command).await,
+            Command::Schedule { command } => execute_schedule(command).await,
+        }
+    });
+
     if let Err(e) = res {
-        eprintln!("Error: {}", e);
+        eprintln!("Error: {e}");
         std::process::exit(1);
     }
 }

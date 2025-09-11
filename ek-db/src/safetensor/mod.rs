@@ -57,11 +57,11 @@ impl ExpertKey {
     pub fn from_expert_id(model: &str, id: &str) -> EKResult<Self> {
         let inner = id.split("/l").collect::<Vec<_>>();
         if inner.len() != 2 {
-            return Err(EKError::InvalidInput(format!("invalid expert id: {}", id)));
+            return Err(EKError::InvalidInput(format!("invalid expert id: {id}")));
         }
         let inner = inner[1].split("-e").collect::<Vec<_>>();
         if inner.len() != 2 {
-            return Err(EKError::InvalidInput(format!("invalid expert id: {}", id)));
+            return Err(EKError::InvalidInput(format!("invalid expert id: {id}")));
         }
         let layer = inner[0].parse::<usize>()?;
         let expert = inner[1].parse::<usize>()?;
@@ -115,16 +115,14 @@ impl SafeTensorDB {
         match st {
             Ok(st) => Ok(st),
             Err(e) => {
-                log::warn!("failed to load from cache: {:} reason={}", key, e);
+                log::warn!("failed to load from cache: {key:} reason={e}");
                 let op_copy = self.dal.clone();
                 let key_copy = key.to_owned();
                 tokio::spawn(async move {
                     let err = op_copy.delete(&key_copy).await;
                     if let Err(err) = err {
                         log::error!(
-                            "failed to delete corrupted safetensor from cache {}: {}",
-                            key_copy,
-                            err
+                            "failed to delete corrupted safetensor from cache {key_copy}: {err}"
                         );
                     };
                 });
@@ -168,11 +166,17 @@ impl SafeTensorDB {
         tokio::spawn(async move {
             let err = op_copy.write(moved_key.as_str(), to_cache).await;
             if let Err(err) = err {
-                log::error!("failed to cache to local cache {}: {}", moved_key, err);
+                log::error!("failed to cache to local cache {moved_key}: {err}");
             }
         });
         let st = self.as_safetensor(&key)?;
         Ok(st)
+    }
+
+    pub async fn remove(&self, desc: &ExpertKey) -> EKResult<()> {
+        let key = desc.as_object_key();
+        self.data.remove(&key);
+        Ok(())
     }
 }
 

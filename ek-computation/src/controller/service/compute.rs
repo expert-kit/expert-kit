@@ -68,7 +68,7 @@ impl ComputationProxyServiceImpl {
                 let mut lg = exec_bg.lock().await;
                 let res = lg.exec().await;
                 if let Err(err) = res {
-                    log::error!("executor error: {}", err);
+                    log::error!("executor error: {err}");
                     err_tx.send(err).await.unwrap();
                 }
             }
@@ -79,8 +79,8 @@ impl ComputationProxyServiceImpl {
             tokio::select! {
                 err = err_rx.recv() => {
                     if let Some(err) = err {
-                        log::error!("executor error: {:?}", err);
-                        return Err(tonic::Status::internal(format!("executor error: {:?}", err)))
+                        log::error!("executor error: {err:?}");
+                        return Err(tonic::Status::internal(format!("executor error: {err:?}")))
                     }
                     continue
                 }

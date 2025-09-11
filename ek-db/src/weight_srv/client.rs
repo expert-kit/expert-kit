@@ -30,8 +30,7 @@ impl WeightSrvClient {
             Ok(res.bytes().await?.to_vec())
         } else {
             Err(EKError::NotFound(format!(
-                "failed to load expert from {}",
-                url
+                "failed to load expert from {url}"
             )))
         }
     }
@@ -44,8 +43,7 @@ impl WeightSrvClient {
             Ok(res.bytes().await?.to_vec())
         } else {
             Err(EKError::NotFound(format!(
-                "failed to load layer from {}",
-                url
+                "failed to load layer from {url}"
             )))
         }
     }
@@ -58,8 +56,7 @@ impl WeightSrvClient {
             Ok(res)
         } else {
             Err(EKError::NotFound(format!(
-                "failed to load meta vital from {}",
-                url
+                "failed to load meta vital from {url}"
             )))
         }
     }

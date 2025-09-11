@@ -34,7 +34,7 @@ diesel::table! {
         device -> Text,
         last_seen_at -> Timestamp,
         config -> Jsonb,
-        
+
     }
 }
 

@@ -9,6 +9,7 @@ use crate::{
             state_service_client::StateServiceClient,
         },
     },
+    worker::core::EKInstanceGateAsync,
     x::{EKInstance, get_graceful_shutdown_ch},
 };
 use ek_base::{config::get_ek_settings, error::EKResult};
@@ -23,32 +24,34 @@ use tokio_util::sync::CancellationToken;
 use tonic::transport::Endpoint;
 
 use super::{
-    core::{GlobalEKInstanceGate, get_instance_gate},
+    core::get_instance_gate,
     manager::{ExpertDB, get_expert_db},
     x::{self},
 };
+
 pub struct StateClient {
     tensor_db: Arc<RwLock<SafeTensorDB>>,
     expert_db: Arc<RwLock<dyn ExpertDB + Sync + Send + 'static>>,
     worker_id: String,
-    gate: GlobalEKInstanceGate,
+    gate_async: &'static EKInstanceGateAsync, // Use async gate for state management
     controller_addr: Endpoint,
 }
 
 impl StateClient {
     pub fn new(addr: Endpoint, worker_id: &str) -> Self {
         let edb = get_expert_db();
-        let gate = get_instance_gate();
+        let gate_async = get_instance_gate(); // Use async gate for state operations
         let tdb = SafeTensorDB::new_shared();
         Self {
             tensor_db: tdb,
             expert_db: edb,
             worker_id: worker_id.to_owned(),
-            gate,
+            gate_async,
             controller_addr: addr,
         }
     }
 
+    /// Generate request stream for state exchange
     async fn get_request_stream(worker_id: String) -> impl Stream<Item = ExchangeReq> {
         let settings = get_ek_settings();
         tokio_stream::iter(1..usize::MAX).map(move |_| ExchangeReq {
@@ -57,12 +60,13 @@ impl StateClient {
                 "http://{}:{}",
                 settings.worker.broadcast, settings.worker.ports.main
             ),
-            channel: "grpc".to_string(),
+            channel: settings.worker.channel.clone(),
             device: settings.worker.device.clone(),
             last_will: false,
         })
     }
 
+    /// Handle incoming stream messages from controller
     async fn handle_stream_msg(
         &mut self,
         msg: Option<Result<ExchangeResp, tonic::Status>>,
@@ -73,7 +77,7 @@ impl StateClient {
                 match self.handle_states(state).await {
                     Ok(_) => {}
                     Err(e) => {
-                        log::error!("sync remote state error {:?}", e);
+                        log::error!("sync remote state error {e:?}");
                     }
                 }
             }
@@ -81,6 +85,7 @@ impl StateClient {
         Ok(())
     }
 
+    /// Inner run loop for state client
     async fn run_inner(&mut self, token: CancellationToken) -> EKResult<()> {
         let mut cli = StateServiceClient::connect(self.controller_addr.clone()).await?;
         let req_stream = StateClient::get_request_stream(self.worker_id.to_owned())
@@ -102,14 +107,14 @@ impl StateClient {
         Ok(())
     }
 
+    /// Main run loop with reconnection logic
     pub async fn run(&mut self, token: CancellationToken) -> EKResult<()> {
         loop {
             log::info!("start sync remote state");
             select! {
-                e= self.run_inner(token.clone()) =>{
-
+                e = self.run_inner(token.clone()) => {
                     if let Err(e) = e {
-                        log::error!("state client error {:?}", e);
+                        log::error!("state client error {e:?}");
                         tokio::time::sleep(std::time::Duration::from_secs(3)).await;
                     }
                 },
@@ -117,7 +122,6 @@ impl StateClient {
                     log::info!("state client cancelled");
                     break;
                 }
-
             }
         }
 
@@ -126,6 +130,7 @@ impl StateClient {
         Ok(())
     }
 
+    /// Spawn expert loading task
     fn spawn_expert_loading_task(
         &self,
         js: &mut JoinSet<EKResult<()>>,
@@ -145,23 +150,25 @@ impl StateClient {
             log::debug!("load expert {}", &id);
             let ek = ExpertKey::from_expert_id(model_name, &expert.id)?;
             if let Err(e) = x::load_expert_task(tdb, edb.clone(), instance, &ek).await {
-                log::error!("error in load expert {}", e)
+                log::error!("error in load expert {e}")
             }
             drop(permit);
             Ok(())
         });
     }
 
+    /// Remove experts that are no longer needed
     async fn remove_stale_experts(&mut self, incoming: &[Metadata], current: &[String]) {
         let mut lg = self.expert_db.write().await;
         let incoming_ids: Vec<String> = incoming.iter().map(|e| e.id.clone()).collect();
         for e in current.iter().filter(|e| !incoming_ids.contains(e)) {
             if let Err(e) = lg.remove(e).await {
-                log::error!("remove expert error {:?}", e);
+                log::error!("remove expert error {e:?}");
             }
         }
     }
 
+    /// Get experts that need to be loaded
     async fn get_new_experts(&self, incoming: &[Metadata]) -> Vec<Metadata> {
         let mut diff = vec![];
         let rg = self.expert_db.read().await;
@@ -173,6 +180,7 @@ impl StateClient {
         diff
     }
 
+    /// Load new experts that were received from controller
     async fn load_new_experts(&mut self, exp_incoming: &[Metadata]) -> EKResult<()> {
         let exp_new = self.get_new_experts(exp_incoming).await;
         if exp_new.is_empty() {
@@ -195,6 +203,7 @@ impl StateClient {
         Ok(())
     }
 
+    /// Handle state updates from controller
     async fn handle_states(&mut self, state: ExpertWithState) -> EKResult<()> {
         if state.target.is_none() {
             return Ok(());
@@ -204,23 +213,28 @@ impl StateClient {
         let exp_incoming = slice.expert_meta.clone();
         self.load_new_experts(&exp_incoming).await?;
 
-        let exp_current = self.gate.read().await.current_experts().await?;
+        // Use async gate for state management operations
+        let exp_current = self.gate_async.current_experts().await?;
         self.remove_stale_experts(&exp_incoming, &exp_current).await;
         Ok(())
     }
 }
 
+/// Inspector for monitoring expert loading progress
 pub struct StateInspector {
     edb: Arc<RwLock<dyn ExpertDB + Sync + Send + 'static>>,
 }
 
 impl StateInspector {
+    /// Inspect current loading state and update metrics
     async fn inspect(&self) {
         let settings = get_ek_settings();
         let rg = self.edb.read().await;
         let loaded = rg.loaded();
         let loading = rg.loading();
         log::info!(loaded, loading; "loading progress");
+
+        // Update metrics
         METRIC_WORKER_EXPERT_LOADING
             .with_label_values(&[
                 settings.worker.id.as_str(),
@@ -238,6 +252,7 @@ impl StateInspector {
             .set(loading as i64);
     }
 
+    /// Main run loop for state inspector
     pub async fn run(&self) {
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(3)).await;
@@ -245,6 +260,7 @@ impl StateInspector {
         }
     }
 
+    /// Spawn state inspector task
     pub fn spawn() -> JoinHandle<()> {
         let si = StateInspector {
             edb: get_expert_db(),

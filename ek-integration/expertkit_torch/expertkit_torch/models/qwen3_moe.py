@@ -19,6 +19,8 @@
 # limitations under the License.
 
 import argparse
+import json
+import os
 import time
 import torch
 import torch.nn.functional as F
@@ -41,11 +43,19 @@ set_verbosity_error()
 DEFAULT_TIMEOUT_INTVAL = 100
 layer_idx = 0
 
+# The default device should be set according to the environment.
+if torch.cuda.is_available():
+    device = "cuda"
+elif torch.backends.mps.is_available():
+    device = "mps"
+else:
+    device = "cpu"
+
 
 def intercept_moe(
     enable_ek: bool = True,
     ek_addr: str = "localhost:5002",
-    ek_model_name: str = "qwen3",    
+    ek_model_name: str = "qwen3",
 ):
     class InterceptedMoE(nn.Module):
         client: ExpertKitClient = None
@@ -54,7 +64,8 @@ def intercept_moe(
             super().__init__()
             global layer_idx
             if enable_ek and InterceptedMoE.client is None:
-                InterceptedMoE.client = ExpertKitClient(ek_addr, DEFAULT_TIMEOUT_INTVAL)
+                InterceptedMoE.client = ExpertKitClient(
+                    ek_addr, DEFAULT_TIMEOUT_INTVAL)
             self.layer_id = layer_idx
             layer_idx += 1
             layer_idx = layer_idx % config.num_hidden_layers
@@ -62,7 +73,8 @@ def intercept_moe(
             self.top_k = config.num_experts_per_tok
             self.norm_topk_prob = config.norm_topk_prob
 
-            self.gate = nn.Linear(config.hidden_size, config.num_experts, bias=False)
+            self.gate = nn.Linear(config.hidden_size,
+                                  config.num_experts, bias=False)
             if not enable_ek:
                 self.experts = nn.ModuleList(
                     [
@@ -85,7 +97,7 @@ def intercept_moe(
         ):
             # Start timing for expert computation
             start_time = time.time()
-            
+
             expert_ids = []
             total_seq_len, _ = hidden_states.shape
             for seq_idx in range(total_seq_len):
@@ -99,14 +111,15 @@ def intercept_moe(
             outputs = self.client.forward_expert(
                 expert_ids=expert_ids, hidden_state=hidden_states
             )
-            outputs = outputs.to(device=hidden_states.device, dtype=hidden_states.dtype)
+            outputs = outputs.to(device=hidden_states.device,
+                                 dtype=hidden_states.dtype)
             expanded_weights = routing_weights.unsqueeze(-1)
             output = torch.sum(expanded_weights * outputs, dim=1)
 
             final_hidden_states = output.reshape(
                 batch_size, sequence_length, hidden_dim
             )
-            
+
             # Record expert computation time if profiler is available
             end_time = time.time()
 
@@ -125,7 +138,7 @@ def intercept_moe(
         ):
             # Start timing for expert computation
             start_time = time.time()
-            
+
             final_hidden_states = torch.zeros(
                 (batch_size * sequence_length, hidden_dim),
                 dtype=hidden_states.dtype,
@@ -134,9 +147,11 @@ def intercept_moe(
             for expert_idx in range(self.num_experts):
                 expert_layer = self.experts[expert_idx]
                 idx, top_x = torch.where(expert_mask[expert_idx])
-                current_state = hidden_states[None, top_x].reshape(-1, hidden_dim)
+                current_state = hidden_states[None,
+                                              top_x].reshape(-1, hidden_dim)
                 current_hidden_states = (
-                    expert_layer(current_state) * routing_weights[top_x, idx, None]
+                    expert_layer(current_state) *
+                    routing_weights[top_x, idx, None]
                 )
                 final_hidden_states.index_add_(
                     0, top_x, current_hidden_states.to(hidden_states.dtype)
@@ -144,22 +159,23 @@ def intercept_moe(
             final_hidden_states = final_hidden_states.reshape(
                 batch_size, sequence_length, hidden_dim
             )
-            
+
             # Record expert computation time if profiler is available
             end_time = time.time()
-                
+
             return final_hidden_states
 
         def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
             # Timing overall MoE forward pass
             forward_start = time.time()
-            
+
             batch_size, sequence_length, hidden_dim = hidden_states.shape
             hidden_states = hidden_states.view(-1, hidden_dim)
-            
+
             # Process router logits (no need to time separately)
             router_logits = self.gate(hidden_states)
-            routing_weights = F.softmax(router_logits, dim=1, dtype=torch.float)
+            routing_weights = F.softmax(
+                router_logits, dim=1, dtype=torch.float)
             routing_weights, selected_experts = torch.topk(
                 routing_weights, self.top_k, dim=-1
             )
@@ -208,35 +224,38 @@ def intercept_moe(
     delattr(qwen3_moe, "Qwen3MoeSparseMoeBlock")
     setattr(qwen3_moe, "Qwen3MoeSparseMoeBlock", InterceptedMoE)
 
+
 tokenizer: Optional[AutoTokenizer] = None
 model: Optional[AutoModelForCausalLM] = None
 
+
 def evaluate_batch(
-    *, 
-    model_path="./", 
-    prompts="What is MoE Model?", 
+    *,
+    model_path="./",
+    prompts="What is MoE Model?",
+    output_max_length=64,
     enable_ek=True,
     ek_addr="localhost:5002",
     ek_model_name="qwen3"
 ) -> Dict[str, Any]:
     """
     Batch inference with performance profiling.
-    
+
     Args:
         model_path: Path to the pretrained model
         prompts: List of prompt strings for batch processing
         enable_ek: Whether to enable expert knowledge
-    
+
     Returns:
         Dictionary containing results and performance metrics
     """
     if prompts is None:
         prompts = ["What is MoE Model?"]
-    
+
     # Convert str to list
     if isinstance(prompts, str):
         prompts = [prompts]
-    
+
     # First intercept the MoE module - completely independent of profiling
     intercept_moe(
         enable_ek=enable_ek,
@@ -246,7 +265,7 @@ def evaluate_batch(
 
     # Load the tokenizer and the model only once
     global tokenizer, model
-    if tokenizer is None:    
+    if tokenizer is None:
         tokenizer = AutoTokenizer.from_pretrained(
             pretrained_model_name_or_path=model_path,
         )
@@ -254,13 +273,13 @@ def evaluate_batch(
         model = AutoModelForCausalLM.from_pretrained(
             pretrained_model_name_or_path=model_path,
             torch_dtype="auto",
-        )
-    
+        ).to(device)
+
     # Initialize profiler manager with context manager
     with ProfilerManager(batch_size=len(prompts)) as profiler:
         # Wrap model with profiler - completely non-invasive
         profiler.wrap_model(model)
-        
+
         # Prepare batch messages
         batch_messages = []
         for prompt in prompts:
@@ -272,33 +291,34 @@ def evaluate_batch(
                 enable_thinking=True,
             )
             batch_messages.append(text)
-        
+
         # Tokenize batch inputs with padding
         model_inputs = tokenizer(
-            batch_messages, 
-            return_tensors="pt", 
-            padding=True, 
-            truncation=True
+            batch_messages,
+            return_tensors="pt",
+            padding=True,
+            truncation=True,
         ).to(model.device)
-        
+
         # Generate responses - profiling happens automatically via hooks
         generated_ids = model.generate(
-            **model_inputs, 
-            max_new_tokens=50,
+            **model_inputs,
+            max_new_tokens=output_max_length,
             pad_token_id=tokenizer.eos_token_id
         )
-        
+
         # Process generated sequences
         results = []
         for i in range(len(prompts)):
             # Extract output tokens
             input_length = len(model_inputs.input_ids[i])
             output_ids = generated_ids[i][input_length:].tolist()
-            
+
             # Remove padding tokens
             if tokenizer.pad_token_id is not None:
-                output_ids = [token_id for token_id in output_ids if token_id != tokenizer.pad_token_id]
-            
+                output_ids = [
+                    token_id for token_id in output_ids if token_id != tokenizer.pad_token_id]
+
             # Extract thinking content
             thinking_finish = False
             try:
@@ -314,10 +334,10 @@ def evaluate_batch(
             ).strip("\n")
 
             content = tokenizer.decode(
-                output_ids[index:], 
+                output_ids[index:],
                 skip_special_tokens=True
             ).strip("\n")
-            
+
             results.append({
                 "prompt": prompts[i],
                 "thinking_content": thinking_content,
@@ -325,12 +345,27 @@ def evaluate_batch(
                 "input_tokens": len(model_inputs.input_ids[i]),
                 "output_tokens": len(output_ids),
             })
-        
+
         # Context manager exit will automatically unwrap the model and print the report
         return {
             "results": results,
             "performance": profiler.report()
         }
+
+
+def sharegpt(path):
+    if not os.path.exists(path):
+        raise FileNotFoundError(f"File does not exist: {path}")
+    if not os.path.isfile(path):
+        raise ValueError(f"Path is not a file: {path}")
+    with open(path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    prompts = []
+    for item in data:
+        for conversation in item["conversations"]:
+            if conversation["from"] == "human":
+                prompts.append(conversation["value"])
+    return prompts
 
 
 def main():
@@ -364,24 +399,74 @@ def main():
         action="store_true",
         help="Enable detailed profiling of model components (attention vs expert).",
     )
+    parser.add_argument(
+        "--output_max",
+        type=int,
+        default=64,
+        help="The maximum output length for the model.",
+    )
+    parser.add_argument(
+        "--dataset",
+        choices=["none", "sharegpt"],
+        default="none",
+        help="The dataset to use for evaluation.",
+    )
+    parser.add_argument(
+        "--dataset_path",
+        type=str,
+        help="Path to the dataset file.",
+    )
+    parser.add_argument(
+        "--print_response",
+        action="store_true",
+        help="Print the response content.",
+    )
     args = parser.parse_args()
 
-    test_prompts = [
-        "What is MoE Model?",
-        "Explain the benefits of mixture of experts.",
-        "How does MoE improve model efficiency?",
-        "Compare MoE with dense models.",
-    ] * 512
-    
+    if args.dataset == "none":
+        # Use default prompts if no dataset is specified
+        test_prompts = [
+            "What is MoE Model?",
+            "Explain the benefits of mixture of experts.",
+            "How does MoE improve model efficiency?",
+            "Compare MoE with dense models.",
+        ] * 512
+    elif args.dataset == "sharegpt":
+        # Validate that dataset_path is provided
+        if args.dataset_path is None:
+            raise ValueError(
+                "You must provide --dataset_path when using the 'sharegpt' dataset.")
+        # Load prompts from ShareGPT dataset
+        test_prompts = sharegpt(args.dataset_path)
+        if len(test_prompts) < 512:
+            test_prompts *= (512 // len(test_prompts)) + 1
+        test_prompts = test_prompts[:512]
+    else:
+        raise ValueError("Invalid dataset specified.")
+
     test_batch_sizes = [1, 2, 4, 8, 16, 32, 64, 128, 256]
+    aggregated_results = []
     for batch_size in test_batch_sizes:
         batch_result = evaluate_batch(
-            model_path=args.model_path, 
-            prompts=test_prompts[:batch_size], 
+            model_path=args.model_path,
+            prompts=test_prompts[:batch_size],
             enable_ek=args.enable_ek,
             ek_addr=args.ek_addr,
             ek_model_name=args.ek_model_name,
+            output_max_length=args.output_max,
         )
+        aggregated_results.extend(batch_result["results"])
+
+    if args.print_response:
+        for result in aggregated_results:
+            print()
+            print(f"Prompt: {result['prompt']}")
+            print(f"Thinking Content: {result['thinking_content']}")
+            print(f"Response: {result['content']}")
+            print(
+                f"Input Tokens: {result['input_tokens']}, Output Tokens: {result['output_tokens']}")
+            print("-" * 40)
+
 
 if __name__ == "__main__":
     main()

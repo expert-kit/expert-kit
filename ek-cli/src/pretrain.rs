@@ -46,7 +46,7 @@ async fn extract_attn(input: &str, output: &str) -> EKResult<()> {
     let mut new_map = HashMap::new();
 
     for layer in names {
-        log::info!("extracting layer {}", layer);
+        log::info!("extracting layer {layer}");
         let tv = pretrained.get_tensor(layer.as_str()).await?;
         converted.push((layer.clone(), tv));
         new_map.insert(layer.clone(), out_st_name);

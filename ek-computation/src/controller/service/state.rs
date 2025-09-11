@@ -19,7 +19,10 @@ use crate::proto::ek::worker::v1::state_service_server::StateService;
 pub struct StateServerImpl {}
 
 impl StateServerImpl {
-    async fn listen_worker_ping(mut req: tonic::Request<Streaming<v1::ExchangeReq>>, id: String) {
+    async fn listen_worker_ping(
+        mut req: tonic::Request<Streaming<v1::ExchangeReq>>,
+        hostname: String,
+    ) {
         let w = StateWriterImpl {};
         loop {
             match timeout(Duration::from_secs(60), req.get_mut().message()).await {
@@ -36,28 +39,31 @@ impl StateServerImpl {
                         .await;
 
                     if let Err(e) = err {
-                        log::error!("worker ping error, can not upsert node: {}", e);
+                        log::error!("worker ping error, can not upsert node: {e}");
                     }
 
                     let e = w.node_update_seen(&msg.id).await;
                     if let Err(e) = e {
-                        log::error!("worker ping error: {}", e);
+                        log::error!("worker ping error: {e}");
                     }
                     continue;
                 }
                 Ok(Ok(None)) => {
-                    log::warn!("worker ping stream closed for worker_id={}", id);
-                    get_registry().lock().await.deregister(&id).await;
+                    log::warn!("worker ping stream closed for worker_id={hostname}");
+                    let _ = w.deactivate_node(&hostname).await;
+                    get_registry().lock().await.deregister(&hostname).await;
                     return;
                 }
                 Ok(Err(e)) => {
-                    log::error!("worker ping stream error for worker_id={}, {}", id, e);
-                    get_registry().lock().await.deregister(&id).await;
+                    log::error!("worker ping stream error for worker_id={hostname}, {e}");
+                    let _ = w.deactivate_node(&hostname).await;
+                    get_registry().lock().await.deregister(&hostname).await;
                     return;
                 }
                 Err(e) => {
-                    log::error!("worker ping stream timeout for worker_id={}, {}", id, e);
-                    get_registry().lock().await.deregister(&id).await;
+                    log::error!("worker ping stream timeout for worker_id={hostname}, {e}");
+                    let _ = w.deactivate_node(&hostname).await;
+                    get_registry().lock().await.deregister(&hostname).await;
                     return;
                 }
             }
@@ -74,7 +80,7 @@ impl StateService for StateServerImpl {
         &self,
         mut request: tonic::Request<Streaming<v1::ExchangeReq>>,
     ) -> Result<Response<Self::ExchangeStream>> {
-        let mut lg = DISPATCHER.lock().await;
+        let mut dispather_guard = DISPATCHER.lock().await;
         let (stream_tx, stream_rx) = mpsc::channel(4);
         let first_message = request
             .get_mut()
@@ -82,11 +88,17 @@ impl StateService for StateServerImpl {
             .await?
             .ok_or(Status::invalid_argument("no message"))?;
         let worker_id = first_message.id.clone();
+
+        // Handle incoming worker requests: Ping
         tokio::spawn(async move {
+            // Upsert worker node and update last seen time in database
             StateServerImpl::listen_worker_ping(request, worker_id.clone()).await;
         });
 
-        let mut rx = lg.subscribe(&first_message.id).await;
+        // Watcher experts updates for the worker
+        let mut rx = dispather_guard.subscribe(&first_message.id).await;
+
+        // Handle outgoing messages to the worker: New Experts
         tokio::spawn(async move {
             while let Some(t) = rx.recv().await {
                 let resp = ExchangeResp {
@@ -95,10 +107,11 @@ impl StateService for StateServerImpl {
                     }),
                 };
                 if let Err(e) = stream_tx.send(Ok(resp)).await {
-                    log::error!("stream error: {}", e)
+                    log::error!("stream error: {e}")
                 };
             }
         });
+
         Ok(Response::new(Self::ExchangeStream::new(stream_rx)))
     }
 }

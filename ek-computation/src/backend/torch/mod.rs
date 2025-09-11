@@ -41,7 +41,7 @@ impl From<Device> for tch::Device {
     fn from(val: Device) -> Self {
         match val {
             Device::CPU => tch::Device::Cpu,
-            Device::CUDA(idx) => tch::Device::Cuda(idx as usize),
+            Device::CUDA(idx) => tch::Device::Cuda(idx),
             // _ => panic!("Unsupported device"),
         }
     }
@@ -51,11 +51,13 @@ impl From<tch::Device> for Device {
     fn from(val: tch::Device) -> Self {
         match val {
             tch::Device::Cpu => Device::CPU,
-            tch::Device::Cuda(idx) => Device::CUDA(idx as usize),
+            tch::Device::Cuda(idx) => Device::CUDA(idx),
             _ => panic!("Unsupported device"),
         }
     }
 }
+
+#[expect(dead_code)]
 struct TchSafeView<'a> {
     tensor: &'a tch::Tensor,
     shape: Vec<usize>,
@@ -70,7 +72,7 @@ impl safetensors::View for TchSafeView<'_> {
         &self.shape
     }
 
-    fn data(&self) -> std::borrow::Cow<[u8]> {
+    fn data(&self) -> std::borrow::Cow<'_, [u8]> {
         let mut data = vec![0; self.data_len()];
         let numel = self.tensor.numel();
         self.tensor.f_copy_data_u8(&mut data, numel).unwrap();
@@ -115,10 +117,6 @@ impl EkTensor for TchTensor {
         TchTensor(rand)
     }
 
-    fn stack(tensors: &[Self], dim: usize) -> Self {
-        TchTensor(tch::Tensor::stack(tensors, dim as i64))
-    }
-
     fn shape(&self) -> Vec<usize> {
         self.0.size().iter().map(|&x| x as usize).collect()
     }
@@ -147,7 +145,7 @@ impl EkTensor for TchTensor {
     fn device(&self) -> Device {
         match self.0.device() {
             tch::Device::Cpu => Device::CPU,
-            tch::Device::Cuda(idx) => Device::CUDA(idx as usize),
+            tch::Device::Cuda(idx) => Device::CUDA(idx),
             _ => panic!("Unsupported device"),
         }
     }

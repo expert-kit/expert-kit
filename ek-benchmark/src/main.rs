@@ -1,5 +1,3 @@
-#![feature(f16)]
-
 mod bench;
 use std::{
     fs::File,
@@ -83,11 +81,11 @@ fn main() {
         device: Device::CPU,
     };
 
-    info!("Creating {} expert models...", expert_count);
+    info!("Creating {expert_count} expert models...");
     for i in 0..expert_count {
         match m.backend {
             ExpertBackendType::Torch => {
-                info!("Creating Torch expert {}", i);
+                info!("Creating Torch expert {i}");
                 let rand_weight: ExpertWeight<TchTensor> = ExpertWeight::from_rand_linear(
                     m.hidden_dim,
                     m.intermediate_dim,
@@ -105,7 +103,7 @@ fn main() {
                     DType::Float,
                     Device::CPU,
                 );
-                log::info!("rand weight: {}", rand_weight);
+                log::info!("rand weight: {rand_weight}");
                 let exp = expert_ort::OnnxFFN::new(
                     m.hidden_dim as i64,
                     m.intermediate_dim as i64,
@@ -115,6 +113,7 @@ fn main() {
                 .unwrap();
                 experts.push(ExpertBenchmark(ExpertBackend::OnnxF32(exp)));
             }
+            _ => todo!(),
         }
     }
     let mut bencher = Benchmarker::new(experts);
@@ -143,11 +142,11 @@ fn main() {
     if m.repeats > 1 {
         let summary_by_experiment = bencher.calculate_summary(&df);
         println!("Per-experiment summary:");
-        println!("{}", summary_by_experiment);
+        println!("{summary_by_experiment}");
     }
 
     // Calculate and display final summary with statistics across all experiments
     let final_summary = bencher.calculate_final_summary(&df);
     println!("Final summary (across all experiments):");
-    println!("{}", final_summary);
+    println!("{final_summary}");
 }

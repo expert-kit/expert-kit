@@ -1,21 +1,18 @@
 [package]
 name = "ek-benchmark"
-version = "0.1.0"
-edition = "2024"
-
+version = { workspace = true }
+edition = { workspace = true }
+authors = { workspace = true }
+license = { workspace = true }
+readme = { workspace = true }
+repository = { workspace = true }
 
 [dependencies]
+ek-computation = { workspace = true }
 
-tch = { workspace = true }
-ndarray = { workspace = true }
-ndarray-rand = { workspace = true }
-ort = { workspace = true }
-polars = { workspace = true }
-polars-io = { workspace = true }
 clap = { workspace = true }
-sysinfo = "0.33.1"
 log = { workspace = true }
-half = { workspace = true }
-rand = { workspace = true }
-rand_distr = { workspace = true }
-ek_computation = { path = "../ek-computation" }
+ort = { workspace = true }
+ort-sys = { workspace = true }
+polars = { workspace = true }
+sysinfo = { workspace = true }

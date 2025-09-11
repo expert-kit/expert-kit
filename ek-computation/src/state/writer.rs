@@ -1,4 +1,7 @@
-use std::{sync::Arc, time};
+use std::{
+    sync::{Arc, OnceLock},
+    time,
+};
 
 use crate::{
     proto::ek::object::v1::ExpertSlice,
@@ -10,15 +13,15 @@ use crate::{
 };
 use tonic::async_trait;
 
-use super::models::{self, NewExpert, NewInstance, NewModel, NewNode};
+use super::{
+    io::StateWriter,
+    models::{self, NewExpert, NewInstance, NewModel, NewNode},
+};
 use diesel::{ExpressionMethods, SelectableHelper, upsert::excluded};
 use diesel_async::{AsyncConnection, RunQueryDsl};
 use ek_base::error::{EKError, EKResult};
 use models::{Expert, Instance, Model, Node};
-use once_cell::sync::OnceCell;
 use tokio::sync::RwLock;
-
-use super::io::StateWriter;
 
 pub struct StateWriterImpl {}
 
@@ -100,6 +103,7 @@ impl StateWriter for StateWriterImpl {
             .await?;
         Ok(())
     }
+
     async fn del_node(&mut self, id: i32) -> EKResult<()> {
         let mut conn = POOL.get().await?;
         use schema::node::dsl;
@@ -109,6 +113,7 @@ impl StateWriter for StateWriterImpl {
             .await?;
         Ok(())
     }
+
     async fn upd_expert_state(&mut self, hostname: &str, state: ExpertSlice) -> EKResult<()> {
         let mut conn = POOL.get().await?;
         let reader = StateReaderImpl {};
@@ -118,7 +123,7 @@ impl StateWriter for StateWriterImpl {
                 let node = reader
                     .node_by_hostname(hostname)
                     .await?
-                    .ok_or(EKError::NotFound(format!("node {} not found", hostname)))?;
+                    .ok_or(EKError::NotFound(format!("node {hostname} not found")))?;
                 let updating_ids = self.expert_slice_to_ids(&state)?;
                 let new_experts = self.expert_slice_to_new_expert(node.id, &state)?;
                 // delete state of updating experts
@@ -221,6 +226,29 @@ impl StateWriterImpl {
         Ok(())
     }
 
+    pub async fn del_experts_by_node(&self, node_id: i32, instance_id: i32) -> EKResult<()> {
+        let mut conn = POOL.get().await?;
+        use schema::expert::dsl;
+        diesel::delete(schema::expert::table)
+            .filter(dsl::node_id.eq(node_id))
+            .filter(dsl::instance_id.eq(instance_id))
+            .execute(&mut conn)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn deactivate_node(&self, hostname: &str) -> EKResult<()> {
+        let mut conn = POOL.get().await?;
+        use schema::node::dsl;
+        // Set last seen to zero time
+        diesel::update(schema::node::table)
+            .filter(dsl::hostname.eq(hostname))
+            .set((dsl::last_seen_at.eq(std::time::SystemTime::UNIX_EPOCH),))
+            .execute(&mut conn)
+            .await?;
+        Ok(())
+    }
+
     fn expert_slice_to_ids(&self, slice: &ExpertSlice) -> EKResult<Vec<i32>> {
         let mut ids = vec![];
         for x in slice.expert_meta.iter() {
@@ -254,7 +282,7 @@ impl StateWriterImpl {
     }
 }
 pub fn get_state_writer() -> Arc<RwLock<dyn StateWriter + Send + Sync>> {
-    static INSTANCE: OnceCell<Arc<RwLock<StateWriterImpl>>> = OnceCell::new();
+    static INSTANCE: OnceLock<Arc<RwLock<StateWriterImpl>>> = OnceLock::new();
     let res = INSTANCE.get_or_init(|| {
         let inner = StateWriterImpl {};
         Arc::new(RwLock::new(inner))
