@@ -289,7 +289,7 @@ pub async fn worker_main() -> EKResult<()> {
                 .map(|v| v.parse().unwrap_or(1))
                 .unwrap_or(1);
 
-            for _ in 0..thread_count {
+            for idx in 0..thread_count {
                 let recv_channel = recv_channel.clone();
                 let send_channel = send_channel.clone();
                 let gate = EKInstanceGateSync::default();
@@ -313,7 +313,8 @@ pub async fn worker_main() -> EKResult<()> {
                         };
 
                         log::debug!(
-                            "received RDMA request: id={} expert={}",
+                            "thread {} received RDMA request: id={} expert={}",
+                            idx,
                             req.id(),
                             req.expert_id()
                         );
@@ -334,15 +335,18 @@ pub async fn worker_main() -> EKResult<()> {
                             std::thread::sleep(Duration::from_secs(1));
                         };
                         let resp = RdmaWorkerResp::new(req.id(), output_tensor);
+                        let send_start = time::Instant::now();
                         while send_channel.lock().unwrap().send(&resp).is_err() {
                             log::warn!("RDMA send_channel full, retrying...");
                             std::thread::sleep(Duration::from_micros(100));
                         }
                         log::info!(
-                            "RDMA request id={} expert={} processed in {}us",
+                            "thread {} RDMA request id={} expert={} processed in {}us, send wait {}us",
+                            idx,
                             req.id(),
                             req.expert_id(),
                             now.elapsed().as_micros(),
+                            send_start.elapsed().as_micros(),
                         );
                     }
                 });

@@ -323,9 +323,14 @@ impl NaiveExecutor {
                         }));
 
                         // Send request via RDMA
-                        while send_channel.lock().await.send(&req).is_err() {
-                            log::warn!("failed to send RDMA request to expert {expert_id}");
-                            tokio::time::sleep(tokio::time::Duration::from_micros(100)).await;
+                        loop {
+                           match send_channel.lock().await.send(&req) {
+                                Ok(_) => break,
+                                Err(e) => {
+                                    log::warn!("failed to send RDMA request to expert {expert_id}: {e}");
+                                    tokio::time::sleep(tokio::time::Duration::from_micros(100)).await;
+                                }
+                            }
                         }
 
                         log::debug!(

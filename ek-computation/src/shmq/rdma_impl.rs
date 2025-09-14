@@ -231,11 +231,15 @@ impl<T: RdmaBytes> RdmaQueue<T> {
         if !self.is_sender {
             return Err(RdmaQueueError::IoError);
         }
-
+        let start_time = std::time::Instant::now();
+        let mut t = std::time::Instant::now();
         let remote_region = self.remote_region.clone().ok_or(RdmaQueueError::IoError)?;
+        log::debug!("🚀 1. region clone: {:?}", t.elapsed());
 
         // Read current metadata from remote memory (receiver's queue)
+        t = std::time::Instant::now();
         let meta = self.read_remote_meta(&remote_region)?;
+        log::debug!("🚀 2. read remote meta: {:?}", t.elapsed());
 
         // Check if metadata is valid and queue is full
         if meta.capacity == 0 || !meta.ready {
@@ -246,13 +250,20 @@ impl<T: RdmaBytes> RdmaQueue<T> {
         }
 
         // Write item data directly to remote memory
+        t = std::time::Instant::now();
+        log::debug!("🚀 3. start write remote data");
         let item_offset = meta.data_offset + meta.tail * T::aligned_size();
         self.write_remote_data(&remote_region, item_offset, item)?;
+        log::debug!("🚀 - 3 end write remote data: {:?}\n", t.elapsed());
 
         // Update tail pointer in remote memory atomically
+        t = std::time::Instant::now();
+        log::debug!("🚀 4. start update remote tail");
         let new_tail = (meta.tail + 1) % meta.capacity;
         self.update_remote_tail(&remote_region, new_tail)?;
+        log::debug!("🚀 - 4 end update remote tail: {:?}\n", t.elapsed());
 
+        log::debug!("🚀 Total send time: {:?}\n", start_time.elapsed());
         Ok(())
     }
 
@@ -310,21 +321,29 @@ impl<T: RdmaBytes> RdmaQueue<T> {
         let write_offset = std::mem::size_of::<RdmaQueueMeta>().next_multiple_of(64);
 
         // Write item directly to local buffer (zero-copy)
+        let mut t = std::time::Instant::now();
         item.write_to_slice(&mut self.memory_region.inner()[write_offset..write_offset + T::SIZE]);
+        log::debug!("🚀 3.1 write to local buffer: {:?}", t.elapsed());
 
+        t = std::time::Instant::now();
         let local_slice = self
             .memory_region
             .slice(write_offset..write_offset + T::SIZE);
         let remote_slice = remote_region.slice(offset..offset + T::SIZE);
+        log::debug!("🚀 3.2 prepare slices: {:?}", t.elapsed());
 
         // Issue RDMA write
+        t = std::time::Instant::now();
         let wr_id = self.next_wr_id();
         let qp = self.qp.as_mut().ok_or(RdmaQueueError::IoError)?;
         qp.post_write(&[local_slice], remote_slice, wr_id, None)
             .map_err(|_| RdmaQueueError::IoError)?;
+        log::debug!("🚀 3.3 post write: {:?}", t.elapsed());
 
         // Wait for completion
+        t = std::time::Instant::now();
         self.wait_for_completion(wr_id)?;
+        log::debug!("🚀 3.4 wait for completion: {:?}", t.elapsed());
 
         Ok(())
     }
@@ -339,25 +358,36 @@ impl<T: RdmaBytes> RdmaQueue<T> {
         let tail_size = std::mem::size_of::<usize>();
 
         // Prepare local data for writing
+        let mut t = std::time::Instant::now();
         let write_offset =
             std::mem::size_of::<RdmaQueueMeta>().next_multiple_of(64) + T::aligned_size();
         let tail_bytes = new_tail.to_le_bytes();
+        log::debug!("🚀 4.1 prepare tail bytes: {:?}", t.elapsed());
+
+        t = std::time::Instant::now();
         self.memory_region.inner()[write_offset..write_offset + tail_size]
             .copy_from_slice(&tail_bytes);
+        log::debug!("🚀 4.2 write to local buffer: {:?}", t.elapsed());
 
+        t = std::time::Instant::now();
         let local_slice = self
             .memory_region
             .slice(write_offset..write_offset + tail_size);
         let remote_slice = remote_region.slice(tail_offset..tail_offset + tail_size);
+        log::debug!("🚀 4.3 prepare slices: {:?}", t.elapsed());
 
         // Issue RDMA write
+        t = std::time::Instant::now();
         let wr_id = self.next_wr_id();
         let qp = self.qp.as_mut().ok_or(RdmaQueueError::IoError)?;
         qp.post_write(&[local_slice], remote_slice, wr_id, None)
             .map_err(|_| RdmaQueueError::IoError)?;
+        log::debug!("🚀 4.4 post write: {:?}", t.elapsed());
 
         // Wait for completion
+        t = std::time::Instant::now();
         self.wait_for_completion(wr_id)?;
+        log::debug!("🚀 4.5 wait for completion: {:?}", t.elapsed());
 
         Ok(())
     }
@@ -392,42 +422,20 @@ impl<T: RdmaBytes> RdmaQueue<T> {
     /// Wait for a specific work request to complete with non-blocking retry
     fn wait_for_completion(&mut self, expected_wr_id: u64) -> Result<(), RdmaQueueError> {
         let mut completions = [Default::default(); 4]; // Handle multiple completions
-        let mut retries = 0;
-        const MAX_RETRIES: u32 = 1000; // For microsecond-level operations
 
         loop {
             // First try non-blocking poll
             match self._send_cq.wait(&mut completions, None) {
-                Ok(completed) if !completed.is_empty() => {
-                    for completion in completed {
-                        if completion.wr_id() == expected_wr_id {
-                            // Check if the completion was successful
-                            // Note: We'll need to check the actual API for proper status checking
-                            return Ok(());
-                        }
-                    }
-                }
-                Ok(_) => {
-                    retries += 1;
-                    if retries >= MAX_RETRIES {
-                        // Fall back to blocking wait with very short timeout
-                        match self
-                            ._send_cq
-                            .wait(&mut completions, Some(Duration::from_micros(10)))
-                        {
-                            Ok(completed) if !completed.is_empty() => {
-                                for completion in completed {
-                                    if completion.wr_id() == expected_wr_id {
-                                        return Ok(());
-                                    }
-                                }
+                Ok(completed) => {
+                    if !completed.is_empty() {
+                        for completion in completed {
+                            if completion.wr_id() == expected_wr_id {
+                                // Check if the completion was successful
+                                // TODO: We'll need to check the actual API for proper status checking
+                                return Ok(());
                             }
-                            Ok(_) => return Err(RdmaQueueError::IoError), // Timeout
-                            Err(_) => return Err(RdmaQueueError::IoError),
                         }
                     }
-                    // Busy wait for a few CPU cycles before retry
-                    std::hint::spin_loop();
                 }
                 Err(_) => return Err(RdmaQueueError::IoError),
             }

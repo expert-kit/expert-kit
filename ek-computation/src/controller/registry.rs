@@ -809,6 +809,7 @@ impl RdmaBytes for RdmaWorkerReq {
 
     fn write_to_slice(&self, slice: &mut [u8]) {
         let mut offset = 0;
+        let start_time = std::time::Instant::now();
 
         // Add id (8 bytes)
         slice[offset..offset + 8].copy_from_slice(&self.id.to_le_bytes());
@@ -825,12 +826,6 @@ impl RdmaBytes for RdmaWorkerReq {
         // Add input_tensor data
         let tensor_len = self.input_tensor.len();
         slice[offset..offset + tensor_len].copy_from_slice(&self.input_tensor);
-        offset += tensor_len;
-
-        // Pad remaining bytes with zeros
-        if offset < slice.len() {
-            slice[offset..].fill(0);
-        }
     }
 
     fn from_bytes(bytes: &[u8]) -> Self {
@@ -884,7 +879,6 @@ impl RdmaBytes for RdmaWorkerResp {
 
     fn write_to_slice(&self, slice: &mut [u8]) {
         let mut offset = 0;
-
         // Add id (8 bytes)
         slice[offset..offset + 8].copy_from_slice(&self.id.to_le_bytes());
         offset += 8;
@@ -896,12 +890,6 @@ impl RdmaBytes for RdmaWorkerResp {
         // Add output_tensor data
         let tensor_len = self.output_tensor.len();
         slice[offset..offset + tensor_len].copy_from_slice(&self.output_tensor);
-        offset += tensor_len;
-
-        // Pad remaining bytes with zeros
-        if offset < slice.len() {
-            slice[offset..].fill(0);
-        }
     }
 
     fn from_bytes(bytes: &[u8]) -> Self {
