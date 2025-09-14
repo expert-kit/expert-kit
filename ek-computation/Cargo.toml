@@ -44,7 +44,6 @@ tonic = { workspace = true }
 tower = { workspace = true }
 tracing = { workspace = true }
 tracing-opentelemetry = { workspace = true }
-bincode = "2.0.1"
 
 [build-dependencies]
 tonic-build = { workspace = true }
