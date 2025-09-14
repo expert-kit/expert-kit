@@ -804,12 +804,11 @@ impl RdmaWorkerReq {
 }
 
 impl RdmaBytes for RdmaWorkerReq {
-    const SIZE: usize =
+    const CAPACITY: usize =
         std::mem::size_of::<usize>() + 64 + std::mem::size_of::<usize>() + MAX_TENSOR_SIZE;
 
     fn write_to_slice(&self, slice: &mut [u8]) {
         let mut offset = 0;
-        let start_time = std::time::Instant::now();
 
         // Add id (8 bytes)
         slice[offset..offset + 8].copy_from_slice(&self.id.to_le_bytes());
@@ -850,6 +849,10 @@ impl RdmaBytes for RdmaWorkerReq {
             input_tensor,
         }
     }
+
+    fn len(&self) -> usize {
+        std::mem::size_of::<usize>() + 64 + std::mem::size_of::<usize>() + self.input_tensor.len()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -874,7 +877,7 @@ impl RdmaWorkerResp {
 }
 
 impl RdmaBytes for RdmaWorkerResp {
-    const SIZE: usize =
+    const CAPACITY: usize =
         std::mem::size_of::<usize>() + std::mem::size_of::<usize>() + MAX_TENSOR_SIZE;
 
     fn write_to_slice(&self, slice: &mut [u8]) {
@@ -905,6 +908,10 @@ impl RdmaBytes for RdmaWorkerResp {
             .to_vec();
 
         Self { id, output_tensor }
+    }
+
+    fn len(&self) -> usize {
+        std::mem::size_of::<usize>() + std::mem::size_of::<usize>() + self.output_tensor.len()
     }
 }
 

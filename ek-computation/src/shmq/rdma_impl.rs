@@ -61,14 +61,18 @@ impl Default for RdmaQueueMeta {
 
 /// Trait for types that can be sent over RDMA queue
 pub trait RdmaBytes {
-    const SIZE: usize;
+    const CAPACITY: usize;
 
     fn write_to_slice(&self, slice: &mut [u8]);
     fn from_bytes(bytes: &[u8]) -> Self;
 
+    /// Real len of the structure
+    /// This is the actual length of the data, excluding any padding
+    fn len(&self) -> usize;
+
     #[inline]
     fn aligned_size() -> usize {
-        Self::SIZE.next_multiple_of(64)
+        Self::CAPACITY.next_multiple_of(64)
     }
 }
 
@@ -283,7 +287,7 @@ impl<T: RdmaBytes> RdmaQueue<T> {
 
         // Read item data from local memory
         let item_offset = meta.data_offset + meta.head * T::aligned_size();
-        let item_data = &self.memory_region.inner()[item_offset..item_offset + T::SIZE];
+        let item_data = &self.memory_region.inner()[item_offset..item_offset + T::CAPACITY];
         let item = T::from_bytes(item_data);
 
         // Update head pointer in local memory
@@ -322,14 +326,16 @@ impl<T: RdmaBytes> RdmaQueue<T> {
 
         // Write item directly to local buffer (zero-copy)
         let mut t = std::time::Instant::now();
-        item.write_to_slice(&mut self.memory_region.inner()[write_offset..write_offset + T::SIZE]);
+        item.write_to_slice(
+            &mut self.memory_region.inner()[write_offset..write_offset + T::CAPACITY],
+        );
         log::debug!("🚀 3.1 write to local buffer: {:?}", t.elapsed());
 
         t = std::time::Instant::now();
         let local_slice = self
             .memory_region
-            .slice(write_offset..write_offset + T::SIZE);
-        let remote_slice = remote_region.slice(offset..offset + T::SIZE);
+            .slice(write_offset..write_offset + item.len());
+        let remote_slice = remote_region.slice(offset..offset + item.len());
         log::debug!("🚀 3.2 prepare slices: {:?}", t.elapsed());
 
         // Issue RDMA write
@@ -485,29 +491,37 @@ impl<T> Drop for RdmaQueue<T> {
 }
 
 impl RdmaBytes for u64 {
-    const SIZE: usize = std::mem::size_of::<u64>();
+    const CAPACITY: usize = std::mem::size_of::<u64>();
 
     fn write_to_slice(&self, slice: &mut [u8]) {
-        slice[..Self::SIZE].copy_from_slice(&self.to_le_bytes());
+        slice[..Self::CAPACITY].copy_from_slice(&self.to_le_bytes());
     }
 
     fn from_bytes(bytes: &[u8]) -> Self {
-        u64::from_le_bytes(bytes[..Self::SIZE].try_into().unwrap())
+        u64::from_le_bytes(bytes[..Self::CAPACITY].try_into().unwrap())
+    }
+
+    fn len(&self) -> usize {
+        std::mem::size_of::<u64>()
     }
 }
 
 impl RdmaBytes for String {
-    const SIZE: usize = 256; // Fixed size for simplicity
+    const CAPACITY: usize = 256; // Fixed size for simplicity
 
     fn write_to_slice(&self, slice: &mut [u8]) {
         slice.fill(0); // Zero out the slice first
         let bytes = self.as_bytes();
-        let len = bytes.len().min(Self::SIZE - 1);
+        let len = bytes.len().min(Self::CAPACITY - 1);
         slice[..len].copy_from_slice(&bytes[..len]);
     }
 
     fn from_bytes(bytes: &[u8]) -> Self {
         let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
         String::from_utf8_lossy(&bytes[..end]).into_owned()
+    }
+
+    fn len(&self) -> usize {
+        self.len()
     }
 }
