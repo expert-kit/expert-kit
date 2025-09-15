@@ -17,10 +17,11 @@ use tracing::{Instrument, instrument, span};
 
 use crate::{
     backend::{EkTensor, torch::TchTensor},
-    controller::{
-        metrics::METRIC_CONTROLLER_INTRA_REQ,
-        registry::{ExpertClient, ExpertId, ExpertIdRef, LocalShmWorkerReq, LocalShmWorkerResp},
+    controller::registry::{
+        ExpertClient, ExpertId, ExpertIdRef, LocalShmWorkerReq, LocalShmWorkerResp, RdmaWorkerReq,
+        RdmaWorkerResp,
     },
+    metrics::METRIC_CONTROLLER_INTRA_REQ,
     proto::ek::worker::v1::{self},
 };
 
@@ -58,6 +59,7 @@ struct EgressMeta {
 enum ForwardResponse {
     Grpc(v1::ForwardResp),
     Shm(LocalShmWorkerResp),
+    Rdma(RdmaWorkerResp),
 }
 
 impl ForwardResponse {
@@ -65,6 +67,29 @@ impl ForwardResponse {
         match self {
             ForwardResponse::Grpc(resp) => &resp.output_tensor,
             ForwardResponse::Shm(resp) => resp.output_tensor(),
+            ForwardResponse::Rdma(resp) => resp.output_tensor(),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+enum PendingResponse {
+    Shm(LocalShmWorkerResp),
+    Rdma(RdmaWorkerResp),
+}
+
+impl PendingResponse {
+    fn into_shm(self) -> Option<LocalShmWorkerResp> {
+        match self {
+            PendingResponse::Shm(resp) => Some(resp),
+            PendingResponse::Rdma(_) => None,
+        }
+    }
+
+    fn into_rdma(self) -> Option<RdmaWorkerResp> {
+        match self {
+            PendingResponse::Shm(_) => None,
+            PendingResponse::Rdma(resp) => Some(resp),
         }
     }
 }
@@ -72,7 +97,7 @@ impl ForwardResponse {
 pub struct NaiveExecutor {
     pending_egress: BTreeMap<ExpertId, Vec<EgressMeta>>,
     pending_ingress: BTreeMap<ReqId, IngressMeta>,
-    pending_resp: Arc<Mutex<HashMap<usize, LocalShmWorkerResp>>>,
+    pending_resp: Arc<Mutex<HashMap<usize, PendingResponse>>>,
 
     seq_mapping: BTreeMap<GlobalSeqId, (ReqId, LocalSeqIdx)>,
     seq_gid_cursor: u64,
@@ -253,7 +278,9 @@ impl NaiveExecutor {
                             expert_id
                         );
                         let resp = loop {
-                            if let Some(resp) = pending_resp.lock().await.remove(&req.id()) {
+                            if let Some(pending_resp) = pending_resp.lock().await.remove(&req.id())
+                                && let Some(resp) = pending_resp.into_shm()
+                            {
                                 break resp;
                             }
                             match recv_channel.lock().await.recv() {
@@ -263,7 +290,10 @@ impl NaiveExecutor {
                                             "received response for expert {} but id not correct",
                                             expert_id
                                         );
-                                        pending_resp.lock().await.insert(resp.id(), resp);
+                                        pending_resp
+                                            .lock()
+                                            .await
+                                            .insert(resp.id(), PendingResponse::Shm(resp));
                                         tokio::task::yield_now().await;
                                         continue;
                                     }
@@ -275,6 +305,63 @@ impl NaiveExecutor {
                             }
                         };
                         Ok(ForwardResponse::Shm(resp))
+                    }
+                    .in_current_span();
+                    handles.push(tokio::spawn(fu));
+                }
+                ExpertClient::Rdma((send_channel, recv_channel)) => {
+                    let fu = async move {
+                        let req = RdmaWorkerReq::new(expert_id.as_ref(), &serialized_tensor);
+
+                        let start = time::Instant::now();
+                        let _d = Defers::defer(Box::new(move || {
+                            let elapsed = start.elapsed();
+                            METRIC_CONTROLLER_INTRA_REQ
+                                .with_label_values(&[settings.inference.model_name.as_str()])
+                                .observe(elapsed.as_micros() as f64);
+                        }));
+
+                        // Send request via RDMA
+                        loop {
+                           match send_channel.lock().await.send(&req) {
+                                Ok(_) => break,
+                                Err(e) => {
+                                    log::warn!("failed to send RDMA request to expert {expert_id}: {e}");
+                                    tokio::time::sleep(tokio::time::Duration::from_micros(100)).await;
+                                }
+                            }
+                        }
+
+                        log::debug!(
+                            "RDMA request sent for expert {}, waiting for response",
+                            expert_id
+                        );
+
+                        // Wait for response via RDMA
+                        let resp = loop {
+                            if let Some(pending_resp) = pending_resp.lock().await.remove(&req.id())
+                                && let Some(resp) = pending_resp.into_rdma() {
+                                    break resp;
+                                }
+                            match recv_channel.lock().await.recv() {
+                                Ok(resp) => {
+                                    if resp.id() != req.id() {
+                                        log::debug!(
+                                            "received RDMA response for expert {} but id not correct",
+                                            expert_id
+                                        );
+                                        pending_resp.lock().await.insert(resp.id(), PendingResponse::Rdma(resp));
+                                        tokio::task::yield_now().await;
+                                        continue;
+                                    }
+                                    break resp;
+                                }
+                                Err(_) => {
+                                    tokio::task::yield_now().await;
+                                }
+                            }
+                        };
+                        Ok(ForwardResponse::Rdma(resp))
                     }
                     .in_current_span();
                     handles.push(tokio::spawn(fu));

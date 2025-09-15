@@ -251,6 +251,7 @@ controller:
   ports:
     intra: 5001
     inter: 5002
+  registry_backend: Grpc
 "#
     }
 
