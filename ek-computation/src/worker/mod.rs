@@ -18,9 +18,7 @@ pub mod server;
 pub mod state;
 pub mod x;
 
-use crate::controller::registry::{
-    LocalShmWorkerReq, LocalShmWorkerResp, RdmaWorkerReq, RdmaWorkerResp,
-};
+use crate::controller::registry::{ShmqWorkerReq, ShmqWorkerResp};
 use crate::metrics::spawn_metrics_server;
 use crate::shmq::{ShmQueue, rdma_impl::RdmaQueue};
 use crate::worker::core::EKInstanceGateSync;
@@ -31,17 +29,17 @@ use crate::proto::ek::worker::v1::{RdmaEndpoint, RdmaEndpointPair};
 use ek_base::{config::get_ek_settings, error::EKResult};
 
 // Global storage for RDMA queues
-static RDMA_REQ_QUEUE: OnceLock<Arc<Mutex<RdmaQueue<RdmaWorkerReq>>>> = OnceLock::new();
-static RDMA_RESP_QUEUE: OnceLock<Arc<Mutex<RdmaQueue<RdmaWorkerResp>>>> = OnceLock::new();
+static RDMA_REQ_QUEUE: OnceLock<Arc<Mutex<RdmaQueue<ShmqWorkerReq>>>> = OnceLock::new();
+static RDMA_RESP_QUEUE: OnceLock<Arc<Mutex<RdmaQueue<ShmqWorkerResp>>>> = OnceLock::new();
 static RDMA_CONNECTION_STATUS: AtomicBool = AtomicBool::new(false);
 
 /// Get the global RDMA request queue
-pub fn get_rdma_req_queue() -> Option<&'static Arc<Mutex<RdmaQueue<RdmaWorkerReq>>>> {
+pub fn get_rdma_req_queue() -> Option<&'static Arc<Mutex<RdmaQueue<ShmqWorkerReq>>>> {
     RDMA_REQ_QUEUE.get()
 }
 
 /// Get the global RDMA response queue
-pub fn get_rdma_resp_queue() -> Option<&'static Arc<Mutex<RdmaQueue<RdmaWorkerResp>>>> {
+pub fn get_rdma_resp_queue() -> Option<&'static Arc<Mutex<RdmaQueue<ShmqWorkerResp>>>> {
     RDMA_RESP_QUEUE.get()
 }
 
@@ -57,8 +55,8 @@ pub fn update_rdma_connection_status(connected: bool) {
 /// Create RDMA queues and return endpoint information
 async fn create_rdma_queues() -> EKResult<RdmaEndpointPair> {
     // Worker receives requests (sender=false) and sends responses (sender=true)
-    let req_queue = RdmaQueue::<RdmaWorkerReq>::new(None, 256, false)?;
-    let resp_queue = RdmaQueue::<RdmaWorkerResp>::new(None, 256, true)?;
+    let req_queue = RdmaQueue::<ShmqWorkerReq>::new(None, 256, false)?;
+    let resp_queue = RdmaQueue::<ShmqWorkerResp>::new(None, 256, true)?;
 
     let req_endpoint = req_queue.endpoint()?;
     let req_memory = req_queue.memory_region();
@@ -196,14 +194,14 @@ pub async fn worker_main() -> EKResult<()> {
             let node_name = x::get_worker_id();
             let recv_channel = loop {
                 if let Some(channel) =
-                    ShmQueue::<LocalShmWorkerReq>::open(&format!("ek-shmq-req-{}", node_name))
+                    ShmQueue::<ShmqWorkerReq>::open(&format!("ek-shmq-req-{}", node_name))
                 {
                     break Arc::new(Mutex::new(channel));
                 }
             };
             let send_channel = loop {
                 if let Some(channel) =
-                    ShmQueue::<LocalShmWorkerResp>::open(&format!("ek-shmq-resp-{}", node_name))
+                    ShmQueue::<ShmqWorkerResp>::open(&format!("ek-shmq-resp-{}", node_name))
                 {
                     break Arc::new(Mutex::new(channel));
                 }
@@ -249,7 +247,7 @@ pub async fn worker_main() -> EKResult<()> {
                             }
                             std::thread::sleep(Duration::from_secs(1));
                         };
-                        let resp = LocalShmWorkerResp::new(req.id(), output_tensor);
+                        let resp = ShmqWorkerResp::new(req.id(), output_tensor);
                         while send_channel.lock().unwrap().send(&resp).is_err() {
                             log::warn!("send_channel full, retrying...");
                             std::thread::sleep(Duration::from_micros(100));
@@ -334,7 +332,7 @@ pub async fn worker_main() -> EKResult<()> {
                             }
                             std::thread::sleep(Duration::from_secs(1));
                         };
-                        let resp = RdmaWorkerResp::new(req.id(), output_tensor);
+                        let resp = ShmqWorkerResp::new(req.id(), output_tensor);
                         let send_start = time::Instant::now();
                         while send_channel.lock().unwrap().send(&resp).is_err() {
                             log::warn!("RDMA send_channel full, retrying...");
