@@ -17,10 +17,7 @@ use tonic::transport::Channel;
 use tower::ServiceBuilder;
 
 use crate::{
-    shmq::{
-        ShmBytes, ShmQueue,
-        rdma_impl::{RdmaBytes, RdmaQueue},
-    },
+    shmq::{GeneralShmQueueBytes, ShmQueue, rdma_impl::RdmaQueue},
     state::{
         io::{StateReader, StateReaderImpl},
         models::NewNode,
@@ -33,17 +30,20 @@ pub type ExpertId = String;
 pub type ExpertIdRef<'a> = &'a str;
 
 pub type LocalShmChannel = (
-    Arc<Mutex<ShmQueue<'static, LocalShmWorkerReq>>>,
-    Arc<Mutex<ShmQueue<'static, LocalShmWorkerResp>>>,
+    Arc<Mutex<ShmQueue<'static, ShmqWorkerReq>>>,
+    Arc<Mutex<ShmQueue<'static, ShmqWorkerResp>>>,
 );
 
-pub type RdmaChannel<T, U> = (Arc<Mutex<RdmaQueue<T>>>, Arc<Mutex<RdmaQueue<U>>>);
+pub type RdmaChannel = (
+    Arc<Mutex<RdmaQueue<ShmqWorkerReq>>>,
+    Arc<Mutex<RdmaQueue<ShmqWorkerResp>>>,
+);
 
 #[derive(Clone)]
 pub enum ExpertClient {
     Grpc(OTelGrpcClientMiddleware),
     Shm(LocalShmChannel),
-    Rdma(RdmaChannel<RdmaWorkerReq, RdmaWorkerResp>),
+    Rdma(RdmaChannel),
 }
 
 impl std::fmt::Debug for ExpertClient {
@@ -73,7 +73,7 @@ impl ExpertClient {
         }
     }
 
-    pub fn into_rdma_channels(self) -> Option<RdmaChannel<RdmaWorkerReq, RdmaWorkerResp>> {
+    pub fn into_rdma_channels(self) -> Option<RdmaChannel> {
         match self {
             ExpertClient::Grpc(_) => None,
             ExpertClient::Shm(_) => None,
@@ -116,7 +116,7 @@ struct ShmChannelMeta {
 #[derive(Clone)]
 struct RdmaChannelMeta {
     host_id: String,
-    ch: RdmaChannel<RdmaWorkerReq, RdmaWorkerResp>,
+    ch: RdmaChannel,
 }
 
 #[derive(Clone)]
@@ -129,8 +129,8 @@ enum ChannelMeta {
 /// RDMA connection state for a worker node
 #[derive(Clone)]
 struct RdmaNodeConnection {
-    req_queue: Arc<Mutex<RdmaQueue<RdmaWorkerReq>>>,
-    resp_queue: Arc<Mutex<RdmaQueue<RdmaWorkerResp>>>,
+    req_queue: Arc<Mutex<RdmaQueue<ShmqWorkerReq>>>,
+    resp_queue: Arc<Mutex<RdmaQueue<ShmqWorkerResp>>>,
     connected: bool,
 }
 
@@ -296,12 +296,12 @@ impl ExpertRegistryImpl {
         if needs_new_connection {
             // Create controller-side RDMA queues
             // Controller sends requests (sender=true) and receives responses (sender=false)
-            let req_queue = RdmaQueue::<RdmaWorkerReq>::new(None, 256, true).map_err(|e| {
+            let req_queue = RdmaQueue::<ShmqWorkerReq>::new(None, 256, true).map_err(|e| {
                 EKError::IoError(std::io::Error::other(format!(
                     "Failed to create controller RDMA request queue: {e}"
                 )))
             })?;
-            let resp_queue = RdmaQueue::<RdmaWorkerResp>::new(None, 256, false).map_err(|e| {
+            let resp_queue = RdmaQueue::<ShmqWorkerResp>::new(None, 256, false).map_err(|e| {
                 EKError::IoError(std::io::Error::other(format!(
                     "Failed to create controller RDMA response queue: {e}"
                 )))
@@ -626,144 +626,15 @@ impl ExpertRegistryImpl {
 
 const MAX_TENSOR_SIZE: usize = 64 * 1024 * 1024;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct LocalShmWorkerReq {
-    id: usize,
-    expert_id: [u8; 64],
-    input_tensor: Vec<u8>,
-}
-
-impl LocalShmWorkerReq {
-    pub fn new(expert_id: ExpertIdRef<'_>, input_tensor: &[u8]) -> Self {
-        static ID: AtomicUsize = AtomicUsize::new(1);
-
-        assert!(expert_id.len() < 64);
-        assert!(input_tensor.len() <= MAX_TENSOR_SIZE);
-
-        // Safely convert expert_id to fixed-size array, padding with zeros if necessary
-        let mut expert_id_array = [0u8; 64];
-        let expert_id_bytes = expert_id.as_bytes();
-        let copy_len = std::cmp::min(expert_id_bytes.len(), 63);
-        expert_id_array[..copy_len].copy_from_slice(&expert_id_bytes[..copy_len]);
-
-        Self {
-            id: ID.fetch_add(1, Ordering::SeqCst),
-            expert_id: expert_id_array,
-            input_tensor: input_tensor.to_vec(),
-        }
-    }
-
-    pub fn id(&self) -> usize {
-        self.id
-    }
-
-    pub fn expert_id(&self) -> ExpertId {
-        // Find the first null byte to determine the actual string length
-        let end = self.expert_id.iter().position(|&b| b == 0).unwrap_or(64);
-        // Convert bytes to string, handling potential UTF-8 errors gracefully
-        String::from_utf8(self.expert_id[..end].to_vec()).unwrap()
-    }
-
-    pub fn input_tensor(&self) -> &[u8] {
-        &self.input_tensor
-    }
-}
-
-impl ShmBytes for LocalShmWorkerReq {
-    const SIZE: usize =
-        std::mem::size_of::<usize>() + 64 + std::mem::size_of::<usize>() + MAX_TENSOR_SIZE;
-
-    fn as_bytes(&self) -> impl Iterator<Item = u8> + '_ {
-        self.id
-            .to_le_bytes()
-            .into_iter()
-            .chain(self.expert_id)
-            .chain(self.input_tensor.len().to_le_bytes())
-            .chain(self.input_tensor.clone())
-    }
-
-    fn from_bytes(bytes: &[u8]) -> Self {
-        let id = usize::from_le_bytes(bytes[..std::mem::size_of::<usize>()].try_into().unwrap());
-        let expert_id = bytes[std::mem::size_of::<usize>()..std::mem::size_of::<usize>() + 64]
-            .try_into()
-            .unwrap();
-        let input_tensor_len = usize::from_le_bytes(
-            bytes[std::mem::size_of::<usize>() + 64
-                ..std::mem::size_of::<usize>() + 64 + std::mem::size_of::<usize>()]
-                .try_into()
-                .unwrap(),
-        );
-        let input_tensor = bytes
-            [std::mem::size_of::<usize>() + 64 + std::mem::size_of::<usize>()..]
-            [..input_tensor_len]
-            .to_vec();
-
-        Self {
-            id,
-            expert_id,
-            input_tensor,
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct LocalShmWorkerResp {
-    id: usize,
-    output_tensor: Vec<u8>,
-}
-
-impl LocalShmWorkerResp {
-    pub fn new(id: usize, output_tensor: Vec<u8>) -> Self {
-        assert!(output_tensor.len() <= MAX_TENSOR_SIZE);
-        Self { id, output_tensor }
-    }
-
-    pub fn id(&self) -> usize {
-        self.id
-    }
-
-    pub fn output_tensor(&self) -> &[u8] {
-        &self.output_tensor
-    }
-}
-
-impl ShmBytes for LocalShmWorkerResp {
-    const SIZE: usize =
-        std::mem::size_of::<usize>() + std::mem::size_of::<usize>() + MAX_TENSOR_SIZE;
-
-    fn as_bytes(&self) -> impl Iterator<Item = u8> + '_ {
-        self.id
-            .to_le_bytes()
-            .into_iter()
-            .chain(self.output_tensor.len().to_le_bytes())
-            .chain(self.output_tensor.clone())
-    }
-
-    fn from_bytes(bytes: &[u8]) -> Self {
-        let id = usize::from_le_bytes(bytes[..std::mem::size_of::<usize>()].try_into().unwrap());
-        let output_tensor_len = usize::from_le_bytes(
-            bytes[std::mem::size_of::<usize>()
-                ..std::mem::size_of::<usize>() + std::mem::size_of::<usize>()]
-                .try_into()
-                .unwrap(),
-        );
-        let output_tensor = bytes[std::mem::size_of::<usize>() + std::mem::size_of::<usize>()..]
-            [..output_tensor_len]
-            .to_vec();
-
-        Self { id, output_tensor }
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
-pub struct RdmaWorkerReq {
+pub struct ShmqWorkerReq {
     id: usize,
     #[serde(with = "serde_arrays")]
     expert_id: [u8; 64],
     input_tensor: Vec<u8>,
 }
 
-impl RdmaWorkerReq {
+impl ShmqWorkerReq {
     pub fn new(expert_id: ExpertIdRef<'_>, input_tensor: &[u8]) -> Self {
         static ID: AtomicUsize = AtomicUsize::new(1);
 
@@ -796,7 +667,7 @@ impl RdmaWorkerReq {
     }
 }
 
-impl RdmaBytes for RdmaWorkerReq {
+impl GeneralShmQueueBytes for ShmqWorkerReq {
     const CAPACITY: usize =
         std::mem::size_of::<usize>() + 64 + std::mem::size_of::<usize>() + MAX_TENSOR_SIZE;
 
@@ -849,12 +720,12 @@ impl RdmaBytes for RdmaWorkerReq {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RdmaWorkerResp {
+pub struct ShmqWorkerResp {
     id: usize,
     output_tensor: Vec<u8>,
 }
 
-impl RdmaWorkerResp {
+impl ShmqWorkerResp {
     pub fn new(id: usize, output_tensor: Vec<u8>) -> Self {
         assert!(output_tensor.len() <= MAX_TENSOR_SIZE);
         Self { id, output_tensor }
@@ -869,7 +740,7 @@ impl RdmaWorkerResp {
     }
 }
 
-impl RdmaBytes for RdmaWorkerResp {
+impl GeneralShmQueueBytes for ShmqWorkerResp {
     const CAPACITY: usize =
         std::mem::size_of::<usize>() + std::mem::size_of::<usize>() + MAX_TENSOR_SIZE;
 

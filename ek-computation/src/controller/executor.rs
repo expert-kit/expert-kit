@@ -17,10 +17,7 @@ use tracing::{Instrument, instrument, span};
 
 use crate::{
     backend::{EkTensor, torch::TchTensor},
-    controller::registry::{
-        ExpertClient, ExpertId, ExpertIdRef, LocalShmWorkerReq, LocalShmWorkerResp, RdmaWorkerReq,
-        RdmaWorkerResp,
-    },
+    controller::registry::{ExpertClient, ExpertId, ExpertIdRef, ShmqWorkerReq, ShmqWorkerResp},
     metrics::METRIC_CONTROLLER_INTRA_REQ,
     proto::ek::worker::v1::{self},
 };
@@ -58,8 +55,8 @@ struct EgressMeta {
 
 enum ForwardResponse {
     Grpc(v1::ForwardResp),
-    Shm(LocalShmWorkerResp),
-    Rdma(RdmaWorkerResp),
+    Shm(ShmqWorkerResp),
+    Rdma(ShmqWorkerResp),
 }
 
 impl ForwardResponse {
@@ -74,19 +71,19 @@ impl ForwardResponse {
 
 #[derive(Debug, Clone)]
 enum PendingResponse {
-    Shm(LocalShmWorkerResp),
-    Rdma(RdmaWorkerResp),
+    Shm(ShmqWorkerResp),
+    Rdma(ShmqWorkerResp),
 }
 
 impl PendingResponse {
-    fn into_shm(self) -> Option<LocalShmWorkerResp> {
+    fn into_shm(self) -> Option<ShmqWorkerResp> {
         match self {
             PendingResponse::Shm(resp) => Some(resp),
             PendingResponse::Rdma(_) => None,
         }
     }
 
-    fn into_rdma(self) -> Option<RdmaWorkerResp> {
+    fn into_rdma(self) -> Option<ShmqWorkerResp> {
         match self {
             PendingResponse::Shm(_) => None,
             PendingResponse::Rdma(resp) => Some(resp),
@@ -257,7 +254,7 @@ impl NaiveExecutor {
                 }
                 ExpertClient::Shm((send_channel, recv_channel)) => {
                     let fu = async move {
-                        let req = LocalShmWorkerReq::new(expert_id.as_ref(), &serialized_tensor);
+                        let req = ShmqWorkerReq::new(expert_id.as_ref(), &serialized_tensor);
 
                         let start = time::Instant::now();
                         let _d = Defers::defer(Box::new(move || {
@@ -311,7 +308,7 @@ impl NaiveExecutor {
                 }
                 ExpertClient::Rdma((send_channel, recv_channel)) => {
                     let fu = async move {
-                        let req = RdmaWorkerReq::new(expert_id.as_ref(), &serialized_tensor);
+                        let req = ShmqWorkerReq::new(expert_id.as_ref(), &serialized_tensor);
 
                         let start = time::Instant::now();
                         let _d = Defers::defer(Box::new(move || {

@@ -9,6 +9,8 @@ use nix::{
     unistd,
 };
 
+use crate::shmq::GeneralShmQueueBytes;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ShmQueueError {
     Full,
@@ -43,20 +45,7 @@ pub struct ShmQueue<'a, T> {
     _phantom: std::marker::PhantomData<T>,
 }
 
-pub trait ShmBytes {
-    const SIZE: usize;
-
-    fn as_bytes(&self) -> impl Iterator<Item = u8> + '_;
-
-    fn from_bytes(bytes: &[u8]) -> Self;
-
-    #[inline]
-    fn aligned_size() -> usize {
-        Self::SIZE.next_multiple_of(128)
-    }
-}
-
-impl<'a, T: ShmBytes> ShmQueue<'a, T> {
+impl<'a, T: GeneralShmQueueBytes> ShmQueue<'a, T> {
     pub fn new(name: &str, capacity: usize) -> Self {
         let meta_vs_data = std::mem::size_of::<ShmQueueMeta>() / T::aligned_size();
         let len = (capacity + 1 + meta_vs_data) * T::aligned_size();
@@ -160,9 +149,9 @@ impl<'a, T: ShmBytes> ShmQueue<'a, T> {
             return Err(ShmQueueError::Full);
         }
 
-        for (i, byte) in item.as_bytes().enumerate() {
-            self.data[meta.tail * T::aligned_size() + i] = byte;
-        }
+        item.write_to_slice(
+            &mut self.data[meta.tail * T::aligned_size()..(meta.tail + 1) * T::aligned_size()],
+        );
 
         self.meta.tail = (self.meta.tail + 1) % self.meta.capacity;
         Ok(())
@@ -196,17 +185,23 @@ unsafe impl<'a, T> Send for ShmQueue<'a, T> {}
 
 #[cfg(test)]
 mod test {
+    use crate::shmq::GeneralShmQueueBytes;
+
     use super::*;
 
-    impl ShmBytes for i32 {
-        const SIZE: usize = std::mem::size_of::<i32>();
+    impl GeneralShmQueueBytes for i32 {
+        const CAPACITY: usize = std::mem::size_of::<i32>();
 
-        fn as_bytes(&self) -> impl Iterator<Item = u8> + '_ {
-            self.to_le_bytes().into_iter()
+        fn write_to_slice(&self, slice: &mut [u8]) {
+            slice[..4].copy_from_slice(&self.to_le_bytes());
         }
 
         fn from_bytes(bytes: &[u8]) -> Self {
             i32::from_le_bytes(bytes.try_into().unwrap())
+        }
+
+        fn len(&self) -> usize {
+            Self::CAPACITY
         }
     }
 

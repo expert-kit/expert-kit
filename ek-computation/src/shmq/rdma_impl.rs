@@ -6,6 +6,8 @@ use ibverbs::{
     QueuePairEndpoint, RemoteMemoryRegion, devices, ibv_qp_type,
 };
 
+use crate::shmq::GeneralShmQueueBytes;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RdmaQueueError {
     Full,
@@ -44,24 +46,6 @@ struct RdmaQueueMeta {
     tail: usize,
     data_offset: usize,
     ready: bool,
-}
-
-/// Trait for types that can be sent over RDMA queue
-#[expect(clippy::len_without_is_empty)]
-pub trait RdmaBytes {
-    const CAPACITY: usize;
-
-    fn write_to_slice(&self, slice: &mut [u8]);
-    fn from_bytes(bytes: &[u8]) -> Self;
-
-    /// Real len of the structure
-    /// This is the actual length of the data, excluding any padding
-    fn len(&self) -> usize;
-
-    #[inline]
-    fn aligned_size() -> usize {
-        Self::CAPACITY.next_multiple_of(64)
-    }
 }
 
 pub struct RdmaQueue<T> {
@@ -104,7 +88,7 @@ fn offset_of_tail() -> usize {
     field_ptr - base_ptr
 }
 
-impl<T: RdmaBytes> RdmaQueue<T> {
+impl<T: GeneralShmQueueBytes> RdmaQueue<T> {
     /// Check if the queue is connected to a remote peer
     pub fn is_connected(&self) -> bool {
         self.remote_region.is_some() && self.qp.is_some()
@@ -478,7 +462,7 @@ impl<T> Drop for RdmaQueue<T> {
     }
 }
 
-impl RdmaBytes for u64 {
+impl GeneralShmQueueBytes for u64 {
     const CAPACITY: usize = std::mem::size_of::<u64>();
 
     fn write_to_slice(&self, slice: &mut [u8]) {
@@ -494,7 +478,7 @@ impl RdmaBytes for u64 {
     }
 }
 
-impl RdmaBytes for String {
+impl GeneralShmQueueBytes for String {
     const CAPACITY: usize = 256; // Fixed size for simplicity
 
     fn write_to_slice(&self, slice: &mut [u8]) {
