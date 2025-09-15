@@ -205,12 +205,11 @@ impl StateClient {
                 log::info!("Worker request queue already connected to controller, skipping");
             } else {
                 if let Err(e) = req_queue_lock.connect(
-                    controller_req_qp_endpoint.clone(),
+                    controller_req_qp_endpoint,
                     controller_req_memory_region.clone(),
                 ) {
                     log::error!("Failed to connect worker request queue to controller: {e}");
-                    return Err(ek_base::error::EKError::IoError(std::io::Error::new(
-                        std::io::ErrorKind::Other,
+                    return Err(ek_base::error::EKError::IoError(std::io::Error::other(
                         format!("RDMA request queue connection failed: {e}"),
                     )));
                 }
@@ -228,8 +227,7 @@ impl StateClient {
                     .connect(controller_resp_qp_endpoint, controller_resp_memory_region)
                 {
                     log::error!("Failed to connect worker response queue to controller: {e}");
-                    return Err(ek_base::error::EKError::IoError(std::io::Error::new(
-                        std::io::ErrorKind::Other,
+                    return Err(ek_base::error::EKError::IoError(std::io::Error::other(
                         format!("RDMA response queue connection failed: {e}"),
                     )));
                 }

@@ -279,10 +279,9 @@ impl NaiveExecutor {
                         );
                         let resp = loop {
                             if let Some(pending_resp) = pending_resp.lock().await.remove(&req.id())
+                                && let Some(resp) = pending_resp.into_shm()
                             {
-                                if let Some(resp) = pending_resp.into_shm() {
-                                    break resp;
-                                }
+                                break resp;
                             }
                             match recv_channel.lock().await.recv() {
                                 Ok(resp) => {
@@ -340,11 +339,10 @@ impl NaiveExecutor {
 
                         // Wait for response via RDMA
                         let resp = loop {
-                            if let Some(pending_resp) = pending_resp.lock().await.remove(&req.id()) {
-                                if let Some(resp) = pending_resp.into_rdma() {
+                            if let Some(pending_resp) = pending_resp.lock().await.remove(&req.id())
+                                && let Some(resp) = pending_resp.into_rdma() {
                                     break resp;
                                 }
-                            }
                             match recv_channel.lock().await.recv() {
                                 Ok(resp) => {
                                     if resp.id() != req.id() {

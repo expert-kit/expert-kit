@@ -1,5 +1,4 @@
 use std::io;
-use std::time::Duration;
 
 // Import from the provided ibverbs library
 use ibverbs::{
@@ -31,14 +30,14 @@ impl From<RdmaQueueError> for io::Error {
         match err {
             RdmaQueueError::Full => io::Error::new(io::ErrorKind::WouldBlock, "Queue is full"),
             RdmaQueueError::Empty => io::Error::new(io::ErrorKind::WouldBlock, "Queue is empty"),
-            RdmaQueueError::IoError => io::Error::new(io::ErrorKind::Other, "RDMA I/O error"),
+            RdmaQueueError::IoError => io::Error::other("RDMA I/O error"),
         }
     }
 }
 
 /// Metadata structure for the RDMA queue, stored at the beginning of the memory region
 #[repr(C)]
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 struct RdmaQueueMeta {
     capacity: usize,
     head: usize,
@@ -47,19 +46,8 @@ struct RdmaQueueMeta {
     ready: bool,
 }
 
-impl Default for RdmaQueueMeta {
-    fn default() -> Self {
-        Self {
-            capacity: 0,
-            head: 0,
-            tail: 0,
-            data_offset: 0,
-            ready: false,
-        }
-    }
-}
-
 /// Trait for types that can be sent over RDMA queue
+#[expect(clippy::len_without_is_empty)]
 pub trait RdmaBytes {
     const CAPACITY: usize;
 

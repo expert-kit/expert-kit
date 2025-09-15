@@ -297,31 +297,27 @@ impl ExpertRegistryImpl {
             // Create controller-side RDMA queues
             // Controller sends requests (sender=true) and receives responses (sender=false)
             let req_queue = RdmaQueue::<RdmaWorkerReq>::new(None, 256, true).map_err(|e| {
-                EKError::IoError(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    format!("Failed to create controller RDMA request queue: {e}"),
-                ))
+                EKError::IoError(std::io::Error::other(format!(
+                    "Failed to create controller RDMA request queue: {e}"
+                )))
             })?;
             let resp_queue = RdmaQueue::<RdmaWorkerResp>::new(None, 256, false).map_err(|e| {
-                EKError::IoError(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    format!("Failed to create controller RDMA response queue: {e}"),
-                ))
+                EKError::IoError(std::io::Error::other(format!(
+                    "Failed to create controller RDMA response queue: {e}"
+                )))
             })?;
 
             // Get controller endpoints for handshake
             let controller_req_endpoint = req_queue.endpoint().map_err(|e| {
-                EKError::IoError(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    format!("Failed to get controller request endpoint: {e}"),
-                ))
+                EKError::IoError(std::io::Error::other(format!(
+                    "Failed to get controller request endpoint: {e}"
+                )))
             })?;
             let controller_req_memory = req_queue.memory_region();
             let controller_resp_endpoint = resp_queue.endpoint().map_err(|e| {
-                EKError::IoError(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    format!("Failed to get controller response endpoint: {e}"),
-                ))
+                EKError::IoError(std::io::Error::other(format!(
+                    "Failed to get controller response endpoint: {e}"
+                )))
             })?;
             let controller_resp_memory = resp_queue.memory_region();
 
@@ -519,18 +515,16 @@ impl ExpertRegistryImpl {
                         hostname
                     );
                 } else {
-                    if let Err(e) = req_queue.connect(
-                        worker_req_qp_endpoint.clone(),
-                        worker_req_memory_region.clone(),
-                    ) {
+                    if let Err(e) =
+                        req_queue.connect(worker_req_qp_endpoint, worker_req_memory_region.clone())
+                    {
                         log::error!(
                             "Failed to connect controller request queue to worker {}: {e}",
                             hostname
                         );
-                        return Err(EKError::IoError(std::io::Error::new(
-                            std::io::ErrorKind::Other,
-                            format!("Controller request queue connection failed: {e}"),
-                        )));
+                        return Err(EKError::IoError(std::io::Error::other(format!(
+                            "Controller request queue connection failed: {e}"
+                        ))));
                     }
                     log::info!(
                         "🚀Controller request queue connected to worker {} successfully",
@@ -555,10 +549,9 @@ impl ExpertRegistryImpl {
                             "Failed to connect controller response queue to worker {}: {e}",
                             hostname
                         );
-                        return Err(EKError::IoError(std::io::Error::new(
-                            std::io::ErrorKind::Other,
-                            format!("Controller response queue connection failed: {e}"),
-                        )));
+                        return Err(EKError::IoError(std::io::Error::other(format!(
+                            "Controller response queue connection failed: {e}"
+                        ))));
                     }
                     log::info!(
                         "🚀Controller response queue connected to worker {} successfully",

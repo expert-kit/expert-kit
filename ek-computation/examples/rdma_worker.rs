@@ -25,19 +25,22 @@ fn main() -> io::Result<()> {
 
     // Create receiver queue
     let mut receiver_queue: RdmaQueue<String> = RdmaQueue::new(None, QUEUE_CAPACITY, false)?;
-    println!("✅ Created receiver queue with capacity: {}", receiver_queue.capacity());
+    println!(
+        "✅ Created receiver queue with capacity: {}",
+        receiver_queue.capacity()
+    );
 
     // Get local endpoint and memory region info
     let local_endpoint = receiver_queue.endpoint()?;
     let local_memory = receiver_queue.memory_region();
-    
+
     println!("📡 Generated local RDMA endpoint and memory region");
 
     // Serialize the connection info
     let endpoint_json = serde_json::to_string(&local_endpoint)
-        .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("Failed to serialize endpoint: {}", e)))?;
+        .map_err(|e| io::Error::other(format!("Failed to serialize endpoint: {}", e)))?;
     let memory_json = serde_json::to_string(&local_memory)
-        .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("Failed to serialize memory region: {}", e)))?;
+        .map_err(|e| io::Error::other(format!("Failed to serialize memory region: {}", e)))?;
 
     let worker_info = ConnectionInfo {
         endpoint: endpoint_json,
@@ -63,19 +66,22 @@ fn main() -> io::Result<()> {
     };
 
     // Connect to controller via TCP
-    println!("\n🔗 Connecting to controller at {}:{}...", controller_ip, controller_port);
+    println!(
+        "\n🔗 Connecting to controller at {}:{}...",
+        controller_ip, controller_port
+    );
     let stream = TcpStream::connect(format!("{}:{}", controller_ip, controller_port))?;
     println!("✅ Connected to controller");
 
     // Exchange RDMA connection information
     println!("\n🔄 Exchanging RDMA connection information...");
-    
+
     // Receive controller's RDMA info
     let mut reader = BufReader::new(stream);
     let mut controller_info_line = String::new();
     reader.read_line(&mut controller_info_line)?;
     let controller_info: ConnectionInfo = serde_json::from_str(controller_info_line.trim())
-        .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("Failed to parse controller info: {}", e)))?;
+        .map_err(|e| io::Error::other(format!("Failed to parse controller info: {}", e)))?;
     println!("📥 Received controller RDMA info");
 
     // Get the stream back for writing
@@ -83,16 +89,19 @@ fn main() -> io::Result<()> {
 
     // Send worker's RDMA info
     let worker_info_json = serde_json::to_string(&worker_info)
-        .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("Failed to serialize worker info: {}", e)))?;
+        .map_err(|e| io::Error::other(format!("Failed to serialize worker info: {}", e)))?;
     writeln!(stream, "{}", worker_info_json)?;
     stream.flush()?;
     println!("📤 Sent worker RDMA info to controller");
 
     // Parse controller's RDMA connection info
-    let controller_endpoint: ibverbs::QueuePairEndpoint = serde_json::from_str(&controller_info.endpoint)
-        .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("Failed to parse controller endpoint: {}", e)))?;
-    let controller_memory: ibverbs::RemoteMemoryRegion = serde_json::from_str(&controller_info.memory_region)
-        .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("Failed to parse controller memory region: {}", e)))?;
+    let controller_endpoint: ibverbs::QueuePairEndpoint =
+        serde_json::from_str(&controller_info.endpoint)
+            .map_err(|e| io::Error::other(format!("Failed to parse controller endpoint: {}", e)))?;
+    let controller_memory: ibverbs::RemoteMemoryRegion =
+        serde_json::from_str(&controller_info.memory_region).map_err(|e| {
+            io::Error::other(format!("Failed to parse controller memory region: {}", e))
+        })?;
 
     println!("✅ Successfully parsed controller RDMA connection info");
 
@@ -113,14 +122,14 @@ fn main() -> io::Result<()> {
     let mut ready_line = String::new();
     reader.read_line(&mut ready_line)?;
     if ready_line.trim() != "RDMA_READY" {
-        return Err(io::Error::new(io::ErrorKind::Other, "Controller not ready"));
+        return Err(io::Error::other("Controller not ready"));
     }
 
     // Signal our readiness
     let mut stream = reader.into_inner();
     writeln!(stream, "RDMA_READY")?;
     stream.flush()?;
-    
+
     println!("✅ Both sides ready for RDMA communication");
 
     // Close TCP connection (no longer needed)
@@ -131,13 +140,13 @@ fn main() -> io::Result<()> {
     println!("\n📥 Starting to receive messages via RDMA...");
     let mut received_count = 0;
     let max_attempts = 100; // Give more time for RDMA messages
-    
+
     for attempt in 1..=max_attempts {
         match receiver_queue.recv() {
             Ok(message) => {
                 received_count += 1;
                 println!("✅ Received message {}: '{}'", received_count, message);
-                
+
                 // If we've received several messages, we might be done
                 if received_count >= 4 {
                     println!("🎉 Received expected number of messages!");
@@ -156,7 +165,7 @@ fn main() -> io::Result<()> {
             }
         }
     }
-    
+
     if received_count == 0 {
         println!("⚠️  No messages received. Possible issues:");
         println!("   1. Controller not sending messages");
@@ -164,16 +173,19 @@ fn main() -> io::Result<()> {
         println!("   3. RDMA connection establishment failed");
         println!("   4. Network connectivity issues");
     } else {
-        println!("\n🎉 Worker successfully received {} messages via RDMA!", received_count);
+        println!(
+            "\n🎉 Worker successfully received {} messages via RDMA!",
+            received_count
+        );
     }
-    
+
     // Keep the queue alive for a bit longer
     println!("\n⏳ Keeping connection alive for 2 seconds...");
     thread::sleep(Duration::from_secs(2));
-    
+
     // Clean up
     receiver_queue.close();
     println!("🔄 Worker shutting down");
-    
+
     Ok(())
 }
