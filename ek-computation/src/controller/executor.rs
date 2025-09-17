@@ -2,24 +2,21 @@ use std::{
     collections::{BTreeMap, HashMap},
     fmt,
     sync::{Arc, OnceLock},
-    time,
 };
 
 use ek_base::{
-    config::get_ek_settings,
     error::{EKError, EKResult},
-    utils::{Defers, PerfTimer},
+    utils::PerfTimer,
 };
 use safetensors::SafeTensors;
 use tch::{IndexOp, Tensor};
 use tokio::sync::{Mutex, mpsc};
-use tracing::{Instrument, instrument, span};
+use tracing::{instrument, span};
 
 use crate::{
     backend::{EkTensor, torch::TchTensor},
-    controller::registry::{ExpertClient, ExpertId, ExpertIdRef, ShmqWorkerReq, ShmqWorkerResp},
-    metrics::METRIC_CONTROLLER_INTRA_REQ,
-    proto::ek::worker::v1::{self},
+    controller::registry::{ExpertId, ExpertIdRef, ShmqWorkerResp},
+    proto::ek::worker::v1,
 };
 
 use super::registry::{GlobalWorkerRegistry, get_registry};
@@ -53,7 +50,7 @@ struct EgressMeta {
     expert_idx: usize,
 }
 
-enum ForwardResponse {
+pub(crate) enum ForwardResponse {
     Grpc(v1::ForwardResp),
     Shm(ShmqWorkerResp),
     Rdma(ShmqWorkerResp),
@@ -70,25 +67,9 @@ impl ForwardResponse {
 }
 
 #[derive(Debug, Clone)]
-enum PendingResponse {
+pub(crate) enum PendingResponse {
     Shm(ShmqWorkerResp),
     Rdma(ShmqWorkerResp),
-}
-
-impl PendingResponse {
-    fn into_shm(self) -> Option<ShmqWorkerResp> {
-        match self {
-            PendingResponse::Shm(resp) => Some(resp),
-            PendingResponse::Rdma(_) => None,
-        }
-    }
-
-    fn into_rdma(self) -> Option<ShmqWorkerResp> {
-        match self {
-            PendingResponse::Shm(_) => None,
-            PendingResponse::Rdma(resp) => Some(resp),
-        }
-    }
 }
 
 pub struct NaiveExecutor {
@@ -192,11 +173,10 @@ impl NaiveExecutor {
         let mut tit = PerfTimer::new("inner_execute");
         let mut handles = vec![];
         let mut chips: Vec<(ExpertId, Vec<EgressMeta>)> = vec![];
-        let settings = get_ek_settings();
 
         while let Some((expert_id, egress_meta)) = self.pending_egress.pop_first() {
             let expert_id: ExpertIdRef = expert_id.as_ref();
-            let Ok(client) = self.registry.lock().await.select(expert_id).await else {
+            let Ok(clients) = self.registry.lock().await.select_all(expert_id).await else {
                 log::warn!("failed to select client for expert {expert_id}");
                 continue;
             };
@@ -209,7 +189,6 @@ impl NaiveExecutor {
 
             let egress_tensor = self.assemble_seq_tensors(seq_gids)?;
             log::debug!("egress tensor shape={:?}", egress_tensor.size());
-            let serialized_tensor = TchTensor::from(egress_tensor).serialize();
             let seqs = egress_meta
                 .iter()
                 .map(|_e| v1::forward_req::SequenceInfo {
@@ -217,167 +196,42 @@ impl NaiveExecutor {
                 })
                 .collect::<Vec<_>>();
 
-            let pending_resp = self.pending_resp.clone();
-            let expert_id = expert_id.to_owned();
-            match client {
-                ExpertClient::Grpc(grpc_channel) => {
-                    let mut cli =
-                        v1::computation_service_client::ComputationServiceClient::new(grpc_channel)
-                            .max_decoding_message_size(1024 * 1024 * 1024)
-                            .max_encoding_message_size(1024 * 1024 * 1024);
+            let clients_count = clients.len() as i64;
+            let tensors = egress_tensor.chunk(clients_count, 0);
 
-                    let f = tokio::spawn(
-                        async move {
-                            let req = v1::ForwardReq {
-                                // TODO: hardcode instance id.
-                                instance_id: "0".into(),
-                                tensor: serialized_tensor,
-                                sequences: seqs,
-                            };
-
-                            let start = time::Instant::now();
-                            let _d = Defers::defer(Box::new(move || {
-                                let elapsed = start.elapsed();
-                                // TODO: hardcode metric name
-                                METRIC_CONTROLLER_INTRA_REQ
-                                    .with_label_values(&[settings.inference.model_name.as_str()])
-                                    .observe(elapsed.as_micros() as f64);
-                            }));
-                            cli.forward(req)
-                                .await
-                                .map(|resp| ForwardResponse::Grpc(resp.into_inner()))
-                                .map_err(|e| log::error!("forward error: {e}"))
-                        }
-                        .in_current_span(),
-                    );
-                    handles.push(f);
-                }
-                ExpertClient::Shm((send_channel, recv_channel)) => {
-                    let fu = async move {
-                        let req = ShmqWorkerReq::new(expert_id.as_ref(), &serialized_tensor);
-
-                        let start = time::Instant::now();
-                        let _d = Defers::defer(Box::new(move || {
-                            let elapsed = start.elapsed();
-                            // TODO: hardcode metric name
-                            METRIC_CONTROLLER_INTRA_REQ
-                                .with_label_values(&[settings.inference.model_name.as_str()])
-                                .observe(elapsed.as_micros() as f64);
-                        }));
-
-                        while send_channel.lock().await.send(&req).is_err() {
-                            log::warn!("failed to send request to expert {expert_id}");
-                            tokio::time::sleep(tokio::time::Duration::from_micros(100)).await;
-                        }
-
-                        log::debug!(
-                            "request sent for expert {}, waiting for response",
-                            expert_id
-                        );
-                        let resp = loop {
-                            if let Some(pending_resp) = pending_resp.lock().await.remove(&req.id())
-                                && let Some(resp) = pending_resp.into_shm()
-                            {
-                                break resp;
-                            }
-                            match recv_channel.lock().await.recv() {
-                                Ok(resp) => {
-                                    if resp.id() != req.id() {
-                                        log::debug!(
-                                            "received response for expert {} but id not correct",
-                                            expert_id
-                                        );
-                                        pending_resp
-                                            .lock()
-                                            .await
-                                            .insert(resp.id(), PendingResponse::Shm(resp));
-                                        tokio::task::yield_now().await;
-                                        continue;
-                                    }
-                                    break resp;
-                                }
-                                Err(_) => {
-                                    tokio::task::yield_now().await;
-                                }
-                            }
-                        };
-                        Ok(ForwardResponse::Shm(resp))
-                    }
-                    .in_current_span();
-                    handles.push(tokio::spawn(fu));
-                }
-                ExpertClient::Rdma((send_channel, recv_channel)) => {
-                    let fu = async move {
-                        let req = ShmqWorkerReq::new(expert_id.as_ref(), &serialized_tensor);
-
-                        let start = time::Instant::now();
-                        let _d = Defers::defer(Box::new(move || {
-                            let elapsed = start.elapsed();
-                            METRIC_CONTROLLER_INTRA_REQ
-                                .with_label_values(&[settings.inference.model_name.as_str()])
-                                .observe(elapsed.as_micros() as f64);
-                        }));
-
-                        // Send request via RDMA
-                        loop {
-                           match send_channel.lock().await.send(&req) {
-                                Ok(_) => break,
-                                Err(e) => {
-                                    log::warn!("failed to send RDMA request to expert {expert_id}: {e}");
-                                    tokio::time::sleep(tokio::time::Duration::from_micros(100)).await;
-                                }
-                            }
-                        }
-
-                        log::debug!(
-                            "RDMA request sent for expert {}, waiting for response",
-                            expert_id
-                        );
-
-                        // Wait for response via RDMA
-                        let resp = loop {
-                            if let Some(pending_resp) = pending_resp.lock().await.remove(&req.id())
-                                && let Some(resp) = pending_resp.into_rdma() {
-                                    break resp;
-                                }
-                            match recv_channel.lock().await.recv() {
-                                Ok(resp) => {
-                                    if resp.id() != req.id() {
-                                        log::debug!(
-                                            "received RDMA response for expert {} but id not correct",
-                                            expert_id
-                                        );
-                                        pending_resp.lock().await.insert(resp.id(), PendingResponse::Rdma(resp));
-                                        tokio::task::yield_now().await;
-                                        continue;
-                                    }
-                                    break resp;
-                                }
-                                Err(_) => {
-                                    tokio::task::yield_now().await;
-                                }
-                            }
-                        };
-                        Ok(ForwardResponse::Rdma(resp))
-                    }
-                    .in_current_span();
-                    handles.push(tokio::spawn(fu));
-                }
+            let mut handle_lst = vec![];
+            for (client, tensor) in clients.into_iter().zip(tensors) {
+                let pending_resp = self.pending_resp.clone();
+                let expert_id = expert_id.to_owned();
+                log::debug!("forward tensor shape={:?}", tensor.size());
+                let handle = client.forward(
+                    expert_id,
+                    TchTensor::from(tensor).serialize(),
+                    seqs.clone(),
+                    pending_resp,
+                );
+                handle_lst.push(handle);
             }
+            handles.push(handle_lst);
         }
 
         tit.stop("egress_req_sent");
 
-        for (egress_idx, handle) in handles.into_iter().enumerate() {
+        'outer: for (egress_idx, handles) in handles.into_iter().enumerate() {
             let egress = &chips[egress_idx];
-            let Ok(res) = handle.await? else {
-                log::error!("failed to receive response for expert {}", egress.0);
-                continue;
-            };
-            let res_safetensor = SafeTensors::deserialize(res.output_tensor())?;
-            // TODO: hardcode safe tensor name
-            let view = res_safetensor.tensor("data")?;
-            let res_tensor = TchTensor::from(&view).inner();
+            let mut res_tensors = vec![];
+            for handle in handles {
+                let Ok(res) = handle.await? else {
+                    log::error!("failed to receive response for expert {}", egress.0);
+                    continue 'outer;
+                };
+                let res_safetensor = SafeTensors::deserialize(res.output_tensor())?;
+                // TODO: hardcode safe tensor name
+                let view = res_safetensor.tensor("data")?;
+                let res_tensor = TchTensor::from(&view).inner();
+                res_tensors.push(res_tensor);
+            }
+            let res_tensor = Tensor::cat(&res_tensors, 0);
 
             log::debug!("received tensor shape={:?}", res_tensor.size());
             for (seq_idx, egress_meta) in egress.1.iter().enumerate() {
