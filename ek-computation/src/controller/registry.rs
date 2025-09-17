@@ -35,15 +35,33 @@ use serde_json;
 pub type ExpertId = String;
 pub type ExpertIdRef<'a> = &'a str;
 
-pub type LocalShmChannel = (
-    Arc<Mutex<ShmQueue<'static, ShmqWorkerReq>>>,
-    Arc<Mutex<ShmQueue<'static, ShmqWorkerResp>>>,
-);
+pub type LocalShmReqQueue = Arc<Mutex<ShmQueue<'static, ShmqWorkerReq>>>;
+pub type LocalShmRespQueue = Arc<Mutex<(ShmQueue<'static, ShmqWorkerResp>, ChannelMetrics)>>;
+pub type LocalShmChannel = (LocalShmReqQueue, LocalShmRespQueue);
 
-pub type RdmaChannel = (
-    Arc<Mutex<RdmaQueue<ShmqWorkerReq>>>,
-    Arc<Mutex<RdmaQueue<ShmqWorkerResp>>>,
-);
+pub type RdmaReqQueue = Arc<Mutex<RdmaQueue<ShmqWorkerReq>>>;
+pub type RdmaRespQueue = Arc<Mutex<(RdmaQueue<ShmqWorkerResp>, ChannelMetrics)>>;
+pub type RdmaChannel = (RdmaReqQueue, RdmaRespQueue);
+
+pub struct ChannelMetrics {
+    priority: f64,
+}
+
+impl ChannelMetrics {
+    pub fn priority(&self) -> f64 {
+        self.priority
+    }
+
+    pub fn accumulate(&mut self, delta: f64) {
+        self.priority = (self.priority * 0.8 + delta) / 2.0;
+    }
+}
+
+impl Default for ChannelMetrics {
+    fn default() -> Self {
+        Self { priority: 1.0 }
+    }
+}
 
 #[derive(Clone)]
 pub enum ExpertClient {
@@ -63,6 +81,28 @@ impl std::fmt::Debug for ExpertClient {
 }
 
 impl ExpertClient {
+    pub(crate) async fn get_priority(&self) -> f64 {
+        match self {
+            ExpertClient::Grpc(_) => 1.0, // gRPC client does not have priority tracking
+            ExpertClient::Shm((_, resp_channel)) => resp_channel.lock().await.1.priority(),
+            ExpertClient::Rdma((_, resp_channel)) => resp_channel.lock().await.1.priority(),
+        }
+    }
+
+    pub(crate) async fn update_priority(&self, delta: f64) {
+        match self {
+            ExpertClient::Grpc(_) => {
+                // gRPC client does not have priority tracking
+            }
+            ExpertClient::Shm((_, resp_channel)) => {
+                resp_channel.lock().await.1.accumulate(delta);
+            }
+            ExpertClient::Rdma((_, resp_channel)) => {
+                resp_channel.lock().await.1.accumulate(delta);
+            }
+        }
+    }
+
     pub(crate) fn forward(
         self,
         expert_id: ExpertId,
@@ -86,9 +126,10 @@ impl ExpertClient {
                     };
 
                     let _d = Self::create_metrics_defer();
+                    let now = time::Instant::now();
                     cli.forward(req)
                         .await
-                        .map(|resp| ForwardResponse::Grpc(resp.into_inner()))
+                        .map(|resp| ForwardResponse::grpc(resp.into_inner(), now.elapsed()))
                         .map_err(|e| {
                             log::error!("forward error: {e}");
                             EKError::IoError(std::io::Error::other(format!("grpc error: {e}")))
@@ -101,6 +142,7 @@ impl ExpertClient {
                 let fu = async move {
                     let req = ShmqWorkerReq::new(expert_id.as_ref(), &tensor);
                     let _d = Self::create_metrics_defer();
+                    let now = time::Instant::now();
 
                     // Send request with retry
                     if let Err(e) =
@@ -124,7 +166,7 @@ impl ExpertClient {
                     )
                     .await
                     {
-                        Ok(resp) => Ok(ForwardResponse::Shm(resp)),
+                        Ok(resp) => Ok(ForwardResponse::shm(resp, now.elapsed())),
                         Err(e) => {
                             log::error!("Failed to receive SHM response: {e:?}");
                             Err(e)
@@ -138,6 +180,7 @@ impl ExpertClient {
                 let fu = async move {
                     let req = ShmqWorkerReq::new(expert_id.as_ref(), &tensor);
                     let _d = Self::create_metrics_defer();
+                    let now = time::Instant::now();
 
                     // Send request with retry
                     if let Err(e) =
@@ -161,7 +204,7 @@ impl ExpertClient {
                     )
                     .await
                     {
-                        Ok(resp) => Ok(ForwardResponse::Rdma(resp)),
+                        Ok(resp) => Ok(ForwardResponse::rdma(resp, now.elapsed())),
                         Err(e) => {
                             log::error!("Failed to receive RDMA response: {e:?}");
                             Err(e)
@@ -188,7 +231,7 @@ impl ExpertClient {
 
     /// Handle shared memory request sending with retry logic
     async fn send_shm_request_with_retry(
-        send_channel: &Arc<Mutex<ShmQueue<'static, ShmqWorkerReq>>>,
+        send_channel: &LocalShmReqQueue,
         req: &ShmqWorkerReq,
         expert_id: &str,
     ) -> EKResult<()> {
@@ -201,7 +244,7 @@ impl ExpertClient {
 
     /// Handle RDMA request sending with retry logic
     async fn send_rdma_request_with_retry(
-        send_channel: &Arc<Mutex<RdmaQueue<ShmqWorkerReq>>>,
+        send_channel: &RdmaReqQueue,
         req: &ShmqWorkerReq,
         expert_id: &str,
     ) -> EKResult<()> {
@@ -219,7 +262,7 @@ impl ExpertClient {
 
     /// Handle shared memory response reception with ID matching
     async fn receive_shm_response(
-        recv_channel: &Arc<Mutex<ShmQueue<'static, ShmqWorkerResp>>>,
+        recv_channel: &LocalShmRespQueue,
         pending_resp: &Arc<Mutex<HashMap<usize, PendingResponse>>>,
         req_id: usize,
         expert_id: &str,
@@ -233,7 +276,7 @@ impl ExpertClient {
             }
 
             // Receive new response
-            match recv_channel.lock().await.recv() {
+            match recv_channel.lock().await.0.recv() {
                 Ok(resp) => {
                     if resp.id() != req_id {
                         log::debug!(
@@ -258,7 +301,7 @@ impl ExpertClient {
 
     /// Handle RDMA response reception with ID matching
     async fn receive_rdma_response(
-        recv_channel: &Arc<Mutex<RdmaQueue<ShmqWorkerResp>>>,
+        recv_channel: &RdmaRespQueue,
         pending_resp: &Arc<Mutex<HashMap<usize, PendingResponse>>>,
         req_id: usize,
         expert_id: &str,
@@ -272,7 +315,7 @@ impl ExpertClient {
             }
 
             // Receive new response
-            match recv_channel.lock().await.recv() {
+            match recv_channel.lock().await.0.recv() {
                 Ok(resp) => {
                     if resp.id() != req_id {
                         log::debug!(
@@ -332,8 +375,8 @@ enum ChannelMeta {
 /// RDMA connection state for a worker node
 #[derive(Clone)]
 struct RdmaNodeConnection {
-    req_queue: Arc<Mutex<RdmaQueue<ShmqWorkerReq>>>,
-    resp_queue: Arc<Mutex<RdmaQueue<ShmqWorkerResp>>>,
+    req_queue: RdmaReqQueue,
+    resp_queue: RdmaRespQueue,
     connected: bool,
 }
 
@@ -448,9 +491,9 @@ impl ExpertRegistryImpl {
                                 &format!("ek-shmq-req-{}", node.hostname),
                                 128,
                             )));
-                            let resp_queue = Arc::new(Mutex::new(ShmQueue::new(
-                                &format!("ek-shmq-resp-{}", node.hostname),
-                                128,
+                            let resp_queue = Arc::new(Mutex::new((
+                                ShmQueue::new(&format!("ek-shmq-resp-{}", node.hostname), 128),
+                                ChannelMetrics::default(),
                             )));
                             (req_queue, resp_queue)
                         });
@@ -593,7 +636,7 @@ impl ExpertRegistryImpl {
             // Create connection entry
             let connection = RdmaNodeConnection {
                 req_queue: Arc::new(Mutex::new(req_queue)),
-                resp_queue: Arc::new(Mutex::new(resp_queue)),
+                resp_queue: Arc::new(Mutex::new((resp_queue, ChannelMetrics::default()))),
                 connected: false,
             };
 
@@ -754,14 +797,15 @@ impl ExpertRegistryImpl {
             // Connect controller's response queue to worker's response queue (for receiving responses)
             {
                 let mut resp_queue = connection.resp_queue.lock().await;
-                if resp_queue.is_connected() {
+                if resp_queue.0.is_connected() {
                     log::info!(
                         "Controller response queue already connected to worker {}, skipping",
                         hostname
                     );
                 } else {
-                    if let Err(e) =
-                        resp_queue.connect(worker_resp_qp_endpoint, worker_resp_memory_region)
+                    if let Err(e) = resp_queue
+                        .0
+                        .connect(worker_resp_qp_endpoint, worker_resp_memory_region)
                     {
                         log::error!(
                             "Failed to connect controller response queue to worker {}: {e}",
