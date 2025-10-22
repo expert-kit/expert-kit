@@ -33,7 +33,12 @@ class ExpertKitClient:
         self.timeout = timeout_sec
 
     def forward_expert(
-        self, expert_ids: List[List[str]], hidden_state: torch.Tensor
+        # TODO: permute!
+        self,
+        model_name: str,
+        layer_id: str,
+        experts: List[List[bool]],
+        hidden_state: torch.Tensor
     ) -> torch.Tensor:
         """Blocking call to expert-kit. Raises on any failure.
 
@@ -56,14 +61,15 @@ class ExpertKitClient:
         tensor_data = safetensors.torch.save({"data": hidden_state})
 
         # Generate expert ids info
-        seq_infos = []
-        for ids in expert_ids:
-            seq_infos.append(expert_pb2.ForwardReq.SequenceInfo(experts=ids))
+        experts_info = []
+        for activation in experts:
+            experts_info.append(
+                expert_pb2.ForwardReq.ExpertsInfo(activation=activation))
 
         try:
             response: expert_pb2.ForwardResp = self.stub.Forward(
                 expert_pb2.ForwardReq(
-                    instance_id="test", sequences=seq_infos, tensor=tensor_data
+                    instance_id="test", model_name=model_name, layer_id=layer_id, experts=experts_info, tensor=tensor_data
                 ),
                 timeout=self.timeout,
             )

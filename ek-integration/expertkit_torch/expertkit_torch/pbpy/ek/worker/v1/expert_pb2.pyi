@@ -8,19 +8,23 @@ from typing import ClassVar as _ClassVar, Iterable as _Iterable, Mapping as _Map
 DESCRIPTOR: _descriptor.FileDescriptor
 
 class ForwardReq(_message.Message):
-    __slots__ = ("instance_id", "sequences", "tensor")
-    class SequenceInfo(_message.Message):
-        __slots__ = ("experts",)
-        EXPERTS_FIELD_NUMBER: _ClassVar[int]
-        experts: _containers.RepeatedScalarFieldContainer[str]
-        def __init__(self, experts: _Optional[_Iterable[str]] = ...) -> None: ...
+    __slots__ = ("instance_id", "experts", "model_name", "layer_id", "tensor")
+    class ExpertsInfo(_message.Message):
+        __slots__ = ("activation",)
+        ACTIVATION_FIELD_NUMBER: _ClassVar[int]
+        activation: _containers.RepeatedScalarFieldContainer[bool]
+        def __init__(self, activation: _Optional[_Iterable[bool]] = ...) -> None: ...
     INSTANCE_ID_FIELD_NUMBER: _ClassVar[int]
-    SEQUENCES_FIELD_NUMBER: _ClassVar[int]
+    EXPERTS_FIELD_NUMBER: _ClassVar[int]
+    MODEL_NAME_FIELD_NUMBER: _ClassVar[int]
+    LAYER_ID_FIELD_NUMBER: _ClassVar[int]
     TENSOR_FIELD_NUMBER: _ClassVar[int]
     instance_id: str
-    sequences: _containers.RepeatedCompositeFieldContainer[ForwardReq.SequenceInfo]
+    experts: _containers.RepeatedCompositeFieldContainer[ForwardReq.ExpertsInfo]
+    model_name: str
+    layer_id: str
     tensor: bytes
-    def __init__(self, instance_id: _Optional[str] = ..., sequences: _Optional[_Iterable[_Union[ForwardReq.SequenceInfo, _Mapping]]] = ..., tensor: _Optional[bytes] = ...) -> None: ...
+    def __init__(self, instance_id: _Optional[str] = ..., experts: _Optional[_Iterable[_Union[ForwardReq.ExpertsInfo, _Mapping]]] = ..., model_name: _Optional[str] = ..., layer_id: _Optional[str] = ..., tensor: _Optional[bytes] = ...) -> None: ...
 
 class ForwardResp(_message.Message):
     __slots__ = ("output_tensor",)
@@ -44,27 +48,47 @@ class ExpertState(_message.Message):
     stage: ExpertState.Stage
     def __init__(self, stage: _Optional[_Union[ExpertState.Stage, str]] = ...) -> None: ...
 
-class RetrieveStateReq(_message.Message):
-    __slots__ = ()
-    def __init__(self) -> None: ...
+class RdmaEndpoint(_message.Message):
+    __slots__ = ("qp_endpoint", "memory_region")
+    QP_ENDPOINT_FIELD_NUMBER: _ClassVar[int]
+    MEMORY_REGION_FIELD_NUMBER: _ClassVar[int]
+    qp_endpoint: str
+    memory_region: str
+    def __init__(self, qp_endpoint: _Optional[str] = ..., memory_region: _Optional[str] = ...) -> None: ...
 
-class RetrieveStateResp(_message.Message):
-    __slots__ = ("states",)
+class RdmaEndpointPair(_message.Message):
+    __slots__ = ("request_endpoint", "response_endpoint")
+    REQUEST_ENDPOINT_FIELD_NUMBER: _ClassVar[int]
+    RESPONSE_ENDPOINT_FIELD_NUMBER: _ClassVar[int]
+    request_endpoint: RdmaEndpoint
+    response_endpoint: RdmaEndpoint
+    def __init__(self, request_endpoint: _Optional[_Union[RdmaEndpoint, _Mapping]] = ..., response_endpoint: _Optional[_Union[RdmaEndpoint, _Mapping]] = ...) -> None: ...
+
+class ExchangeReq(_message.Message):
+    __slots__ = ("id", "addr", "channel", "device", "last_will", "rdma_endpoints")
+    ID_FIELD_NUMBER: _ClassVar[int]
+    ADDR_FIELD_NUMBER: _ClassVar[int]
+    CHANNEL_FIELD_NUMBER: _ClassVar[int]
+    DEVICE_FIELD_NUMBER: _ClassVar[int]
+    LAST_WILL_FIELD_NUMBER: _ClassVar[int]
+    RDMA_ENDPOINTS_FIELD_NUMBER: _ClassVar[int]
+    id: str
+    addr: str
+    channel: str
+    device: str
+    last_will: bool
+    rdma_endpoints: RdmaEndpointPair
+    def __init__(self, id: _Optional[str] = ..., addr: _Optional[str] = ..., channel: _Optional[str] = ..., device: _Optional[str] = ..., last_will: bool = ..., rdma_endpoints: _Optional[_Union[RdmaEndpointPair, _Mapping]] = ...) -> None: ...
+
+class ExchangeResp(_message.Message):
+    __slots__ = ("state", "rdma_endpoints")
     class ExpertWithState(_message.Message):
         __slots__ = ("target",)
         TARGET_FIELD_NUMBER: _ClassVar[int]
         target: _object_pb2.ExpertSlice
         def __init__(self, target: _Optional[_Union[_object_pb2.ExpertSlice, _Mapping]] = ...) -> None: ...
-    STATES_FIELD_NUMBER: _ClassVar[int]
-    states: _containers.RepeatedCompositeFieldContainer[RetrieveStateResp.ExpertWithState]
-    def __init__(self, states: _Optional[_Iterable[_Union[RetrieveStateResp.ExpertWithState, _Mapping]]] = ...) -> None: ...
-
-class UpdateStateReq(_message.Message):
-    __slots__ = ("target",)
-    TARGET_FIELD_NUMBER: _ClassVar[int]
-    target: _object_pb2.ExpertSlice
-    def __init__(self, target: _Optional[_Union[_object_pb2.ExpertSlice, _Mapping]] = ...) -> None: ...
-
-class UpdateStateResp(_message.Message):
-    __slots__ = ()
-    def __init__(self) -> None: ...
+    STATE_FIELD_NUMBER: _ClassVar[int]
+    RDMA_ENDPOINTS_FIELD_NUMBER: _ClassVar[int]
+    state: ExchangeResp.ExpertWithState
+    rdma_endpoints: RdmaEndpointPair
+    def __init__(self, state: _Optional[_Union[ExchangeResp.ExpertWithState, _Mapping]] = ..., rdma_endpoints: _Optional[_Union[RdmaEndpointPair, _Mapping]] = ...) -> None: ...

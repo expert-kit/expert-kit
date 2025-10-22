@@ -34,39 +34,39 @@ class PlanServiceStub(object):
         Args:
             channel: A grpc.Channel.
         """
-        self.Create = channel.unary_unary(
-                '/ek.control.v1.PlanService/Create',
-                request_serializer=ek_dot_control_dot_v1_dot_control__pb2.CreatePlanReq.SerializeToString,
-                response_deserializer=ek_dot_control_dot_v1_dot_control__pb2.CreatePlanResp.FromString,
+        self.Rebalance = channel.unary_unary(
+                '/ek.control.v1.PlanService/Rebalance',
+                request_serializer=ek_dot_control_dot_v1_dot_control__pb2.RebalanceReq.SerializeToString,
+                response_deserializer=ek_dot_control_dot_v1_dot_control__pb2.RebalanceResp.FromString,
                 _registered_method=True)
-        self.Delete = channel.unary_unary(
-                '/ek.control.v1.PlanService/Delete',
-                request_serializer=ek_dot_control_dot_v1_dot_control__pb2.DeletePlanReq.SerializeToString,
-                response_deserializer=ek_dot_control_dot_v1_dot_control__pb2.DeletePlanResp.FromString,
+        self.Duplicate = channel.unary_unary(
+                '/ek.control.v1.PlanService/Duplicate',
+                request_serializer=ek_dot_control_dot_v1_dot_control__pb2.DuplicateReq.SerializeToString,
+                response_deserializer=ek_dot_control_dot_v1_dot_control__pb2.DuplicateResp.FromString,
                 _registered_method=True)
-        self.Inspect = channel.unary_unary(
-                '/ek.control.v1.PlanService/Inspect',
-                request_serializer=ek_dot_control_dot_v1_dot_control__pb2.InspectPlanReq.SerializeToString,
-                response_deserializer=ek_dot_control_dot_v1_dot_control__pb2.InspectPlanResp.FromString,
+        self.Manual = channel.unary_unary(
+                '/ek.control.v1.PlanService/Manual',
+                request_serializer=ek_dot_control_dot_v1_dot_control__pb2.ManualReq.SerializeToString,
+                response_deserializer=ek_dot_control_dot_v1_dot_control__pb2.ManualResp.FromString,
                 _registered_method=True)
 
 
 class PlanServiceServicer(object):
     """Missing associated documentation comment in .proto file."""
 
-    def Create(self, request, context):
+    def Rebalance(self, request, context):
         """Missing associated documentation comment in .proto file."""
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
-    def Delete(self, request, context):
+    def Duplicate(self, request, context):
         """Missing associated documentation comment in .proto file."""
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
-    def Inspect(self, request, context):
+    def Manual(self, request, context):
         """Missing associated documentation comment in .proto file."""
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
@@ -75,20 +75,20 @@ class PlanServiceServicer(object):
 
 def add_PlanServiceServicer_to_server(servicer, server):
     rpc_method_handlers = {
-            'Create': grpc.unary_unary_rpc_method_handler(
-                    servicer.Create,
-                    request_deserializer=ek_dot_control_dot_v1_dot_control__pb2.CreatePlanReq.FromString,
-                    response_serializer=ek_dot_control_dot_v1_dot_control__pb2.CreatePlanResp.SerializeToString,
+            'Rebalance': grpc.unary_unary_rpc_method_handler(
+                    servicer.Rebalance,
+                    request_deserializer=ek_dot_control_dot_v1_dot_control__pb2.RebalanceReq.FromString,
+                    response_serializer=ek_dot_control_dot_v1_dot_control__pb2.RebalanceResp.SerializeToString,
             ),
-            'Delete': grpc.unary_unary_rpc_method_handler(
-                    servicer.Delete,
-                    request_deserializer=ek_dot_control_dot_v1_dot_control__pb2.DeletePlanReq.FromString,
-                    response_serializer=ek_dot_control_dot_v1_dot_control__pb2.DeletePlanResp.SerializeToString,
+            'Duplicate': grpc.unary_unary_rpc_method_handler(
+                    servicer.Duplicate,
+                    request_deserializer=ek_dot_control_dot_v1_dot_control__pb2.DuplicateReq.FromString,
+                    response_serializer=ek_dot_control_dot_v1_dot_control__pb2.DuplicateResp.SerializeToString,
             ),
-            'Inspect': grpc.unary_unary_rpc_method_handler(
-                    servicer.Inspect,
-                    request_deserializer=ek_dot_control_dot_v1_dot_control__pb2.InspectPlanReq.FromString,
-                    response_serializer=ek_dot_control_dot_v1_dot_control__pb2.InspectPlanResp.SerializeToString,
+            'Manual': grpc.unary_unary_rpc_method_handler(
+                    servicer.Manual,
+                    request_deserializer=ek_dot_control_dot_v1_dot_control__pb2.ManualReq.FromString,
+                    response_serializer=ek_dot_control_dot_v1_dot_control__pb2.ManualResp.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -102,7 +102,7 @@ class PlanService(object):
     """Missing associated documentation comment in .proto file."""
 
     @staticmethod
-    def Create(request,
+    def Rebalance(request,
             target,
             options=(),
             channel_credentials=None,
@@ -115,9 +115,9 @@ class PlanService(object):
         return grpc.experimental.unary_unary(
             request,
             target,
-            '/ek.control.v1.PlanService/Create',
-            ek_dot_control_dot_v1_dot_control__pb2.CreatePlanReq.SerializeToString,
-            ek_dot_control_dot_v1_dot_control__pb2.CreatePlanResp.FromString,
+            '/ek.control.v1.PlanService/Rebalance',
+            ek_dot_control_dot_v1_dot_control__pb2.RebalanceReq.SerializeToString,
+            ek_dot_control_dot_v1_dot_control__pb2.RebalanceResp.FromString,
             options,
             channel_credentials,
             insecure,
@@ -129,7 +129,7 @@ class PlanService(object):
             _registered_method=True)
 
     @staticmethod
-    def Delete(request,
+    def Duplicate(request,
             target,
             options=(),
             channel_credentials=None,
@@ -142,9 +142,9 @@ class PlanService(object):
         return grpc.experimental.unary_unary(
             request,
             target,
-            '/ek.control.v1.PlanService/Delete',
-            ek_dot_control_dot_v1_dot_control__pb2.DeletePlanReq.SerializeToString,
-            ek_dot_control_dot_v1_dot_control__pb2.DeletePlanResp.FromString,
+            '/ek.control.v1.PlanService/Duplicate',
+            ek_dot_control_dot_v1_dot_control__pb2.DuplicateReq.SerializeToString,
+            ek_dot_control_dot_v1_dot_control__pb2.DuplicateResp.FromString,
             options,
             channel_credentials,
             insecure,
@@ -156,7 +156,7 @@ class PlanService(object):
             _registered_method=True)
 
     @staticmethod
-    def Inspect(request,
+    def Manual(request,
             target,
             options=(),
             channel_credentials=None,
@@ -169,9 +169,9 @@ class PlanService(object):
         return grpc.experimental.unary_unary(
             request,
             target,
-            '/ek.control.v1.PlanService/Inspect',
-            ek_dot_control_dot_v1_dot_control__pb2.InspectPlanReq.SerializeToString,
-            ek_dot_control_dot_v1_dot_control__pb2.InspectPlanResp.FromString,
+            '/ek.control.v1.PlanService/Manual',
+            ek_dot_control_dot_v1_dot_control__pb2.ManualReq.SerializeToString,
+            ek_dot_control_dot_v1_dot_control__pb2.ManualResp.FromString,
             options,
             channel_credentials,
             insecure,

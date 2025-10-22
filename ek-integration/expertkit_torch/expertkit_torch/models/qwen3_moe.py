@@ -90,30 +90,41 @@ def intercept_moe(
             *,
             hidden_states: torch.Tensor,
             routing_weights: torch.Tensor,
+            expert_mask: torch.Tensor,
             selected_experts: torch.Tensor,
             batch_size: int,
             sequence_length: int,
             hidden_dim: int,
         ):
+            print("--------------------------------")
+            # expert_mask[i, j, k] = 1 表示第 k 个 token 的第 j 个 top 选择是 expert i
+            print("expert_mask:", expert_mask.shape)
+            print("selected_experts:", selected_experts.shape)
             # Start timing for expert computation
             start_time = time.time()
 
             expert_ids = []
+
             total_seq_len, _ = hidden_states.shape
+
+            # TODO: self.num_experts may be large, optimize to "number of activated experts"
+            experts = [
+                [False] * total_seq_len for _ in range(self.num_experts)]
             for seq_idx in range(total_seq_len):
                 eids = selected_experts[seq_idx].tolist()
-                ids = [
-                    f"{ek_model_name}/l{self.layer_id}-e{expert_idx}"
-                    for expert_idx in eids
-                ]
-                expert_ids.append(ids)
+                for expert_idx in eids:
+                    experts[expert_idx][seq_idx] = True
 
+            print("inputs:", hidden_states.shape)
             outputs = self.client.forward_expert(
-                expert_ids=expert_ids, hidden_state=hidden_states
+                model_name=ek_model_name, layer_id=str(self.layer_id), experts=experts, hidden_state=hidden_states
             )
             outputs = outputs.to(device=hidden_states.device,
                                  dtype=hidden_states.dtype)
             expanded_weights = routing_weights.unsqueeze(-1)
+            print("routing_weights:", routing_weights.shape)
+            print("expanded_weights:", expanded_weights.shape)
+            print("outputs:", outputs.shape)
             output = torch.sum(expanded_weights * outputs, dim=1)
 
             final_hidden_states = output.reshape(
@@ -200,6 +211,7 @@ def intercept_moe(
                 final = self.ek_forward(
                     hidden_states=hidden_states,
                     routing_weights=routing_weights,
+                    expert_mask=expert_mask,
                     selected_experts=selected_experts,
                     batch_size=batch_size,
                     sequence_length=sequence_length,
@@ -298,6 +310,7 @@ def evaluate_batch(
             return_tensors="pt",
             padding=True,
             truncation=True,
+            max_length=64,
         ).to(model.device)
 
         # Generate responses - profiling happens automatically via hooks
@@ -445,6 +458,7 @@ def main():
         raise ValueError("Invalid dataset specified.")
 
     test_batch_sizes = [1, 2, 4, 8, 16, 32, 64, 128, 256]
+    test_batch_sizes = [1]
     aggregated_results = []
     for batch_size in test_batch_sizes:
         batch_result = evaluate_batch(

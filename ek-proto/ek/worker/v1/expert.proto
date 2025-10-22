@@ -4,16 +4,28 @@ package ek.worker.v1;
 import "ek/object/v1/object.proto";
 
 message ForwardReq {
-  message SequenceInfo { repeated string experts = 2; }
   string instance_id = 1;
-  repeated SequenceInfo sequences = 2;
-  // dimension: [seq,dim]
-  bytes tensor = 3;
+
+  // dimension: [num_experts, seq * batch]
+  message ExpertsInfo { repeated bool activation = 2; }
+  repeated ExpertsInfo experts = 2;
+
+  string model_name = 3;
+  string layer_id = 4;
+
+  // dimension: [seq * batch, dim]
+  bytes tensor = 5;
 }
 
 message ForwardResp {
-  // dimension: [seq,expert,dim]
+  // dimension: [seq, topk,dim]
   bytes output_tensor = 1;
+}
+
+message WorkerReq {
+  string instance_id = 1;
+  string expert_id = 2;
+  bytes tensor = 3;
 }
 
 service ComputationService {

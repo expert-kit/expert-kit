@@ -41,7 +41,12 @@ impl ComputationProxyServiceImpl {
         &self,
         request: tonic::Request<v1::ForwardReq>,
     ) -> Result<tonic::Response<v1::ForwardResp>, tonic::Status> {
-        let seq_len = request.get_ref().sequences.len();
+        let seq_len = request
+            .get_ref()
+            .experts
+            .get(0)
+            .map(|e| e.activation.len())
+            .unwrap_or(0);
         log::info!(seq_len; "forward request in controller start");
         let start = std::time::Instant::now();
         let settings = get_ek_settings();

@@ -25,7 +25,7 @@ _sym_db = _symbol_database.Default()
 from expertkit_torch.pbpy.ek.object.v1 import object_pb2 as ek_dot_object_dot_v1_dot_object__pb2
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x19\x65k/worker/v1/expert.proto\x12\x0c\x65k.worker.v1\x1a\x19\x65k/object/v1/object.proto\"\x8c\x01\n\nForwardReq\x12\x13\n\x0binstance_id\x18\x01 \x01(\t\x12\x38\n\tsequences\x18\x02 \x03(\x0b\x32%.ek.worker.v1.ForwardReq.SequenceInfo\x12\x0e\n\x06tensor\x18\x03 \x01(\x0c\x1a\x1f\n\x0cSequenceInfo\x12\x0f\n\x07\x65xperts\x18\x02 \x03(\t\"$\n\x0b\x46orwardResp\x12\x15\n\routput_tensor\x18\x01 \x01(\x0c\"\x96\x01\n\x0b\x45xpertState\x12.\n\x05stage\x18\x01 \x01(\x0e\x32\x1f.ek.worker.v1.ExpertState.Stage\"W\n\x05Stage\x12\x15\n\x11STAGE_UNSPECIFIED\x10\x00\x12\x10\n\x0cSTAGE_ACTIVE\x10\x01\x12\x11\n\rSTAGE_LOADING\x10\x02\x12\x12\n\x0eSTAGE_EVICTING\x10\x03\"\x12\n\x10RetrieveStateReq\"\x92\x01\n\x11RetrieveStateResp\x12?\n\x06states\x18\x01 \x03(\x0b\x32/.ek.worker.v1.RetrieveStateResp.ExpertWithState\x1a<\n\x0f\x45xpertWithState\x12)\n\x06target\x18\x01 \x01(\x0b\x32\x19.ek.object.v1.ExpertSlice\";\n\x0eUpdateStateReq\x12)\n\x06target\x18\x01 \x01(\x0b\x32\x19.ek.object.v1.ExpertSlice\"\x11\n\x0fUpdateStateResp2T\n\x12\x43omputationService\x12>\n\x07\x46orward\x12\x18.ek.worker.v1.ForwardReq\x1a\x19.ek.worker.v1.ForwardResp2\xa4\x01\n\x0cStateService\x12M\n\x08Retrieve\x12\x1e.ek.worker.v1.RetrieveStateReq\x1a\x1f.ek.worker.v1.RetrieveStateResp0\x01\x12\x45\n\x06Update\x12\x1c.ek.worker.v1.UpdateStateReq\x1a\x1d.ek.worker.v1.UpdateStateRespb\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x19\x65k/worker/v1/expert.proto\x12\x0c\x65k.worker.v1\x1a\x19\x65k/object/v1/object.proto\"\xb1\x01\n\nForwardReq\x12\x13\n\x0binstance_id\x18\x01 \x01(\t\x12\x35\n\x07\x65xperts\x18\x02 \x03(\x0b\x32$.ek.worker.v1.ForwardReq.ExpertsInfo\x12\x12\n\nmodel_name\x18\x03 \x01(\t\x12\x10\n\x08layer_id\x18\x04 \x01(\t\x12\x0e\n\x06tensor\x18\x05 \x01(\x0c\x1a!\n\x0b\x45xpertsInfo\x12\x12\n\nactivation\x18\x02 \x03(\x08\"$\n\x0b\x46orwardResp\x12\x15\n\routput_tensor\x18\x01 \x01(\x0c\"\x96\x01\n\x0b\x45xpertState\x12.\n\x05stage\x18\x01 \x01(\x0e\x32\x1f.ek.worker.v1.ExpertState.Stage\"W\n\x05Stage\x12\x15\n\x11STAGE_UNSPECIFIED\x10\x00\x12\x10\n\x0cSTAGE_ACTIVE\x10\x01\x12\x11\n\rSTAGE_LOADING\x10\x02\x12\x12\n\x0eSTAGE_EVICTING\x10\x03\":\n\x0cRdmaEndpoint\x12\x13\n\x0bqp_endpoint\x18\x01 \x01(\t\x12\x15\n\rmemory_region\x18\x02 \x01(\t\"\x7f\n\x10RdmaEndpointPair\x12\x34\n\x10request_endpoint\x18\x01 \x01(\x0b\x32\x1a.ek.worker.v1.RdmaEndpoint\x12\x35\n\x11response_endpoint\x18\x02 \x01(\x0b\x32\x1a.ek.worker.v1.RdmaEndpoint\"\x93\x01\n\x0b\x45xchangeReq\x12\n\n\x02id\x18\x01 \x01(\t\x12\x0c\n\x04\x61\x64\x64r\x18\x02 \x01(\t\x12\x0f\n\x07\x63hannel\x18\x03 \x01(\t\x12\x0e\n\x06\x64\x65vice\x18\x04 \x01(\t\x12\x11\n\tlast_will\x18\x05 \x01(\x08\x12\x36\n\x0erdma_endpoints\x18\x06 \x01(\x0b\x32\x1e.ek.worker.v1.RdmaEndpointPair\"\xbf\x01\n\x0c\x45xchangeResp\x12\x39\n\x05state\x18\x01 \x01(\x0b\x32*.ek.worker.v1.ExchangeResp.ExpertWithState\x12\x36\n\x0erdma_endpoints\x18\x02 \x01(\x0b\x32\x1e.ek.worker.v1.RdmaEndpointPair\x1a<\n\x0f\x45xpertWithState\x12)\n\x06target\x18\x01 \x01(\x0b\x32\x19.ek.object.v1.ExpertSlice2T\n\x12\x43omputationService\x12>\n\x07\x46orward\x12\x18.ek.worker.v1.ForwardReq\x1a\x19.ek.worker.v1.ForwardResp2U\n\x0cStateService\x12\x45\n\x08\x45xchange\x12\x19.ek.worker.v1.ExchangeReq\x1a\x1a.ek.worker.v1.ExchangeResp(\x01\x30\x01\x62\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
@@ -33,27 +33,27 @@ _builder.BuildTopDescriptorsAndMessages(DESCRIPTOR, 'ek.worker.v1.expert_pb2', _
 if not _descriptor._USE_C_DESCRIPTORS:
   DESCRIPTOR._loaded_options = None
   _globals['_FORWARDREQ']._serialized_start=71
-  _globals['_FORWARDREQ']._serialized_end=211
-  _globals['_FORWARDREQ_SEQUENCEINFO']._serialized_start=180
-  _globals['_FORWARDREQ_SEQUENCEINFO']._serialized_end=211
-  _globals['_FORWARDRESP']._serialized_start=213
-  _globals['_FORWARDRESP']._serialized_end=249
-  _globals['_EXPERTSTATE']._serialized_start=252
-  _globals['_EXPERTSTATE']._serialized_end=402
-  _globals['_EXPERTSTATE_STAGE']._serialized_start=315
-  _globals['_EXPERTSTATE_STAGE']._serialized_end=402
-  _globals['_RETRIEVESTATEREQ']._serialized_start=404
-  _globals['_RETRIEVESTATEREQ']._serialized_end=422
-  _globals['_RETRIEVESTATERESP']._serialized_start=425
-  _globals['_RETRIEVESTATERESP']._serialized_end=571
-  _globals['_RETRIEVESTATERESP_EXPERTWITHSTATE']._serialized_start=511
-  _globals['_RETRIEVESTATERESP_EXPERTWITHSTATE']._serialized_end=571
-  _globals['_UPDATESTATEREQ']._serialized_start=573
-  _globals['_UPDATESTATEREQ']._serialized_end=632
-  _globals['_UPDATESTATERESP']._serialized_start=634
-  _globals['_UPDATESTATERESP']._serialized_end=651
-  _globals['_COMPUTATIONSERVICE']._serialized_start=653
-  _globals['_COMPUTATIONSERVICE']._serialized_end=737
-  _globals['_STATESERVICE']._serialized_start=740
-  _globals['_STATESERVICE']._serialized_end=904
+  _globals['_FORWARDREQ']._serialized_end=248
+  _globals['_FORWARDREQ_EXPERTSINFO']._serialized_start=215
+  _globals['_FORWARDREQ_EXPERTSINFO']._serialized_end=248
+  _globals['_FORWARDRESP']._serialized_start=250
+  _globals['_FORWARDRESP']._serialized_end=286
+  _globals['_EXPERTSTATE']._serialized_start=289
+  _globals['_EXPERTSTATE']._serialized_end=439
+  _globals['_EXPERTSTATE_STAGE']._serialized_start=352
+  _globals['_EXPERTSTATE_STAGE']._serialized_end=439
+  _globals['_RDMAENDPOINT']._serialized_start=441
+  _globals['_RDMAENDPOINT']._serialized_end=499
+  _globals['_RDMAENDPOINTPAIR']._serialized_start=501
+  _globals['_RDMAENDPOINTPAIR']._serialized_end=628
+  _globals['_EXCHANGEREQ']._serialized_start=631
+  _globals['_EXCHANGEREQ']._serialized_end=778
+  _globals['_EXCHANGERESP']._serialized_start=781
+  _globals['_EXCHANGERESP']._serialized_end=972
+  _globals['_EXCHANGERESP_EXPERTWITHSTATE']._serialized_start=912
+  _globals['_EXCHANGERESP_EXPERTWITHSTATE']._serialized_end=972
+  _globals['_COMPUTATIONSERVICE']._serialized_start=974
+  _globals['_COMPUTATIONSERVICE']._serialized_end=1058
+  _globals['_STATESERVICE']._serialized_start=1060
+  _globals['_STATESERVICE']._serialized_end=1145
 # @@protoc_insertion_point(module_scope)

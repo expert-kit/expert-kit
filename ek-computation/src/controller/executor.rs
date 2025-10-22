@@ -46,11 +46,10 @@ struct IngressMeta {
 
 unsafe impl Sync for IngressMeta {}
 
-#[derive(Clone)]
 struct EgressMeta {
-    req_id: ReqId,
-    seq_gid: GlobalSeqId,
-    expert_idx: usize,
+    expert_id: String,
+    activation: Vec<bool>,
+    tensor: Tensor,
 }
 
 enum ForwardResponse {
@@ -93,7 +92,7 @@ impl PendingResponse {
 
 pub struct NaiveExecutor {
     pending_egress: BTreeMap<ExpertId, Vec<EgressMeta>>,
-    pending_ingress: BTreeMap<ReqId, IngressMeta>,
+    // pending_ingress: BTreeMap<ReqId, IngressMeta>,
     pending_resp: Arc<Mutex<HashMap<usize, PendingResponse>>>,
 
     seq_mapping: BTreeMap<GlobalSeqId, (ReqId, LocalSeqIdx)>,
@@ -128,11 +127,12 @@ impl NaiveExecutor {
         req: &v1::ForwardReq,
     ) -> EKResult<mpsc::Receiver<Arc<v1::ForwardResp>>> {
         let (sender, receiver) = mpsc::channel(1);
-        log::debug!("submit request, seq_len {:?}", req.sequences.len());
+        let seq_len = req.experts.get(0).map(|e| e.activation.len()).unwrap_or(0);
+        log::debug!("submit request, seq_len {:?}", seq_len);
         let span = span!(
             tracing::Level::INFO,
             "naive_executor_submit",
-            seq_len = req.sequences.len(),
+            seq_len = seq_len,
             instance_id = req.instance_id.as_str()
         );
         let _enter = span.enter();
@@ -142,15 +142,15 @@ impl NaiveExecutor {
         let inp_tensor = TchTensor::from(&inp_view);
         let mut result = vec![];
 
-        for i in &req.sequences {
-            let mut experts = Vec::new();
-            for _ in &i.experts {
-                experts.push(None);
-            }
-            result.push(experts);
+        for _ in req
+            .experts
+            .iter()
+            .filter(|&e| e.activation.iter().any(|&a| a))
+        {
+            result.push(Vec::new());
         }
 
-        let meta = IngressMeta {
+        let meta = EgressMeta {
             tensor: inp_tensor.inner(),
             sender,
             result,
@@ -453,6 +453,7 @@ impl NaiveExecutor {
 
     #[instrument(skip(self, req))]
     fn break_down_to_egress(&mut self, req: &v1::ForwardReq, req_id: ReqId) {
+        for (experts_id, seq_id) in req.experts.iter().enumerate() {}
         for (idx, seq) in req.sequences.iter().enumerate() {
             // update pending_seq
             let seq_gid = self.add_seq(req_id, idx as LocalSeqIdx);
@@ -486,7 +487,7 @@ impl NaiveExecutor {
     pub fn new() -> Self {
         Self {
             pending_egress: BTreeMap::new(),
-            pending_ingress: BTreeMap::new(),
+            // pending_ingress: BTreeMap::new(),
             seq_mapping: BTreeMap::new(),
             seq_gid_cursor: 0,
             req_id_cursor: 0,
