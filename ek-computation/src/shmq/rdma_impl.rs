@@ -2,7 +2,7 @@ use std::io;
 
 // Import from the provided ibverbs library
 use ibverbs::{
-    CompletionQueue, Context, MemoryRegion, PreparedQueuePair, ProtectionDomain, QueuePair,
+    CompletionQueue, Context, MemoryRegion, ProtectionDomain, QueuePair, QueuePairBuilder,
     QueuePairEndpoint, RemoteMemoryRegion, devices, ibv_qp_type,
 };
 
@@ -54,8 +54,9 @@ pub struct RdmaQueue<T> {
     _pd: ProtectionDomain,
     _send_cq: CompletionQueue,
     _recv_cq: CompletionQueue,
+    _qp_builder: QueuePairBuilder,
+    _endpoint: QueuePairEndpoint,
     qp: Option<QueuePair>,
-    prepared_qp: Option<PreparedQueuePair>,
 
     // Local memory region containing queue metadata and data
     memory_region: MemoryRegion<Vec<u8>>,
@@ -69,6 +70,9 @@ pub struct RdmaQueue<T> {
 
     // Work request ID counter
     wr_id_counter: u64,
+
+    // Connection Status
+    _is_connected: bool,
 
     _phantom: std::marker::PhantomData<T>,
 }
@@ -91,7 +95,7 @@ fn offset_of_tail() -> usize {
 impl<T: GeneralShmQueueBytes> RdmaQueue<T> {
     /// Check if the queue is connected to a remote peer
     pub fn is_connected(&self) -> bool {
-        self.remote_region.is_some() && self.qp.is_some()
+        self._is_connected
     }
 
     pub fn new(device_index: Option<usize>, capacity: usize, is_sender: bool) -> io::Result<Self> {
@@ -150,29 +154,29 @@ impl<T: GeneralShmQueueBytes> RdmaQueue<T> {
             .allow_remote_rw();
 
         let prepared_qp = qp_builder.build()?;
+        let endpoint = prepared_qp.endpoint()?;
 
         Ok(Self {
             _context: context,
             _pd: pd,
             _send_cq: send_cq,
             _recv_cq: recv_cq,
+            _qp_builder: qp_builder,
+            _endpoint: endpoint,
             qp: None,
-            prepared_qp: Some(prepared_qp),
             memory_region,
             remote_region: None,
             capacity,
             is_sender,
             wr_id_counter: 1,
+            _is_connected: false,
             _phantom: std::marker::PhantomData,
         })
     }
 
     /// Get the local endpoint information for connection establishment
     pub fn endpoint(&self) -> io::Result<QueuePairEndpoint> {
-        match &self.prepared_qp {
-            Some(pqp) => pqp.endpoint(),
-            None => Err(io::Error::other("Queue pair already connected")),
-        }
+        Ok(self._endpoint.clone())
     }
 
     /// Get the local memory region information for sharing with remote peer
@@ -190,10 +194,16 @@ impl<T: GeneralShmQueueBytes> RdmaQueue<T> {
         self.remote_region = Some(remote_region);
 
         // Complete the QP handshake
-        if let Some(prepared_qp) = self.prepared_qp.take() {
-            let qp = prepared_qp.handshake(remote_endpoint).unwrap();
-            log::info!("🚀Connected to remote peer: {:?}", remote_endpoint);
+        if !self.is_connected() {
+            let prepared_qp = self._qp_builder.build()?;
+
+            let result = prepared_qp.handshake(remote_endpoint);
+            let qp = result.map_err(|e| io::Error::other(format!("QP handshake failed: {}", e)))?;
+
+            // Mark as connected
             self.qp = Some(qp);
+            self._is_connected = true;
+            log::info!("🚀Connected to remote peer: {:?}", remote_endpoint);
             Ok(())
         } else {
             Err(io::Error::other(
@@ -204,7 +214,7 @@ impl<T: GeneralShmQueueBytes> RdmaQueue<T> {
 
     /// Send an item to the queue (sender side) - Push-based architecture
     pub fn send(&mut self, item: &T) -> Result<(), RdmaQueueError> {
-        if !self.is_sender {
+        if !self.is_sender || !self.is_connected() {
             return Err(RdmaQueueError::IoError);
         }
         let start_time = std::time::Instant::now();
@@ -245,7 +255,7 @@ impl<T: GeneralShmQueueBytes> RdmaQueue<T> {
 
     /// Receive an item from the queue (receiver side) - Poll local memory
     pub fn recv(&mut self) -> Result<T, RdmaQueueError> {
-        if self.is_sender {
+        if self.is_sender || !self.is_connected() {
             return Err(RdmaQueueError::IoError);
         }
 
