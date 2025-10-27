@@ -58,7 +58,7 @@ pub fn get_rdma_tcp_port() -> Option<u16> {
 }
 
 /// Create RDMA queues and start TCP server for endpoint exchange
-async fn create_rdma_queues_with_tcp_server() -> EKResult<u16> {
+async fn create_rdma_queues_with_tcp_server() -> EKResult<(u16, tokio::task::JoinHandle<()>)> {
     // Worker receives requests (sender=false) and sends responses (sender=true)
     let req_queue = RdmaQueue::<ShmqWorkerReq>::new(None, 256, false)?;
     let resp_queue = RdmaQueue::<ShmqWorkerResp>::new(None, 256, true)?;
@@ -90,16 +90,21 @@ async fn create_rdma_queues_with_tcp_server() -> EKResult<u16> {
             ek_base::error::EKError::InvalidInput("Failed to set RDMA TCP port".into())
         })?;
 
-    // Start the TCP server in background
-    tokio::spawn(async move {
-        if let Err(e) = endpoint_server.start().await {
-            log::error!("RDMA TCP endpoint server failed: {}", e);
+    // Start the TCP server and return its handle
+    let endpoint_server_handle = tokio::spawn(async move {
+        match endpoint_server.start().await {
+            Ok(()) => {
+                log::info!("🎯 RDMA TCP endpoint server completed successfully");
+            }
+            Err(e) => {
+                log::error!("RDMA TCP endpoint server failed: {}", e);
+            }
         }
     });
 
     log::info!("🌐 RDMA TCP endpoint exchange server started on port {}", tcp_port);
     
-    Ok(tcp_port)
+    Ok((tcp_port, endpoint_server_handle))
 }
 use crate::proto::ek::worker::v1::computation_service_server::ComputationServiceServer;
 use crate::worker::server::BasicExpertImpl;
@@ -121,11 +126,11 @@ pub async fn worker_main() -> EKResult<()> {
 
     // Determine queue type based on configuration
     // Note: Channel should be created before stateClient start for endpoint exchange
-    let rdma_tcp_port: Option<u16> = if settings.worker.channel == "rdma" {
+    let (rdma_tcp_port, endpoint_server_handle): (Option<u16>, Option<tokio::task::JoinHandle<()>>) = if settings.worker.channel == "rdma" {
         match create_rdma_queues_with_tcp_server().await {
-            Ok(tcp_port) => {
+            Ok((tcp_port, handle)) => {
                 log::info!("RDMA queues and TCP server created successfully");
-                Some(tcp_port)
+                (Some(tcp_port), Some(handle))
             }
             Err(e) => {
                 log::error!("Failed to create RDMA queues: {e}");
@@ -133,7 +138,7 @@ pub async fn worker_main() -> EKResult<()> {
             }
         }
     } else {
-        None
+        (None, None)
     };
 
     // Spawn state client task (handles expert loading/unloading)
@@ -371,6 +376,15 @@ pub async fn worker_main() -> EKResult<()> {
             log::info!("ctrl-c signal received, shutting down");
             *poison.lock().unwrap() = true;
             token.clone().cancel();
+            
+            // Wait for RDMA endpoint server to complete if it exists
+            if let Some(handle) = endpoint_server_handle {
+                log::info!("Waiting for RDMA endpoint server to complete...");
+                if let Err(e) = handle.await {
+                    log::error!("RDMA endpoint server task failed: {}", e);
+                }
+            }
+            
             let(_,rx) = get_graceful_shutdown_ch();
             rx.lock().await.recv().await;
             for srv in sync_srvs {

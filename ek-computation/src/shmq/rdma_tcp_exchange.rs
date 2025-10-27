@@ -1,7 +1,6 @@
 use std::io::{self, BufRead, BufReader, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 use serde::{Serialize, Deserialize};
 use ibverbs::{QueuePairEndpoint, RemoteMemoryRegion};
 
@@ -57,25 +56,37 @@ impl RdmaEndpointServer {
         let listener = TcpListener::bind(format!("0.0.0.0:{}", self.tcp_port))?;
         log::info!("🌐 RDMA endpoint exchange server listening on port {}", self.tcp_port);
 
-        loop {
-            match listener.accept() {
-                Ok((stream, addr)) => {
-                    log::info!("📡 Controller connected from: {}", addr);
-                    
-                    let req_queue = self.req_queue.clone();
-                    let resp_queue = self.resp_queue.clone();
-                    
-                    // Handle connection in background
-                    tokio::task::spawn_blocking(move || {
-                        if let Err(e) = Self::handle_connection(stream, req_queue, resp_queue) {
-                            log::error!("Failed to handle RDMA endpoint exchange: {}", e);
-                        }
-                    });
+        // Accept only one connection for endpoint exchange, then shut down
+        match listener.accept() {
+            Ok((stream, addr)) => {
+                log::info!("📡 Controller connected from: {}", addr);
+                
+                let req_queue = self.req_queue.clone();
+                let resp_queue = self.resp_queue.clone();
+                
+                // Handle connection and wait for completion
+                let result = tokio::task::spawn_blocking(move || {
+                    Self::handle_connection(stream, req_queue, resp_queue)
+                }).await;
+                
+                match result {
+                    Ok(Ok(())) => {
+                        log::info!("🎯 RDMA endpoint exchange completed successfully, shutting down TCP server");
+                        Ok(())
+                    }
+                    Ok(Err(e)) => {
+                        log::error!("Failed to handle RDMA endpoint exchange: {}", e);
+                        Err(e)
+                    }
+                    Err(e) => {
+                        log::error!("RDMA endpoint exchange task panicked: {}", e);
+                        Err(io::Error::other("Endpoint exchange task failed"))
+                    }
                 }
-                Err(e) => {
-                    log::error!("Failed to accept TCP connection: {}", e);
-                    tokio::time::sleep(Duration::from_secs(1)).await;
-                }
+            }
+            Err(e) => {
+                log::error!("Failed to accept TCP connection: {}", e);
+                Err(e)
             }
         }
     }
@@ -196,7 +207,7 @@ impl RdmaEndpointClient {
         let worker_addr = format!("{}:{}", worker_host, worker_tcp_port);
         log::info!("🔗 Connecting to worker at {} for RDMA endpoint exchange", worker_addr);
 
-        let mut stream = TcpStream::connect(&worker_addr)?;
+        let stream = TcpStream::connect(&worker_addr)?;
         log::info!("✅ Connected to worker TCP server");
 
         // Get controller's RDMA endpoints
