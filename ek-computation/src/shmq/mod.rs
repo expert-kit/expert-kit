@@ -1,7 +1,9 @@
 pub mod rdma_impl;
+pub mod rdma_tcp_exchange;
 pub mod shared_mem;
 
 pub use rdma_impl::{RdmaQueue, RdmaQueueError};
+pub use rdma_tcp_exchange::{RdmaEndpointServer, RdmaEndpointClient, RdmaConnectionInfo, RdmaConnectionPair};
 pub use shared_mem::ShmQueue;
 
 /// Trait for types that can be sent over RDMA queue

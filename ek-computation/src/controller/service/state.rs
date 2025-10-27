@@ -7,7 +7,7 @@ use crate::{
     },
     proto::ek::{
         object::v1::ExpertSlice,
-        worker::v1::{self, ExchangeResp, RdmaEndpoint, RdmaEndpointPair},
+        worker::v1::{self, ExchangeResp},
     },
     state::{
         io::{StateReader, StateReaderImpl},
@@ -55,20 +55,9 @@ impl StateServerImpl {
                     config["addr"] = serde_json::json!(msg.addr.clone());
                     config["channel"] = serde_json::json!(msg.channel.clone());
 
-                    if let Some(rdma_endpoints) = &msg.rdma_endpoints {
-                        if let Some(worker_req_endpoint) = &rdma_endpoints.request_endpoint {
-                            config["worker_rdma_request_endpoint"] = serde_json::json!({
-                                "qp_endpoint": worker_req_endpoint.qp_endpoint,
-                                "memory_region": worker_req_endpoint.memory_region,
-                            });
-                        }
-
-                        if let Some(worker_resp_endpoint) = &rdma_endpoints.response_endpoint {
-                            config["worker_rdma_response_endpoint"] = serde_json::json!({
-                                "qp_endpoint": worker_resp_endpoint.qp_endpoint,
-                                "memory_region": worker_resp_endpoint.memory_region,
-                            });
-                        }
+                    // Store RDMA TCP port if provided
+                    if msg.rdma_tcp_port > 0 {
+                        config["rdma_tcp_port"] = serde_json::json!(msg.rdma_tcp_port);
                     }
 
                     let err = w
@@ -130,17 +119,9 @@ impl StateService for StateServerImpl {
             .ok_or(Status::invalid_argument("no message"))?;
         let worker_id = first_message.id.clone();
 
-        // If channel is rdma, clear deprecated RDMA endpoints from database
-        if first_message.channel == "rdma" {
-            let w = StateWriterImpl {};
-            if let Err(e) = w.clear_node_config_by_hostname(&worker_id).await {
-                log::error!(
-                    "Failed to clear deprecated RDMA endpoints for worker {}: {e}",
-                    worker_id
-                );
-            } else {
-                log::info!("Cleared deprecated RDMA endpoints for worker {}", worker_id);
-            }
+        // Log RDMA TCP port if provided
+        if first_message.channel == "rdma" && first_message.rdma_tcp_port > 0 {
+            log::info!("Worker {} using RDMA with TCP port {}", worker_id, first_message.rdma_tcp_port);
         }
 
         // Handle incoming worker requests: Ping
@@ -154,62 +135,17 @@ impl StateService for StateServerImpl {
         let mut rx = dispather_guard.subscribe(&first_message.id).await;
 
         // Handle outgoing messages to the worker: New Experts
-        let worker_id_for_spawn = worker_id.clone();
+        let _worker_id_for_spawn = worker_id.clone();
         tokio::spawn(async move {
-            let reader = StateReaderImpl::new();
+            let _reader = StateReaderImpl::new();
 
             while let Some(t) = rx.recv().await {
-                // Check if the worker is using RDMA backend and fetch controller endpoints
-                let rdma_endpoints = if let Ok(Some(worker_node)) =
-                    reader.node_by_hostname(&worker_id_for_spawn).await
-                {
-                    if worker_node.config.get("channel").and_then(|v| v.as_str()) == Some("rdma") {
-                        // Extract controller endpoints from worker's database record
-                        let req_endpoint = worker_node
-                            .config
-                            .get("controller_rdma_request_endpoint")
-                            .and_then(|data| {
-                                Some(RdmaEndpoint {
-                                    qp_endpoint: data.get("qp_endpoint")?.as_str()?.to_string(),
-                                    memory_region: data.get("memory_region")?.as_str()?.to_string(),
-                                })
-                            });
-
-                        let resp_endpoint = worker_node
-                            .config
-                            .get("controller_rdma_response_endpoint")
-                            .and_then(|data| {
-                                Some(RdmaEndpoint {
-                                    qp_endpoint: data.get("qp_endpoint")?.as_str()?.to_string(),
-                                    memory_region: data.get("memory_region")?.as_str()?.to_string(),
-                                })
-                            });
-
-                        if req_endpoint.is_some() || resp_endpoint.is_some() {
-                            Some(RdmaEndpointPair {
-                                request_endpoint: req_endpoint,
-                                response_endpoint: resp_endpoint,
-                            })
-                        } else {
-                            log::debug!(
-                                "No controller RDMA endpoints found for worker {}",
-                                worker_id_for_spawn
-                            );
-                            None
-                        }
-                    } else {
-                        None
-                    }
-                } else {
-                    log::warn!("Worker node {} not found in database", worker_id_for_spawn);
-                    None
-                };
-
+                // Note: RDMA connection is now handled via direct TCP connection
+                // No complex endpoint exchange logic needed in the response stream
                 let resp = ExchangeResp {
                     state: Some(v1::exchange_resp::ExpertWithState {
                         target: Some(ExpertSlice::from(t)),
                     }),
-                    rdma_endpoints: rdma_endpoints.clone(),
                 };
                 if let Err(e) = stream_tx.send(Ok(resp)).await {
                     log::error!("stream error: {e}")

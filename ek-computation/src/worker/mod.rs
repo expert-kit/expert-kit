@@ -20,18 +20,18 @@ pub mod x;
 
 use crate::controller::registry::{ShmqWorkerReq, ShmqWorkerResp};
 use crate::metrics::spawn_metrics_server;
-use crate::shmq::{ShmQueue, rdma_impl::RdmaQueue};
+use crate::shmq::{ShmQueue, rdma_impl::RdmaQueue, RdmaEndpointServer};
 use crate::worker::core::EKInstanceGateSync;
 use crate::x::get_graceful_shutdown_ch;
 
 use super::worker::state::StateClient;
-use crate::proto::ek::worker::v1::{RdmaEndpoint, RdmaEndpointPair};
 use ek_base::{config::get_ek_settings, error::EKResult};
 
-// Global storage for RDMA queues
+// Global storage for RDMA queues and TCP server
 static RDMA_REQ_QUEUE: OnceLock<Arc<Mutex<RdmaQueue<ShmqWorkerReq>>>> = OnceLock::new();
 static RDMA_RESP_QUEUE: OnceLock<Arc<Mutex<RdmaQueue<ShmqWorkerResp>>>> = OnceLock::new();
 static RDMA_CONNECTION_STATUS: AtomicBool = AtomicBool::new(false);
+static RDMA_TCP_PORT: OnceLock<u16> = OnceLock::new();
 
 /// Get the global RDMA request queue
 pub fn get_rdma_req_queue() -> Option<&'static Arc<Mutex<RdmaQueue<ShmqWorkerReq>>>> {
@@ -52,56 +52,54 @@ pub fn update_rdma_connection_status(connected: bool) {
     RDMA_CONNECTION_STATUS.store(connected, Ordering::Relaxed);
 }
 
-/// Create RDMA queues and return endpoint information
-async fn create_rdma_queues() -> EKResult<RdmaEndpointPair> {
+/// Get the global RDMA TCP port
+pub fn get_rdma_tcp_port() -> Option<u16> {
+    RDMA_TCP_PORT.get().copied()
+}
+
+/// Create RDMA queues and start TCP server for endpoint exchange
+async fn create_rdma_queues_with_tcp_server() -> EKResult<u16> {
     // Worker receives requests (sender=false) and sends responses (sender=true)
     let req_queue = RdmaQueue::<ShmqWorkerReq>::new(None, 256, false)?;
     let resp_queue = RdmaQueue::<ShmqWorkerResp>::new(None, 256, true)?;
 
-    let req_endpoint = req_queue.endpoint()?;
-    let req_memory = req_queue.memory_region();
-    let resp_endpoint = resp_queue.endpoint()?;
-    let resp_memory = resp_queue.memory_region();
+    let req_queue_arc = Arc::new(Mutex::new(req_queue));
+    let resp_queue_arc = Arc::new(Mutex::new(resp_queue));
 
     // Store the queues globally
     RDMA_REQ_QUEUE
-        .set(Arc::new(Mutex::new(req_queue)))
+        .set(req_queue_arc.clone())
         .map_err(|_| {
             ek_base::error::EKError::InvalidInput("Failed to set RDMA request queue".into())
         })?;
     RDMA_RESP_QUEUE
-        .set(Arc::new(Mutex::new(resp_queue)))
+        .set(resp_queue_arc.clone())
         .map_err(|_| {
             ek_base::error::EKError::InvalidInput("Failed to set RDMA response queue".into())
         })?;
 
-    // Serialize endpoint and memory region data as JSON strings
-    let req_endpoint_json = serde_json::to_string(&req_endpoint).map_err(|e| {
-        ek_base::error::EKError::InvalidInput(format!("Failed to serialize QP endpoint: {e}"))
-    })?;
+    // Create TCP server for endpoint exchange
+    let endpoint_server = RdmaEndpointServer::new(req_queue_arc, resp_queue_arc)
+        .map_err(|e| ek_base::error::EKError::IoError(e))?;
+    let tcp_port = endpoint_server.port();
+    
+    // Store TCP port globally
+    RDMA_TCP_PORT
+        .set(tcp_port)
+        .map_err(|_| {
+            ek_base::error::EKError::InvalidInput("Failed to set RDMA TCP port".into())
+        })?;
 
-    let req_memory_json = serde_json::to_string(&req_memory).map_err(|e| {
-        ek_base::error::EKError::InvalidInput(format!("Failed to serialize memory region: {e}"))
-    })?;
+    // Start the TCP server in background
+    tokio::spawn(async move {
+        if let Err(e) = endpoint_server.start().await {
+            log::error!("RDMA TCP endpoint server failed: {}", e);
+        }
+    });
 
-    let resp_endpoint_json = serde_json::to_string(&resp_endpoint).map_err(|e| {
-        ek_base::error::EKError::InvalidInput(format!("Failed to serialize QP endpoint: {e}"))
-    })?;
-
-    let resp_memory_json = serde_json::to_string(&resp_memory).map_err(|e| {
-        ek_base::error::EKError::InvalidInput(format!("Failed to serialize memory region: {e}"))
-    })?;
-
-    Ok(RdmaEndpointPair {
-        request_endpoint: Some(RdmaEndpoint {
-            qp_endpoint: req_endpoint_json,
-            memory_region: req_memory_json,
-        }),
-        response_endpoint: Some(RdmaEndpoint {
-            qp_endpoint: resp_endpoint_json,
-            memory_region: resp_memory_json,
-        }),
-    })
+    log::info!("🌐 RDMA TCP endpoint exchange server started on port {}", tcp_port);
+    
+    Ok(tcp_port)
 }
 use crate::proto::ek::worker::v1::computation_service_server::ComputationServiceServer;
 use crate::worker::server::BasicExpertImpl;
@@ -123,11 +121,11 @@ pub async fn worker_main() -> EKResult<()> {
 
     // Determine queue type based on configuration
     // Note: Channel should be created before stateClient start for endpoint exchange
-    let rdma_endpoints: Option<RdmaEndpointPair> = if settings.worker.channel == "rdma" {
-        match create_rdma_queues().await {
-            Ok(endpoint_pair) => {
-                log::info!("RDMA queues created successfully");
-                Some(endpoint_pair)
+    let rdma_tcp_port: Option<u16> = if settings.worker.channel == "rdma" {
+        match create_rdma_queues_with_tcp_server().await {
+            Ok(tcp_port) => {
+                log::info!("RDMA queues and TCP server created successfully");
+                Some(tcp_port)
             }
             Err(e) => {
                 log::error!("Failed to create RDMA queues: {e}");
@@ -145,7 +143,7 @@ pub async fn worker_main() -> EKResult<()> {
         let control_endpoint = x::get_controller_addr();
         log::info!("control endpoint {:}", control_endpoint.uri());
         let mut state_client =
-            StateClient::new_with_rdma(control_endpoint, &worker_id, rdma_endpoints);
+            StateClient::new_with_rdma_tcp_port(control_endpoint, &worker_id, rdma_tcp_port);
         if let Err(e) = state_client.run(cli_cancel).await {
             log::error!("state client error {e:}");
         }

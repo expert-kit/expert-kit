@@ -56,6 +56,7 @@ pub struct RdmaQueue<T> {
     _recv_cq: CompletionQueue,
     _qp_builder: QueuePairBuilder,
     _endpoint: QueuePairEndpoint,
+    prepared_qp: Option<ibverbs::PreparedQueuePair>,
     qp: Option<QueuePair>,
 
     // Local memory region containing queue metadata and data
@@ -163,6 +164,7 @@ impl<T: GeneralShmQueueBytes> RdmaQueue<T> {
             _recv_cq: recv_cq,
             _qp_builder: qp_builder,
             _endpoint: endpoint,
+            prepared_qp: Some(prepared_qp),
             qp: None,
             memory_region,
             remote_region: None,
@@ -193,9 +195,10 @@ impl<T: GeneralShmQueueBytes> RdmaQueue<T> {
         // Store remote memory region
         self.remote_region = Some(remote_region);
 
-        // Complete the QP handshake
+        // Complete the QP handshake using the same prepared_qp from new()
         if !self.is_connected() {
-            let prepared_qp = self._qp_builder.build()?;
+            let prepared_qp = self.prepared_qp.take()
+                .ok_or_else(|| io::Error::other("No prepared QP available"))?;
 
             let result = prepared_qp.handshake(remote_endpoint);
             let qp = result.map_err(|e| io::Error::other(format!("QP handshake failed: {}", e)))?;
