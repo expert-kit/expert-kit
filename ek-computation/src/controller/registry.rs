@@ -18,10 +18,7 @@ use tower::ServiceBuilder;
 
 use crate::{
     shmq::{GeneralShmQueueBytes, RdmaEndpointClient, ShmQueue, rdma_impl::RdmaQueue},
-    state::{
-        io::{StateReader, StateReaderImpl},
-        writer::StateWriterImpl,
-    },
+    state::io::{StateReader, StateReaderImpl},
 };
 
 pub type ExpertId = String;
@@ -129,7 +126,6 @@ enum ChannelMeta {
 struct RdmaNodeConnection {
     req_queue: Arc<Mutex<RdmaQueue<ShmqWorkerReq>>>,
     resp_queue: Arc<Mutex<RdmaQueue<ShmqWorkerResp>>>,
-    tcp_port: Option<u16>,
     connected: bool,
 }
 
@@ -138,7 +134,6 @@ pub struct ExpertRegistryImpl {
     all_shm_channels: HashMap<String, LocalShmChannel>,
     all_rdma_connections: HashMap<String, RdmaNodeConnection>,
     reader: Box<dyn StateReader + Send + Sync>,
-    writer: StateWriterImpl,
 }
 
 #[async_trait::async_trait]
@@ -315,7 +310,6 @@ impl ExpertRegistryImpl {
             let connection = RdmaNodeConnection {
                 req_queue: req_queue_arc.clone(),
                 resp_queue: resp_queue_arc.clone(),
-                tcp_port: Some(tcp_port),
                 connected: false,
             };
 
@@ -455,7 +449,6 @@ impl ExpertRegistryImpl {
             all_shm_channels: HashMap::new(),
             all_rdma_connections: HashMap::new(),
             reader: Box::new(StateReaderImpl::new()),
-            writer: StateWriterImpl::new(),
         }
     }
 }
