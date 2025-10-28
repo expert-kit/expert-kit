@@ -6,6 +6,10 @@ use std::{
     },
 };
 
+use crate::{
+    shmq::{GeneralShmQueueBytes, RdmaEndpointClient, ShmQueue, rdma_impl::RdmaQueue},
+    state::io::{StateReader, StateReaderImpl},
+};
 use ek_base::{
     error::{EKError, EKResult},
     tracing::grpc::OTelGrpcClientMiddleware,
@@ -15,11 +19,10 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 use tonic::transport::Channel;
 use tower::ServiceBuilder;
+use url::Url;
 
-use crate::{
-    shmq::{GeneralShmQueueBytes, RdmaEndpointClient, ShmQueue, rdma_impl::RdmaQueue},
-    state::io::{StateReader, StateReaderImpl},
-};
+const MAX_RETRIES: u32 = 3;
+const BASE_DELAY_MS: u64 = 1000;
 
 pub type ExpertId = String;
 pub type ExpertIdRef<'a> = &'a str;
@@ -316,16 +319,9 @@ impl ExpertRegistryImpl {
             self.all_rdma_connections
                 .insert(node.hostname.clone(), connection);
 
-            // Attempt to establish RDMA connection via TCP
-            if let Err(e) = self
-                .connect_to_worker_via_tcp(&node.hostname, &worker_ip, tcp_port)
-                .await
-            {
-                log::error!(
-                    "Failed to establish RDMA connection to worker {}: {e:?}",
-                    node.hostname
-                );
-            }
+            // Attempt to establish RDMA connection via TCP with retry
+            self.connect_to_worker_via_tcp_with_retry(&node.hostname, &worker_ip, tcp_port)
+                .await?;
         }
 
         let connection = self.all_rdma_connections.get(&node.hostname).unwrap();
@@ -383,22 +379,53 @@ impl ExpertRegistryImpl {
         Ok(())
     }
 
+    /// Establish RDMA connection to a worker node via TCP with retry logic
+    async fn connect_to_worker_via_tcp_with_retry(
+        &mut self,
+        hostname: &str,
+        worker_ip: &str,
+        tcp_port: u16,
+    ) -> EKResult<()> {
+        let mut last_error = None;
+
+        for attempt in 0..MAX_RETRIES {
+            match self
+                .connect_to_worker_via_tcp(hostname, worker_ip, tcp_port)
+                .await
+            {
+                Ok(()) => return Ok(()),
+                Err(e) => {
+                    last_error = Some(e);
+                    if attempt < MAX_RETRIES - 1 {
+                        let delay_ms = BASE_DELAY_MS * 2_u64.pow(attempt);
+                        log::warn!(
+                            "RDMA connection attempt {} failed for worker {}, retrying in {}ms: {:?}",
+                            attempt + 1,
+                            hostname,
+                            delay_ms,
+                            last_error.as_ref().unwrap()
+                        );
+                        tokio::time::sleep(tokio::time::Duration::from_millis(delay_ms)).await;
+                    }
+                }
+            }
+        }
+
+        // Clean up failed connection entry before returning error
+        self.all_rdma_connections.remove(hostname);
+
+        Err(last_error
+            .unwrap_or_else(|| EKError::IoError(std::io::Error::other("Unknown connection error"))))
+    }
+
     /// Extract IP address from worker addr (e.g., "http://192.168.1.100:8080" -> "192.168.1.100")
     fn extract_ip_from_addr(&self, addr: &str) -> EKResult<String> {
-        // Remove protocol prefix (http:// or https://)
-        let without_protocol = if addr.starts_with("http://") {
-            &addr[7..]
-        } else if addr.starts_with("https://") {
-            &addr[8..]
-        } else {
-            addr
-        };
+        let url = Url::parse(addr)
+            .map_err(|e| EKError::InvalidInput(format!("Invalid URL format: {e}")))?;
 
-        // Extract host part (before the port)
-        let host = without_protocol
-            .split(':')
-            .next()
-            .ok_or_else(|| EKError::InvalidInput("Invalid worker address format".to_string()))?;
+        let host = url
+            .host_str()
+            .ok_or_else(|| EKError::InvalidInput("No host found in URL".to_string()))?;
 
         Ok(host.to_string())
     }
