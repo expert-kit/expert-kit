@@ -139,13 +139,8 @@ impl StateService for StateServerImpl {
         let mut rx = dispather_guard.subscribe(&first_message.id).await;
 
         // Handle outgoing messages to the worker: New Experts
-        let _worker_id_for_spawn = worker_id.clone();
         tokio::spawn(async move {
-            let _reader = StateReaderImpl::new();
-
             while let Some(t) = rx.recv().await {
-                // Note: RDMA connection is now handled via direct TCP connection
-                // No complex endpoint exchange logic needed in the response stream
                 let resp = ExchangeResp {
                     state: Some(v1::exchange_resp::ExpertWithState {
                         target: Some(ExpertSlice::from(t)),
