@@ -149,7 +149,7 @@ fn main() -> io::Result<()> {
     thread::sleep(Duration::from_secs(5));
 
     // Clean up
-    sender_queue.close();
+    sender_queue.disconnect();
     println!("🔄 Controller shutting down");
 
     Ok(())

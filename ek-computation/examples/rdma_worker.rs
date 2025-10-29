@@ -184,7 +184,7 @@ fn main() -> io::Result<()> {
     thread::sleep(Duration::from_secs(2));
 
     // Clean up
-    receiver_queue.close();
+    receiver_queue.disconnect();
     println!("🔄 Worker shutting down");
 
     Ok(())

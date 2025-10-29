@@ -3,7 +3,7 @@ use std::io;
 // Import from the provided ibverbs library
 use ibverbs::{
     CompletionQueue, Context, MemoryRegion, PreparedQueuePair, ProtectionDomain, QueuePair,
-    QueuePairEndpoint, RemoteMemoryRegion, devices, ibv_qp_type,
+    QueuePairBuilder, QueuePairEndpoint, RemoteMemoryRegion, devices, ibv_qp_type,
 };
 
 use crate::shmq::GeneralShmQueueBytes;
@@ -52,10 +52,12 @@ pub struct RdmaQueue<T> {
     // RDMA resources
     _context: Context,
     _pd: ProtectionDomain,
-    _send_cq: CompletionQueue,
     _recv_cq: CompletionQueue,
-    qp: Option<QueuePair>,
+    send_cq: CompletionQueue,
+    qp_builder: QueuePairBuilder,
+    endpoint: QueuePairEndpoint,
     prepared_qp: Option<PreparedQueuePair>,
+    qp: Option<QueuePair>,
 
     // Local memory region containing queue metadata and data
     memory_region: MemoryRegion<Vec<u8>>,
@@ -91,7 +93,7 @@ fn offset_of_tail() -> usize {
 impl<T: GeneralShmQueueBytes> RdmaQueue<T> {
     /// Check if the queue is connected to a remote peer
     pub fn is_connected(&self) -> bool {
-        self.remote_region.is_some() && self.qp.is_some()
+        self.qp.is_some()
     }
 
     pub fn new(device_index: Option<usize>, capacity: usize, is_sender: bool) -> io::Result<Self> {
@@ -150,14 +152,17 @@ impl<T: GeneralShmQueueBytes> RdmaQueue<T> {
             .allow_remote_rw();
 
         let prepared_qp = qp_builder.build()?;
+        let endpoint = prepared_qp.endpoint()?;
 
         Ok(Self {
             _context: context,
             _pd: pd,
-            _send_cq: send_cq,
             _recv_cq: recv_cq,
-            qp: None,
+            send_cq,
+            qp_builder,
+            endpoint,
             prepared_qp: Some(prepared_qp),
+            qp: None,
             memory_region,
             remote_region: None,
             capacity,
@@ -169,10 +174,7 @@ impl<T: GeneralShmQueueBytes> RdmaQueue<T> {
 
     /// Get the local endpoint information for connection establishment
     pub fn endpoint(&self) -> io::Result<QueuePairEndpoint> {
-        match &self.prepared_qp {
-            Some(pqp) => pqp.endpoint(),
-            None => Err(io::Error::other("Queue pair already connected")),
-        }
+        Ok(self.endpoint.clone())
     }
 
     /// Get the local memory region information for sharing with remote peer
@@ -189,11 +191,19 @@ impl<T: GeneralShmQueueBytes> RdmaQueue<T> {
         // Store remote memory region
         self.remote_region = Some(remote_region);
 
-        // Complete the QP handshake
-        if let Some(prepared_qp) = self.prepared_qp.take() {
-            let qp = prepared_qp.handshake(remote_endpoint).unwrap();
-            log::info!("🚀Connected to remote peer: {:?}", remote_endpoint);
+        // Complete the QP handshake using the same prepared_qp from new()
+        if !self.is_connected() {
+            let prepared_qp = self
+                .prepared_qp
+                .take()
+                .ok_or_else(|| io::Error::other("No prepared QP available"))?;
+
+            let result = prepared_qp.handshake(remote_endpoint);
+            let qp = result.map_err(|e| io::Error::other(format!("QP handshake failed: {}", e)))?;
+
+            // Mark as connected
             self.qp = Some(qp);
+            log::info!("🚀Connected to remote peer: {:?}", remote_endpoint);
             Ok(())
         } else {
             Err(io::Error::other(
@@ -204,7 +214,7 @@ impl<T: GeneralShmQueueBytes> RdmaQueue<T> {
 
     /// Send an item to the queue (sender side) - Push-based architecture
     pub fn send(&mut self, item: &T) -> Result<(), RdmaQueueError> {
-        if !self.is_sender {
+        if !self.is_sender || !self.is_connected() {
             return Err(RdmaQueueError::IoError);
         }
         let start_time = std::time::Instant::now();
@@ -245,7 +255,7 @@ impl<T: GeneralShmQueueBytes> RdmaQueue<T> {
 
     /// Receive an item from the queue (receiver side) - Poll local memory
     pub fn recv(&mut self) -> Result<T, RdmaQueueError> {
-        if self.is_sender {
+        if self.is_sender || !self.is_connected() {
             return Err(RdmaQueueError::IoError);
         }
 
@@ -403,7 +413,7 @@ impl<T: GeneralShmQueueBytes> RdmaQueue<T> {
 
         loop {
             // First try non-blocking poll
-            match self._send_cq.wait(&mut completions, None) {
+            match self.send_cq.wait(&mut completions, None) {
                 Ok(completed) => {
                     if !completed.is_empty() {
                         for completion in completed {
@@ -444,12 +454,22 @@ impl<T: GeneralShmQueueBytes> RdmaQueue<T> {
         self.recv()
     }
 
-    pub fn close(&mut self) {
-        // Clean up RDMA resources in reverse order of creation
-        // This is critical to avoid "Device or resource busy" errors
-
+    /// Clean current RDMA connections and resources, and prepare for new connection
+    pub fn disconnect(&mut self) {
+        // Drop current qp
         if let Some(qp) = self.qp.take() {
             drop(qp);
+        }
+
+        // Prepare new qp
+        if self.prepared_qp.is_none() {
+            let new_prepared_qp = self
+                .qp_builder
+                .build()
+                .unwrap_or_else(|e| panic!("Failed to build new prepared QP: {}", e));
+            self.prepared_qp = Some(new_prepared_qp);
+            // Update endpoint info
+            self.endpoint = self.prepared_qp.as_ref().unwrap().endpoint().unwrap();
         }
     }
 }

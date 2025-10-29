@@ -6,6 +6,10 @@ use std::{
     },
 };
 
+use crate::{
+    shmq::{GeneralShmQueueBytes, RdmaEndpointClient, ShmQueue, rdma_impl::RdmaQueue},
+    state::io::{StateReader, StateReaderImpl},
+};
 use ek_base::{
     error::{EKError, EKResult},
     tracing::grpc::OTelGrpcClientMiddleware,
@@ -15,16 +19,10 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 use tonic::transport::Channel;
 use tower::ServiceBuilder;
+use url::Url;
 
-use crate::{
-    shmq::{GeneralShmQueueBytes, ShmQueue, rdma_impl::RdmaQueue},
-    state::{
-        io::{StateReader, StateReaderImpl},
-        models::NewNode,
-        writer::StateWriterImpl,
-    },
-};
-use serde_json;
+const MAX_RETRIES: u32 = 3;
+const BASE_DELAY_MS: u64 = 1000;
 
 pub type ExpertId = String;
 pub type ExpertIdRef<'a> = &'a str;
@@ -139,7 +137,6 @@ pub struct ExpertRegistryImpl {
     all_shm_channels: HashMap<String, LocalShmChannel>,
     all_rdma_connections: HashMap<String, RdmaNodeConnection>,
     reader: Box<dyn StateReader + Send + Sync>,
-    writer: StateWriterImpl,
 }
 
 #[async_trait::async_trait]
@@ -274,21 +271,23 @@ impl ExpertRegistryImpl {
             node.hostname
         );
 
-        let worker_rdma_req_endpoint = node.config.get("worker_rdma_request_endpoint");
-        let worker_rdma_resp_endpoint = node.config.get("worker_rdma_response_endpoint");
-        if worker_rdma_req_endpoint.is_none() || worker_rdma_resp_endpoint.is_none() {
-            log::warn!(
-                "Missing worker RDMA endpoints for node {} (req: {}, resp: {})",
-                node.hostname,
-                worker_rdma_req_endpoint.is_some(),
-                worker_rdma_resp_endpoint.is_some()
-            );
+        // Get worker's TCP port for RDMA endpoint exchange
+        let worker_tcp_port = node
+            .config
+            .get("rdma_tcp_port")
+            .and_then(|v| v.as_u64())
+            .map(|p| p as u16);
+
+        if worker_tcp_port.is_none() {
+            log::warn!("Missing worker RDMA TCP port for node {}", node.hostname);
             return Ok(());
         }
 
-        // Extract worker's endpoint info from database
-        let worker_req_endpoint_info = worker_rdma_req_endpoint.unwrap();
-        let worker_resp_endpoint_info = worker_rdma_resp_endpoint.unwrap();
+        let tcp_port = worker_tcp_port.unwrap();
+
+        // Extract worker IP address from addr field
+        let worker_addr = node.config["addr"].as_str().unwrap();
+        let worker_ip = self.extract_ip_from_addr(worker_addr)?;
 
         // Check if we already have a connection for this node
         let needs_new_connection = !self.all_rdma_connections.contains_key(&node.hostname);
@@ -307,99 +306,25 @@ impl ExpertRegistryImpl {
                 )))
             })?;
 
-            // Get controller endpoints for handshake
-            let controller_req_endpoint = req_queue.endpoint().map_err(|e| {
-                EKError::IoError(std::io::Error::other(format!(
-                    "Failed to get controller request endpoint: {e}"
-                )))
-            })?;
-            let controller_req_memory = req_queue.memory_region();
-            let controller_resp_endpoint = resp_queue.endpoint().map_err(|e| {
-                EKError::IoError(std::io::Error::other(format!(
-                    "Failed to get controller response endpoint: {e}"
-                )))
-            })?;
-            let controller_resp_memory = resp_queue.memory_region();
-
-            // Serialize controller endpoints as JSON strings
-            let controller_req_qp_json =
-                serde_json::to_string(&controller_req_endpoint).map_err(|e| {
-                    EKError::InvalidInput(format!(
-                        "Failed to serialize controller request QP endpoint: {e}"
-                    ))
-                })?;
-            let controller_req_memory_json = serde_json::to_string(&controller_req_memory)
-                .map_err(|e| {
-                    EKError::InvalidInput(format!(
-                        "Failed to serialize controller request memory region: {e}"
-                    ))
-                })?;
-            let controller_resp_qp_json = serde_json::to_string(&controller_resp_endpoint)
-                .map_err(|e| {
-                    EKError::InvalidInput(format!(
-                        "Failed to serialize controller response QP endpoint: {e}"
-                    ))
-                })?;
-            let controller_resp_memory_json = serde_json::to_string(&controller_resp_memory)
-                .map_err(|e| {
-                    EKError::InvalidInput(format!(
-                        "Failed to serialize controller response memory region: {e}"
-                    ))
-                })?;
-
-            let mut updated_config = node.config.clone();
-
-            // Store controller endpoints as JSON strings (consistent with worker endpoints)
-            updated_config["controller_rdma_request_endpoint"] = serde_json::json!({
-                "qp_endpoint": controller_req_qp_json,
-                "memory_region": controller_req_memory_json,
-            });
-
-            updated_config["controller_rdma_response_endpoint"] = serde_json::json!({
-                "qp_endpoint": controller_resp_qp_json,
-                "memory_region": controller_resp_memory_json,
-            });
-
-            // Update database with controller endpoint info
-            let node_update = NewNode {
-                hostname: node.hostname.clone(),
-                device: node.device.clone(),
-                config: updated_config,
-            };
-
-            // Store controller endpoint in database
-            if let Err(e) = self.writer.node_upsert(node_update).await {
-                log::error!("Failed to store controller RDMA endpoint in database: {e:?}");
-            }
+            let req_queue_arc = Arc::new(Mutex::new(req_queue));
+            let resp_queue_arc = Arc::new(Mutex::new(resp_queue));
 
             // Create connection entry
             let connection = RdmaNodeConnection {
-                req_queue: Arc::new(Mutex::new(req_queue)),
-                resp_queue: Arc::new(Mutex::new(resp_queue)),
+                req_queue: req_queue_arc.clone(),
+                resp_queue: resp_queue_arc.clone(),
                 connected: false,
             };
 
             self.all_rdma_connections
                 .insert(node.hostname.clone(), connection);
-        }
 
-        // Attempt to establish RDMA connection if worker endpoints are available
-        if let Err(e) = self
-            .connect_to_worker(
-                &node.hostname,
-                worker_req_endpoint_info,
-                worker_resp_endpoint_info,
-            )
-            .await
-        {
-            log::error!(
-                "Failed to establish RDMA connection to worker {}: {e:?}",
-                node.hostname
-            );
+            // Attempt to establish RDMA connection via TCP with retry
+            self.connect_to_worker_via_tcp_with_retry(&node.hostname, &worker_ip, tcp_port)
+                .await?;
         }
 
         let connection = self.all_rdma_connections.get(&node.hostname).unwrap();
-
         let rdma_channel = (connection.req_queue.clone(), connection.resp_queue.clone());
 
         let meta = RdmaChannelMeta {
@@ -415,155 +340,36 @@ impl ExpertRegistryImpl {
         Ok(())
     }
 
-    /// Establish RDMA connection to a worker node
-    async fn connect_to_worker(
+    /// Establish RDMA connection to a worker node via TCP
+    async fn connect_to_worker_via_tcp(
         &mut self,
         hostname: &str,
-        worker_req_endpoint_info: &serde_json::Value,
-        worker_resp_endpoint_info: &serde_json::Value,
+        worker_ip: &str,
+        tcp_port: u16,
     ) -> EKResult<()> {
         if let Some(connection) = self.all_rdma_connections.get_mut(hostname) {
             if connection.connected {
                 return Ok(()); // Already connected
             }
-            log::debug!(
-                "Worker request endpoint info: {:?}",
-                worker_req_endpoint_info
-            );
-            log::debug!(
-                "Worker response endpoint info: {:?}",
-                worker_resp_endpoint_info
-            );
-
-            // Extract worker request endpoint JSON strings from database
-            let worker_req_qp_json = worker_req_endpoint_info
-                .get("qp_endpoint")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| {
-                    EKError::InvalidInput("Missing worker request qp_endpoint".into())
-                })?;
-            let worker_req_memory_json = worker_req_endpoint_info
-                .get("memory_region")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| {
-                    EKError::InvalidInput("Missing worker request memory_region".into())
-                })?;
-
-            // Extract worker response endpoint JSON strings from database
-            let worker_resp_qp_json = worker_resp_endpoint_info
-                .get("qp_endpoint")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| {
-                    EKError::InvalidInput("Missing worker response qp_endpoint".into())
-                })?;
-            let worker_resp_memory_json = worker_resp_endpoint_info
-                .get("memory_region")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| {
-                    EKError::InvalidInput("Missing worker response memory_region".into())
-                })?;
-
-            // Deserialize worker request endpoint information
-            let worker_req_qp_endpoint: ibverbs::QueuePairEndpoint =
-                serde_json::from_str(worker_req_qp_json).map_err(|e| {
-                    EKError::InvalidInput(format!(
-                        "Failed to deserialize worker request QP endpoint: {e}"
-                    ))
-                })?;
-            let worker_req_memory_region: ibverbs::RemoteMemoryRegion =
-                serde_json::from_str(worker_req_memory_json).map_err(|e| {
-                    EKError::InvalidInput(format!(
-                        "Failed to deserialize worker request memory region: {e}"
-                    ))
-                })?;
-
-            // Deserialize worker response endpoint information
-            let worker_resp_qp_endpoint: ibverbs::QueuePairEndpoint =
-                serde_json::from_str(worker_resp_qp_json).map_err(|e| {
-                    EKError::InvalidInput(format!(
-                        "Failed to deserialize worker response QP endpoint: {e}"
-                    ))
-                })?;
-            let worker_resp_memory_region: ibverbs::RemoteMemoryRegion =
-                serde_json::from_str(worker_resp_memory_json).map_err(|e| {
-                    EKError::InvalidInput(format!(
-                        "Failed to deserialize worker response memory region: {e}"
-                    ))
-                })?;
 
             log::info!(
-                "Establishing RDMA connection to worker {} using endpoint data",
-                hostname
-            );
-            log::debug!("Worker request QP endpoint: {:?}", worker_req_qp_endpoint);
-            log::debug!(
-                "Worker request memory region: {:?}",
-                worker_req_memory_region
-            );
-            log::debug!("Worker response QP endpoint: {:?}", worker_resp_qp_endpoint);
-            log::debug!(
-                "Worker response memory region: {:?}",
-                worker_resp_memory_region
+                "Establishing RDMA connection to worker {} (IP: {}) via TCP port {}",
+                hostname,
+                worker_ip,
+                tcp_port
             );
 
-            // Connect controller's request queue to worker's request queue (for sending requests)
-            {
-                let mut req_queue = connection.req_queue.lock().await;
-                if req_queue.is_connected() {
-                    log::info!(
-                        "Controller request queue already connected to worker {}, skipping",
-                        hostname
-                    );
-                } else {
-                    if let Err(e) =
-                        req_queue.connect(worker_req_qp_endpoint, worker_req_memory_region.clone())
-                    {
-                        log::error!(
-                            "Failed to connect controller request queue to worker {}: {e}",
-                            hostname
-                        );
-                        return Err(EKError::IoError(std::io::Error::other(format!(
-                            "Controller request queue connection failed: {e}"
-                        ))));
-                    }
-                    log::info!(
-                        "🚀Controller request queue connected to worker {} successfully",
-                        hostname
-                    );
-                }
-            }
+            // Use the TCP client to connect and exchange endpoints
+            let req_queue = connection.req_queue.clone();
+            let resp_queue = connection.resp_queue.clone();
 
-            // Connect controller's response queue to worker's response queue (for receiving responses)
-            {
-                let mut resp_queue = connection.resp_queue.lock().await;
-                if resp_queue.is_connected() {
-                    log::info!(
-                        "Controller response queue already connected to worker {}, skipping",
-                        hostname
-                    );
-                } else {
-                    if let Err(e) =
-                        resp_queue.connect(worker_resp_qp_endpoint, worker_resp_memory_region)
-                    {
-                        log::error!(
-                            "Failed to connect controller response queue to worker {}: {e}",
-                            hostname
-                        );
-                        return Err(EKError::IoError(std::io::Error::other(format!(
-                            "Controller response queue connection failed: {e}"
-                        ))));
-                    }
-                    log::info!(
-                        "🚀Controller response queue connected to worker {} successfully",
-                        hostname
-                    );
-                }
-            }
-            // Sleep for a while
-            std::thread::sleep(std::time::Duration::from_secs(2));
+            RdmaEndpointClient::connect_and_exchange(worker_ip, tcp_port, req_queue, resp_queue)
+                .await
+                .map_err(|e| EKError::IoError(e))?;
 
             // Mark connection as established
             connection.connected = true;
+
             log::info!(
                 "🚀RDMA connection to worker {} established successfully",
                 hostname
@@ -571,6 +377,57 @@ impl ExpertRegistryImpl {
         }
 
         Ok(())
+    }
+
+    /// Establish RDMA connection to a worker node via TCP with retry logic
+    async fn connect_to_worker_via_tcp_with_retry(
+        &mut self,
+        hostname: &str,
+        worker_ip: &str,
+        tcp_port: u16,
+    ) -> EKResult<()> {
+        let mut last_error = None;
+
+        for attempt in 0..MAX_RETRIES {
+            match self
+                .connect_to_worker_via_tcp(hostname, worker_ip, tcp_port)
+                .await
+            {
+                Ok(()) => return Ok(()),
+                Err(e) => {
+                    last_error = Some(e);
+                    if attempt < MAX_RETRIES - 1 {
+                        let delay_ms = BASE_DELAY_MS * 2_u64.pow(attempt);
+                        log::warn!(
+                            "RDMA connection attempt {} failed for worker {}, retrying in {}ms: {:?}",
+                            attempt + 1,
+                            hostname,
+                            delay_ms,
+                            last_error.as_ref().unwrap()
+                        );
+                        tokio::time::sleep(tokio::time::Duration::from_millis(delay_ms)).await;
+                    }
+                }
+            }
+        }
+
+        // Clean up failed connection entry before returning error
+        self.all_rdma_connections.remove(hostname);
+
+        Err(last_error
+            .unwrap_or_else(|| EKError::IoError(std::io::Error::other("Unknown connection error"))))
+    }
+
+    /// Extract IP address from worker addr (e.g., "http://192.168.1.100:8080" -> "192.168.1.100")
+    fn extract_ip_from_addr(&self, addr: &str) -> EKResult<String> {
+        let url = Url::parse(addr)
+            .map_err(|e| EKError::InvalidInput(format!("Invalid URL format: {e}")))?;
+
+        let host = url
+            .host_str()
+            .ok_or_else(|| EKError::InvalidInput("No host found in URL".to_string()))?;
+
+        Ok(host.to_string())
     }
 
     /// Reset connection state and force reconnection on next use
@@ -619,7 +476,6 @@ impl ExpertRegistryImpl {
             all_shm_channels: HashMap::new(),
             all_rdma_connections: HashMap::new(),
             reader: Box::new(StateReaderImpl::new()),
-            writer: StateWriterImpl::new(),
         }
     }
 }
