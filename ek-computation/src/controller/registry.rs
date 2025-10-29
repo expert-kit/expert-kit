@@ -7,16 +7,22 @@ use std::{
 };
 
 use ek_base::{
+    config::get_ek_settings,
     error::{EKError, EKResult},
     tracing::grpc::OTelGrpcClientMiddleware,
+    utils::Defers,
 };
 use ndarray_rand::rand;
 use serde::{Deserialize, Serialize};
-use tokio::sync::Mutex;
+use tokio::{sync::Mutex, time};
 use tonic::transport::Channel;
 use tower::ServiceBuilder;
+use tracing::Instrument;
 
 use crate::{
+    controller::executor::{ForwardResponse, PendingResponse},
+    metrics::METRIC_CONTROLLER_INTRA_REQ,
+    proto::ek::worker::v1::{self, forward_req::SequenceInfo},
     shmq::{GeneralShmQueueBytes, ShmQueue, rdma_impl::RdmaQueue},
     state::{
         io::{StateReader, StateReaderImpl},
@@ -29,15 +35,33 @@ use serde_json;
 pub type ExpertId = String;
 pub type ExpertIdRef<'a> = &'a str;
 
-pub type LocalShmChannel = (
-    Arc<Mutex<ShmQueue<'static, ShmqWorkerReq>>>,
-    Arc<Mutex<ShmQueue<'static, ShmqWorkerResp>>>,
-);
+pub type LocalShmReqQueue = Arc<Mutex<ShmQueue<'static, ShmqWorkerReq>>>;
+pub type LocalShmRespQueue = Arc<Mutex<(ShmQueue<'static, ShmqWorkerResp>, ChannelMetrics)>>;
+pub type LocalShmChannel = (LocalShmReqQueue, LocalShmRespQueue);
 
-pub type RdmaChannel = (
-    Arc<Mutex<RdmaQueue<ShmqWorkerReq>>>,
-    Arc<Mutex<RdmaQueue<ShmqWorkerResp>>>,
-);
+pub type RdmaReqQueue = Arc<Mutex<RdmaQueue<ShmqWorkerReq>>>;
+pub type RdmaRespQueue = Arc<Mutex<(RdmaQueue<ShmqWorkerResp>, ChannelMetrics)>>;
+pub type RdmaChannel = (RdmaReqQueue, RdmaRespQueue);
+
+pub struct ChannelMetrics {
+    priority: f64,
+}
+
+impl ChannelMetrics {
+    pub fn priority(&self) -> f64 {
+        self.priority
+    }
+
+    pub fn accumulate(&mut self, delta: f64) {
+        self.priority = (self.priority * 0.8 + delta) / 2.0;
+    }
+}
+
+impl Default for ChannelMetrics {
+    fn default() -> Self {
+        Self { priority: 1.0 }
+    }
+}
 
 #[derive(Clone)]
 pub enum ExpertClient {
@@ -57,46 +81,268 @@ impl std::fmt::Debug for ExpertClient {
 }
 
 impl ExpertClient {
-    pub fn into_grpc_client(self) -> Option<OTelGrpcClientMiddleware> {
+    pub(crate) async fn get_priority(&self) -> f64 {
         match self {
-            ExpertClient::Grpc(client) => Some(client),
-            ExpertClient::Shm(_) => None,
-            ExpertClient::Rdma(_) => None,
+            ExpertClient::Grpc(_) => 1.0, // gRPC client does not have priority tracking
+            ExpertClient::Shm((_, resp_channel)) => resp_channel.lock().await.1.priority(),
+            ExpertClient::Rdma((_, resp_channel)) => resp_channel.lock().await.1.priority(),
         }
     }
 
-    pub fn into_shm_channels(self) -> Option<LocalShmChannel> {
+    pub(crate) async fn update_priority(&self, delta: f64) {
         match self {
-            ExpertClient::Grpc(_) => None,
-            ExpertClient::Shm(channels) => Some(channels),
-            ExpertClient::Rdma(_) => None,
+            ExpertClient::Grpc(_) => {
+                // gRPC client does not have priority tracking
+            }
+            ExpertClient::Shm((_, resp_channel)) => {
+                resp_channel.lock().await.1.accumulate(delta);
+            }
+            ExpertClient::Rdma((_, resp_channel)) => {
+                resp_channel.lock().await.1.accumulate(delta);
+            }
         }
     }
 
-    pub fn into_rdma_channels(self) -> Option<RdmaChannel> {
+    pub(crate) fn forward(
+        self,
+        expert_id: ExpertId,
+        tensor: Vec<u8>,
+        sequences: Vec<SequenceInfo>,
+        pending_resp: Arc<Mutex<HashMap<usize, PendingResponse>>>,
+    ) -> tokio::task::JoinHandle<EKResult<ForwardResponse>> {
         match self {
-            ExpertClient::Grpc(_) => None,
-            ExpertClient::Shm(_) => None,
-            ExpertClient::Rdma(channels) => Some(channels),
+            ExpertClient::Grpc(grpc_channel) => {
+                let mut cli =
+                    v1::computation_service_client::ComputationServiceClient::new(grpc_channel)
+                        .max_decoding_message_size(1024 * 1024 * 1024)
+                        .max_encoding_message_size(1024 * 1024 * 1024);
+
+                let fu = async move {
+                    let req = v1::ForwardReq {
+                        // TODO: hardcode instance id.
+                        instance_id: "0".into(),
+                        tensor,
+                        sequences,
+                    };
+
+                    let _d = Self::create_metrics_defer();
+                    let now = time::Instant::now();
+                    cli.forward(req)
+                        .await
+                        .map(|resp| ForwardResponse::grpc(resp.into_inner(), now.elapsed()))
+                        .map_err(|e| {
+                            log::error!("forward error: {e}");
+                            EKError::IoError(std::io::Error::other(format!("grpc error: {e}")))
+                        })
+                }
+                .in_current_span();
+                tokio::task::spawn(fu)
+            }
+            ExpertClient::Shm((send_channel, recv_channel)) => {
+                let fu = async move {
+                    let req = ShmqWorkerReq::new(expert_id.as_ref(), &tensor);
+                    let _d = Self::create_metrics_defer();
+                    let now = time::Instant::now();
+
+                    // Send request with retry
+                    if let Err(e) =
+                        Self::send_shm_request_with_retry(&send_channel, &req, &expert_id).await
+                    {
+                        log::error!("Failed to send SHM request: {e:?}");
+                        return Err(e);
+                    }
+
+                    log::debug!(
+                        "request sent for expert {}, waiting for response",
+                        expert_id
+                    );
+
+                    // Receive response with ID matching
+                    match Self::receive_shm_response(
+                        &recv_channel,
+                        &pending_resp,
+                        req.id(),
+                        &expert_id,
+                    )
+                    .await
+                    {
+                        Ok(resp) => Ok(ForwardResponse::shm(resp, now.elapsed())),
+                        Err(e) => {
+                            log::error!("Failed to receive SHM response: {e:?}");
+                            Err(e)
+                        }
+                    }
+                }
+                .in_current_span();
+                tokio::task::spawn(fu)
+            }
+            ExpertClient::Rdma((send_channel, recv_channel)) => {
+                let fu = async move {
+                    let req = ShmqWorkerReq::new(expert_id.as_ref(), &tensor);
+                    let _d = Self::create_metrics_defer();
+                    let now = time::Instant::now();
+
+                    // Send request with retry
+                    if let Err(e) =
+                        Self::send_rdma_request_with_retry(&send_channel, &req, &expert_id).await
+                    {
+                        log::error!("Failed to send RDMA request: {e:?}");
+                        return Err(e);
+                    }
+
+                    log::debug!(
+                        "RDMA request sent for expert {}, waiting for response",
+                        expert_id
+                    );
+
+                    // Receive response with ID matching
+                    match Self::receive_rdma_response(
+                        &recv_channel,
+                        &pending_resp,
+                        req.id(),
+                        &expert_id,
+                    )
+                    .await
+                    {
+                        Ok(resp) => Ok(ForwardResponse::rdma(resp, now.elapsed())),
+                        Err(e) => {
+                            log::error!("Failed to receive RDMA response: {e:?}");
+                            Err(e)
+                        }
+                    }
+                }
+                .in_current_span();
+                tokio::task::spawn(fu)
+            }
         }
     }
 
-    pub fn is_grpc(&self) -> bool {
-        matches!(self, ExpertClient::Grpc(_))
+    /// Create a performance timer deferred callback for metrics collection
+    fn create_metrics_defer() -> Defers {
+        let settings = get_ek_settings();
+        let start = time::Instant::now();
+        Defers::defer(Box::new(move || {
+            let elapsed = start.elapsed();
+            METRIC_CONTROLLER_INTRA_REQ
+                .with_label_values(&[settings.inference.model_name.as_str()])
+                .observe(elapsed.as_micros() as f64);
+        }))
     }
 
-    pub fn is_shm(&self) -> bool {
-        matches!(self, ExpertClient::Shm(_))
+    /// Handle shared memory request sending with retry logic
+    async fn send_shm_request_with_retry(
+        send_channel: &LocalShmReqQueue,
+        req: &ShmqWorkerReq,
+        expert_id: &str,
+    ) -> EKResult<()> {
+        while send_channel.lock().await.send(req).is_err() {
+            log::warn!("failed to send request to expert {expert_id}");
+            tokio::time::sleep(tokio::time::Duration::from_micros(100)).await;
+        }
+        Ok(())
     }
 
-    pub fn is_rdma(&self) -> bool {
-        matches!(self, ExpertClient::Rdma(_))
+    /// Handle RDMA request sending with retry logic
+    async fn send_rdma_request_with_retry(
+        send_channel: &RdmaReqQueue,
+        req: &ShmqWorkerReq,
+        expert_id: &str,
+    ) -> EKResult<()> {
+        loop {
+            match send_channel.lock().await.send(req) {
+                Ok(_) => break,
+                Err(e) => {
+                    log::warn!("failed to send RDMA request to expert {expert_id}: {e}");
+                    tokio::time::sleep(tokio::time::Duration::from_micros(100)).await;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Handle shared memory response reception with ID matching
+    async fn receive_shm_response(
+        recv_channel: &LocalShmRespQueue,
+        pending_resp: &Arc<Mutex<HashMap<usize, PendingResponse>>>,
+        req_id: usize,
+        expert_id: &str,
+    ) -> EKResult<ShmqWorkerResp> {
+        loop {
+            // Check for pending response first
+            if let Some(pending_resp_item) = pending_resp.lock().await.remove(&req_id)
+                && let PendingResponse::Shm(resp) = pending_resp_item
+            {
+                return Ok(resp);
+            }
+
+            // Receive new response
+            match recv_channel.lock().await.0.recv() {
+                Ok(resp) => {
+                    if resp.id() != req_id {
+                        log::debug!(
+                            "received response for expert {} but id not correct",
+                            expert_id
+                        );
+                        pending_resp
+                            .lock()
+                            .await
+                            .insert(resp.id(), PendingResponse::Shm(resp));
+                        tokio::task::yield_now().await;
+                        continue;
+                    }
+                    return Ok(resp);
+                }
+                Err(_) => {
+                    tokio::task::yield_now().await;
+                }
+            }
+        }
+    }
+
+    /// Handle RDMA response reception with ID matching
+    async fn receive_rdma_response(
+        recv_channel: &RdmaRespQueue,
+        pending_resp: &Arc<Mutex<HashMap<usize, PendingResponse>>>,
+        req_id: usize,
+        expert_id: &str,
+    ) -> EKResult<ShmqWorkerResp> {
+        loop {
+            // Check for pending response first
+            if let Some(pending_resp_item) = pending_resp.lock().await.remove(&req_id)
+                && let PendingResponse::Rdma(resp) = pending_resp_item
+            {
+                return Ok(resp);
+            }
+
+            // Receive new response
+            match recv_channel.lock().await.0.recv() {
+                Ok(resp) => {
+                    if resp.id() != req_id {
+                        log::debug!(
+                            "received RDMA response for expert {} but id not correct",
+                            expert_id
+                        );
+                        pending_resp
+                            .lock()
+                            .await
+                            .insert(resp.id(), PendingResponse::Rdma(resp));
+                        tokio::task::yield_now().await;
+                        continue;
+                    }
+                    return Ok(resp);
+                }
+                Err(_) => {
+                    tokio::task::yield_now().await;
+                }
+            }
+        }
     }
 }
 
 #[async_trait::async_trait]
 pub trait ExpertRegistry {
     async fn select(&mut self, eid: ExpertIdRef<'_>) -> EKResult<ExpertClient>;
+    async fn select_all(&mut self, eid: ExpertIdRef<'_>) -> EKResult<Vec<ExpertClient>>;
     async fn reset(&mut self) -> EKResult<()>;
     async fn deregister(&mut self, host_id: &str);
 }
@@ -129,8 +375,8 @@ enum ChannelMeta {
 /// RDMA connection state for a worker node
 #[derive(Clone)]
 struct RdmaNodeConnection {
-    req_queue: Arc<Mutex<RdmaQueue<ShmqWorkerReq>>>,
-    resp_queue: Arc<Mutex<RdmaQueue<ShmqWorkerResp>>>,
+    req_queue: RdmaReqQueue,
+    resp_queue: RdmaRespQueue,
     connected: bool,
 }
 
@@ -147,6 +393,7 @@ impl ExpertRegistry for ExpertRegistryImpl {
     async fn reset(&mut self) -> EKResult<()> {
         self.inner_reset().await
     }
+
     async fn select(&mut self, eid: ExpertIdRef<'_>) -> EKResult<ExpertClient> {
         let ch = self.inner_select(eid).await?;
         match ch {
@@ -160,6 +407,24 @@ impl ExpertRegistry for ExpertRegistryImpl {
             ChannelMeta::Rdma(meta) => Ok(ExpertClient::Rdma(meta.ch.clone())),
         }
     }
+
+    async fn select_all(&mut self, eid: ExpertIdRef<'_>) -> EKResult<Vec<ExpertClient>> {
+        let channels = self.inner_select_all(eid).await?;
+        channels
+            .into_iter()
+            .map(|ch| match ch {
+                ChannelMeta::Grpc(meta) => {
+                    let client = ServiceBuilder::new()
+                        .layer_fn(OTelGrpcClientMiddleware::new)
+                        .service(meta.ch.clone());
+                    Ok(ExpertClient::Grpc(client))
+                }
+                ChannelMeta::Shm(meta) => Ok(ExpertClient::Shm(meta.ch.clone())),
+                ChannelMeta::Rdma(meta) => Ok(ExpertClient::Rdma(meta.ch.clone())),
+            })
+            .collect()
+    }
+
     async fn deregister(&mut self, host_id: &str) {
         self.inner_deregister(host_id).await;
     }
@@ -173,30 +438,31 @@ impl ExpertRegistryImpl {
 
     async fn inner_select(&mut self, eid: ExpertIdRef<'_>) -> EKResult<ChannelMeta> {
         let channels = self.eid2channels.get(eid);
-        if let Some(channels) = channels {
-            if channels.is_empty() {
-                return self.create_then_select_channel(eid).await;
-            }
-            self.select_random(eid).await
-        } else {
-            self.create_then_select_channel(eid).await
-        }
-    }
-
-    async fn select_random(&mut self, eid: ExpertIdRef<'_>) -> EKResult<ChannelMeta> {
-        let channels = self.eid2channels.get(eid);
-        if let Some(channels) = channels {
-            if channels.is_empty() {
-                return self.create_then_select_channel(eid).await;
-            }
+        if let Some(channels) = channels
+            && !channels.is_empty()
+        {
             let idx = rand::random::<usize>() % channels.len();
-            Ok(channels[idx].clone())
+            return Ok(channels[idx].clone());
+        }
+        let channels = self.create_then_select_channels(eid).await?;
+        let idx = rand::random::<usize>() % channels.len();
+        Ok(channels[idx].clone())
+    }
+
+    async fn inner_select_all(&mut self, eid: ExpertIdRef<'_>) -> EKResult<Vec<ChannelMeta>> {
+        if let Some(channels) = self.eid2channels.get(eid)
+            && !channels.is_empty()
+        {
+            Ok(channels.clone())
         } else {
-            self.create_then_select_channel(eid).await
+            Ok(self.create_then_select_channels(eid).await?.clone())
         }
     }
 
-    async fn create_then_select_channel(&mut self, eid: ExpertIdRef<'_>) -> EKResult<ChannelMeta> {
+    async fn create_then_select_channels(
+        &mut self,
+        eid: ExpertIdRef<'_>,
+    ) -> EKResult<&Vec<ChannelMeta>> {
         let nodes = self.reader.node_by_expert(eid).await?;
         for node in nodes {
             let addr = node.config["addr"].as_str().unwrap().to_owned();
@@ -225,9 +491,9 @@ impl ExpertRegistryImpl {
                                 &format!("ek-shmq-req-{}", node.hostname),
                                 128,
                             )));
-                            let resp_queue = Arc::new(Mutex::new(ShmQueue::new(
-                                &format!("ek-shmq-resp-{}", node.hostname),
-                                128,
+                            let resp_queue = Arc::new(Mutex::new((
+                                ShmQueue::new(&format!("ek-shmq-resp-{}", node.hostname), 128),
+                                ChannelMetrics::default(),
                             )));
                             (req_queue, resp_queue)
                         });
@@ -254,13 +520,8 @@ impl ExpertRegistryImpl {
         let res = self.eid2channels.get(eid).ok_or(EKError::NotFound(format!(
             "no channel found for expert {eid}"
         )))?;
-        if res.is_empty() {
-            return Err(EKError::NotFound(format!(
-                "no channel found for expert {eid}"
-            )));
-        }
-        let idx = rand::random::<usize>() % res.len();
-        Ok(res[idx].clone())
+
+        Ok(res)
     }
 
     /// Setup RDMA channel for a specific node and expert
@@ -375,7 +636,7 @@ impl ExpertRegistryImpl {
             // Create connection entry
             let connection = RdmaNodeConnection {
                 req_queue: Arc::new(Mutex::new(req_queue)),
-                resp_queue: Arc::new(Mutex::new(resp_queue)),
+                resp_queue: Arc::new(Mutex::new((resp_queue, ChannelMetrics::default()))),
                 connected: false,
             };
 
@@ -536,14 +797,15 @@ impl ExpertRegistryImpl {
             // Connect controller's response queue to worker's response queue (for receiving responses)
             {
                 let mut resp_queue = connection.resp_queue.lock().await;
-                if resp_queue.is_connected() {
+                if resp_queue.0.is_connected() {
                     log::info!(
                         "Controller response queue already connected to worker {}, skipping",
                         hostname
                     );
                 } else {
-                    if let Err(e) =
-                        resp_queue.connect(worker_resp_qp_endpoint, worker_resp_memory_region)
+                    if let Err(e) = resp_queue
+                        .0
+                        .connect(worker_resp_qp_endpoint, worker_resp_memory_region)
                     {
                         log::error!(
                             "Failed to connect controller response queue to worker {}: {e}",
