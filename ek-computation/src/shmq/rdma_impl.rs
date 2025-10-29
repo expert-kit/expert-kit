@@ -52,10 +52,10 @@ pub struct RdmaQueue<T> {
     // RDMA resources
     _context: Context,
     _pd: ProtectionDomain,
-    _send_cq: CompletionQueue,
     _recv_cq: CompletionQueue,
-    _qp_builder: QueuePairBuilder,
-    _endpoint: QueuePairEndpoint,
+    send_cq: CompletionQueue,
+    qp_builder: QueuePairBuilder,
+    endpoint: QueuePairEndpoint,
     prepared_qp: Option<PreparedQueuePair>,
     qp: Option<QueuePair>,
 
@@ -157,10 +157,10 @@ impl<T: GeneralShmQueueBytes> RdmaQueue<T> {
         Ok(Self {
             _context: context,
             _pd: pd,
-            _send_cq: send_cq,
             _recv_cq: recv_cq,
-            _qp_builder: qp_builder,
-            _endpoint: endpoint,
+            send_cq,
+            qp_builder,
+            endpoint,
             prepared_qp: Some(prepared_qp),
             qp: None,
             memory_region,
@@ -174,7 +174,7 @@ impl<T: GeneralShmQueueBytes> RdmaQueue<T> {
 
     /// Get the local endpoint information for connection establishment
     pub fn endpoint(&self) -> io::Result<QueuePairEndpoint> {
-        Ok(self._endpoint.clone())
+        Ok(self.endpoint.clone())
     }
 
     /// Get the local memory region information for sharing with remote peer
@@ -413,7 +413,7 @@ impl<T: GeneralShmQueueBytes> RdmaQueue<T> {
 
         loop {
             // First try non-blocking poll
-            match self._send_cq.wait(&mut completions, None) {
+            match self.send_cq.wait(&mut completions, None) {
                 Ok(completed) => {
                     if !completed.is_empty() {
                         for completion in completed {
@@ -464,12 +464,12 @@ impl<T: GeneralShmQueueBytes> RdmaQueue<T> {
         // Prepare new qp
         if self.prepared_qp.is_none() {
             let new_prepared_qp = self
-                ._qp_builder
+                .qp_builder
                 .build()
                 .unwrap_or_else(|e| panic!("Failed to build new prepared QP: {}", e));
             self.prepared_qp = Some(new_prepared_qp);
             // Update endpoint info
-            self._endpoint = self.prepared_qp.as_ref().unwrap().endpoint().unwrap();
+            self.endpoint = self.prepared_qp.as_ref().unwrap().endpoint().unwrap();
         }
     }
 }
