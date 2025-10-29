@@ -466,7 +466,7 @@ impl<T: GeneralShmQueueBytes> RdmaQueue<T> {
             let new_prepared_qp = self
                 ._qp_builder
                 .build()
-                .expect("Failed to build new prepared QP");
+                .unwrap_or_else(|e| panic!("Failed to build new prepared QP: {}", e));
             self.prepared_qp = Some(new_prepared_qp);
             // Update endpoint info
             self._endpoint = self.prepared_qp.as_ref().unwrap().endpoint().unwrap();
