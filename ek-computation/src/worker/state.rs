@@ -27,6 +27,7 @@ use super::{
     core::get_instance_gate,
     manager::{ExpertDB, get_expert_db},
     x::{self},
+    {close_rdma_queues, is_rdma_queue_connected},
 };
 
 pub struct StateClient {
@@ -90,7 +91,7 @@ impl StateClient {
             },
             device: settings.worker.device.clone(),
             last_will: false,
-            rdma_tcp_port: rdma_tcp_port.map(|p| p as u32).unwrap_or(0)
+            rdma_tcp_port: rdma_tcp_port.map(|p| p as u32).unwrap_or(0),
         })
     }
 
@@ -141,6 +142,13 @@ impl StateClient {
             select! {
                 e = self.run_inner(token.clone()) => {
                     if let Err(e) = e {
+                        // If Rdma backend, clean status
+                        if self.rdma_tcp_port.is_some() && is_rdma_queue_connected() {
+                            log::info!("🚀 rdma connection lost, resetting rdma queues");
+                            close_rdma_queues();
+                            log::info!("🚀 rdma queues reset complete");
+                        }
+
                         log::error!("state client error {e:?}");
                         tokio::time::sleep(std::time::Duration::from_secs(3)).await;
                     }

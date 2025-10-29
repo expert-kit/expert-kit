@@ -2,8 +2,8 @@ use std::io;
 
 // Import from the provided ibverbs library
 use ibverbs::{
-    CompletionQueue, Context, MemoryRegion, ProtectionDomain, QueuePair, QueuePairBuilder,
-    QueuePairEndpoint, RemoteMemoryRegion, devices, ibv_qp_type,
+    CompletionQueue, Context, MemoryRegion, PreparedQueuePair, ProtectionDomain, QueuePair,
+    QueuePairBuilder, QueuePairEndpoint, RemoteMemoryRegion, devices, ibv_qp_type,
 };
 
 use crate::shmq::GeneralShmQueueBytes;
@@ -56,7 +56,7 @@ pub struct RdmaQueue<T> {
     _recv_cq: CompletionQueue,
     _qp_builder: QueuePairBuilder,
     _endpoint: QueuePairEndpoint,
-    prepared_qp: Option<ibverbs::PreparedQueuePair>,
+    prepared_qp: Option<PreparedQueuePair>,
     qp: Option<QueuePair>,
 
     // Local memory region containing queue metadata and data
@@ -71,9 +71,6 @@ pub struct RdmaQueue<T> {
 
     // Work request ID counter
     wr_id_counter: u64,
-
-    // Connection Status
-    _is_connected: bool,
 
     _phantom: std::marker::PhantomData<T>,
 }
@@ -96,7 +93,7 @@ fn offset_of_tail() -> usize {
 impl<T: GeneralShmQueueBytes> RdmaQueue<T> {
     /// Check if the queue is connected to a remote peer
     pub fn is_connected(&self) -> bool {
-        self._is_connected
+        self.qp.is_some()
     }
 
     pub fn new(device_index: Option<usize>, capacity: usize, is_sender: bool) -> io::Result<Self> {
@@ -171,7 +168,6 @@ impl<T: GeneralShmQueueBytes> RdmaQueue<T> {
             capacity,
             is_sender,
             wr_id_counter: 1,
-            _is_connected: false,
             _phantom: std::marker::PhantomData,
         })
     }
@@ -197,7 +193,9 @@ impl<T: GeneralShmQueueBytes> RdmaQueue<T> {
 
         // Complete the QP handshake using the same prepared_qp from new()
         if !self.is_connected() {
-            let prepared_qp = self.prepared_qp.take()
+            let prepared_qp = self
+                .prepared_qp
+                .take()
                 .ok_or_else(|| io::Error::other("No prepared QP available"))?;
 
             let result = prepared_qp.handshake(remote_endpoint);
@@ -205,7 +203,6 @@ impl<T: GeneralShmQueueBytes> RdmaQueue<T> {
 
             // Mark as connected
             self.qp = Some(qp);
-            self._is_connected = true;
             log::info!("🚀Connected to remote peer: {:?}", remote_endpoint);
             Ok(())
         } else {
@@ -457,12 +454,22 @@ impl<T: GeneralShmQueueBytes> RdmaQueue<T> {
         self.recv()
     }
 
-    pub fn close(&mut self) {
-        // Clean up RDMA resources in reverse order of creation
-        // This is critical to avoid "Device or resource busy" errors
-
+    /// Clean current RDMA connections and resources, and prepare for new connection
+    pub fn disconnect(&mut self) {
+        // Drop current qp
         if let Some(qp) = self.qp.take() {
             drop(qp);
+        }
+
+        // Prepare new qp
+        if self.prepared_qp.is_none() {
+            let new_prepared_qp = self
+                ._qp_builder
+                .build()
+                .expect("Failed to build new prepared QP");
+            self.prepared_qp = Some(new_prepared_qp);
+            // Update endpoint info
+            self._endpoint = self.prepared_qp.as_ref().unwrap().endpoint().unwrap();
         }
     }
 }

@@ -20,8 +20,10 @@ pub mod x;
 
 use crate::controller::registry::{ShmqWorkerReq, ShmqWorkerResp};
 use crate::metrics::spawn_metrics_server;
+use crate::proto::ek::worker::v1::computation_service_server::ComputationServiceServer;
 use crate::shmq::{RdmaEndpointServer, ShmQueue, rdma_impl::RdmaQueue};
 use crate::worker::core::EKInstanceGateSync;
+use crate::worker::server::BasicExpertImpl;
 use crate::x::get_graceful_shutdown_ch;
 
 use super::worker::state::StateClient;
@@ -32,6 +34,11 @@ static RDMA_REQ_QUEUE: OnceLock<Arc<Mutex<RdmaQueue<ShmqWorkerReq>>>> = OnceLock
 static RDMA_RESP_QUEUE: OnceLock<Arc<Mutex<RdmaQueue<ShmqWorkerResp>>>> = OnceLock::new();
 static RDMA_CONNECTION_STATUS: AtomicBool = AtomicBool::new(false);
 static RDMA_TCP_PORT: OnceLock<u16> = OnceLock::new();
+static WORKER_PARALLEL: LazyLock<usize> = LazyLock::new(|| {
+    env::var("EK_WORKER_PARALLEL")
+        .map(|v| v.parse().unwrap_or(1))
+        .unwrap_or(1)
+});
 
 /// Get the global RDMA request queue
 pub fn get_rdma_req_queue() -> Option<&'static Arc<Mutex<RdmaQueue<ShmqWorkerReq>>>> {
@@ -52,13 +59,27 @@ pub fn update_rdma_connection_status(connected: bool) {
     RDMA_CONNECTION_STATUS.store(connected, Ordering::Relaxed);
 }
 
+pub fn close_rdma_queues() {
+    if let Some(req_queue) = RDMA_REQ_QUEUE.get() {
+        let mut rq = req_queue.lock().unwrap();
+        rq.disconnect();
+    }
+    if let Some(resp_queue) = RDMA_RESP_QUEUE.get() {
+        let mut rq = resp_queue.lock().unwrap();
+        rq.disconnect();
+    }
+    update_rdma_connection_status(false);
+}
+
 /// Get the global RDMA TCP port
 pub fn get_rdma_tcp_port() -> Option<u16> {
     RDMA_TCP_PORT.get().copied()
 }
 
 /// Create RDMA queues and start TCP server for endpoint exchange
-async fn create_rdma_queues_with_tcp_server() -> EKResult<(u16, tokio::task::JoinHandle<()>)> {
+async fn create_rdma_queues_with_tcp_server(
+    poison: Arc<Mutex<bool>>,
+) -> EKResult<(u16, std::thread::JoinHandle<()>)> {
     // Worker receives requests (sender=false) and sends responses (sender=true)
     let req_queue = RdmaQueue::<ShmqWorkerReq>::new(None, 256, false)?;
     let resp_queue = RdmaQueue::<ShmqWorkerResp>::new(None, 256, true)?;
@@ -75,7 +96,7 @@ async fn create_rdma_queues_with_tcp_server() -> EKResult<(u16, tokio::task::Joi
     })?;
 
     // Create TCP server for endpoint exchange
-    let endpoint_server = RdmaEndpointServer::new(req_queue_arc, resp_queue_arc)
+    let endpoint_server = RdmaEndpointServer::new(req_queue_arc, resp_queue_arc, poison)
         .map_err(|e| ek_base::error::EKError::IoError(e))?;
     let tcp_port = endpoint_server.port();
 
@@ -85,27 +106,17 @@ async fn create_rdma_queues_with_tcp_server() -> EKResult<(u16, tokio::task::Joi
         .map_err(|_| ek_base::error::EKError::InvalidInput("Failed to set RDMA TCP port".into()))?;
 
     // Start the TCP server and return its handle
-    let endpoint_server_handle = tokio::spawn(async move {
-        match endpoint_server.start().await {
-            Ok(()) => {
-                log::info!("🎯 RDMA TCP endpoint server completed successfully");
-            }
-            Err(e) => {
-                log::error!("RDMA TCP endpoint server failed: {}", e);
-            }
+    let endpoint_server_handle = std::thread::spawn(move || match endpoint_server.start() {
+        Ok(()) => {
+            log::info!("RDMA TCP endpoint server completed successfully");
+        }
+        Err(e) => {
+            log::error!("RDMA TCP endpoint server failed: {}", e);
         }
     });
 
     Ok((tcp_port, endpoint_server_handle))
 }
-use crate::proto::ek::worker::v1::computation_service_server::ComputationServiceServer;
-use crate::worker::server::BasicExpertImpl;
-
-static WORKER_PARALLEL: LazyLock<usize> = LazyLock::new(|| {
-    env::var("EK_WORKER_PARALLEL")
-        .map(|v| v.parse().unwrap_or(1))
-        .unwrap_or(1)
-});
 
 /// Main worker entry point
 pub async fn worker_main() -> EKResult<()> {
@@ -116,16 +127,24 @@ pub async fn worker_main() -> EKResult<()> {
     let token = CancellationToken::new();
     let cli_cancel = token.clone();
 
+    // Create poison flag for graceful shutdown
+    let poison = Arc::new(Mutex::new(false));
+
+    // Spawn state inspector task (monitors loading progress)
+    let state_inspect = StateInspector::spawn();
+
+    let async_srv;
+    let mut sync_srvs = Vec::new();
+    tch::set_num_threads(*WORKER_PARALLEL as _);
+
     // Determine queue type based on configuration
     // Note: Channel should be created before stateClient start for endpoint exchange
-    let (rdma_tcp_port, endpoint_server_handle): (
-        Option<u16>,
-        Option<tokio::task::JoinHandle<()>>,
-    ) = if settings.worker.channel == "rdma" {
-        match create_rdma_queues_with_tcp_server().await {
+    let rdma_tcp_port: Option<u16> = if settings.worker.channel == "rdma" {
+        match create_rdma_queues_with_tcp_server(poison.clone()).await {
             Ok((tcp_port, handle)) => {
                 log::info!("RDMA queues and TCP server created successfully");
-                (Some(tcp_port), Some(handle))
+                sync_srvs.push(handle);
+                Some(tcp_port)
             }
             Err(e) => {
                 log::error!("Failed to create RDMA queues: {e}");
@@ -133,7 +152,7 @@ pub async fn worker_main() -> EKResult<()> {
             }
         }
     } else {
-        (None, None)
+        None
     };
 
     // Spawn state client task (handles expert loading/unloading)
@@ -148,14 +167,6 @@ pub async fn worker_main() -> EKResult<()> {
             log::error!("state client error {e:}");
         }
     });
-
-    // Spawn state inspector task (monitors loading progress)
-    let state_inspect = StateInspector::spawn();
-
-    let async_srv;
-    let mut sync_srvs = Vec::new();
-    let poison = Arc::new(Mutex::new(false));
-    tch::set_num_threads(*WORKER_PARALLEL as _);
 
     match settings.worker.channel.as_str() {
         "grpc" => {
@@ -371,14 +382,6 @@ pub async fn worker_main() -> EKResult<()> {
             log::info!("ctrl-c signal received, shutting down");
             *poison.lock().unwrap() = true;
             token.clone().cancel();
-
-            // Wait for RDMA endpoint server to complete if it exists
-            if let Some(handle) = endpoint_server_handle {
-                log::info!("Waiting for RDMA endpoint server to complete...");
-                if let Err(e) = handle.await {
-                    log::error!("RDMA endpoint server task failed: {}", e);
-                }
-            }
 
             let(_,rx) = get_graceful_shutdown_ch();
             rx.lock().await.recv().await;

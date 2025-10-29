@@ -1,11 +1,11 @@
+use ibverbs::{QueuePairEndpoint, RemoteMemoryRegion};
+use serde::{Deserialize, Serialize};
 use std::io::{self, BufRead, BufReader, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::{Arc, Mutex};
-use serde::{Serialize, Deserialize};
-use ibverbs::{QueuePairEndpoint, RemoteMemoryRegion};
 
-use crate::controller::registry::{ShmqWorkerReq, ShmqWorkerResp};
 use super::rdma_impl::RdmaQueue;
+use crate::controller::registry::{ShmqWorkerReq, ShmqWorkerResp};
 
 /// Connection information exchanged over TCP
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -26,6 +26,7 @@ pub struct RdmaEndpointServer {
     pub tcp_port: u16,
     req_queue: Arc<Mutex<RdmaQueue<ShmqWorkerReq>>>,
     resp_queue: Arc<Mutex<RdmaQueue<ShmqWorkerResp>>>,
+    poison: Arc<Mutex<bool>>,
 }
 
 impl RdmaEndpointServer {
@@ -33,16 +34,18 @@ impl RdmaEndpointServer {
     pub fn new(
         req_queue: Arc<Mutex<RdmaQueue<ShmqWorkerReq>>>,
         resp_queue: Arc<Mutex<RdmaQueue<ShmqWorkerResp>>>,
+        poison: Arc<Mutex<bool>>,
     ) -> io::Result<Self> {
         // Bind to any available port
         let listener = TcpListener::bind("0.0.0.0:0")?;
         let tcp_port = listener.local_addr()?.port();
         drop(listener); // Release the port for actual use
-        
+
         Ok(Self {
             tcp_port,
             req_queue,
             resp_queue,
+            poison,
         })
     }
 
@@ -52,43 +55,64 @@ impl RdmaEndpointServer {
     }
 
     /// Start TCP server to handle RDMA endpoint exchange
-    pub async fn start(&self) -> io::Result<()> {
+    pub fn start(&self) -> io::Result<()> {
         let listener = TcpListener::bind(format!("0.0.0.0:{}", self.tcp_port))?;
-        log::info!("🌐 RDMA endpoint exchange server listening on port {}", self.tcp_port);
+        listener.set_nonblocking(true)?;
+        log::info!(
+            "🌐 RDMA endpoint exchange server listening on port {}",
+            self.tcp_port
+        );
 
-        // Accept only one connection for endpoint exchange, then shut down
-        match listener.accept() {
-            Ok((stream, addr)) => {
-                log::info!("📡 Controller connected from: {}", addr);
-                
-                let req_queue = self.req_queue.clone();
-                let resp_queue = self.resp_queue.clone();
-                
-                // Handle connection and wait for completion
-                let result = tokio::task::spawn_blocking(move || {
-                    Self::handle_connection(stream, req_queue, resp_queue)
-                }).await;
-                
-                match result {
-                    Ok(Ok(())) => {
-                        log::info!("🎯 RDMA endpoint exchange completed successfully, shutting down TCP server");
-                        Ok(())
-                    }
-                    Ok(Err(e)) => {
-                        log::error!("Failed to handle RDMA endpoint exchange: {}", e);
-                        Err(e)
-                    }
-                    Err(e) => {
-                        log::error!("RDMA endpoint exchange task panicked: {}", e);
-                        Err(io::Error::other("Endpoint exchange task failed"))
+        // Run in loop to accept multiple connections until poison flag is set
+        loop {
+            // Check poison flag for graceful shutdown
+            if *self.poison.lock().unwrap() {
+                log::info!("RDMA endpoint server received shutdown signal");
+                break;
+            }
+
+            // Try to accept connection (non-blocking)
+            match listener.accept() {
+                Ok((stream, addr)) => {
+                    log::info!("📡 Controller connected from: {}", addr);
+
+                    let req_queue = self.req_queue.clone();
+                    let resp_queue = self.resp_queue.clone();
+
+                    // Handle connection in a separate thread
+                    let handle = std::thread::spawn(move || {
+                        Self::handle_connection(stream, req_queue, resp_queue)
+                    });
+                    
+                    // Wait for completion
+                    let result = handle.join();
+
+                    match result {
+                        Ok(Ok(())) => {
+                            log::info!("🎯 RDMA endpoint exchange completed successfully");
+                        }
+                        Ok(Err(e)) => {
+                            log::error!("Failed to handle RDMA endpoint exchange: {}", e);
+                        }
+                        Err(e) => {
+                            log::error!("RDMA endpoint exchange task panicked: {:?}", e);
+                        }
                     }
                 }
-            }
-            Err(e) => {
-                log::error!("Failed to accept TCP connection: {}", e);
-                Err(e)
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                    // No connection available, sleep briefly and continue
+                    std::thread::sleep(std::time::Duration::from_secs(1));
+                }
+                Err(e) => {
+                    log::error!("Failed to accept TCP connection: {}", e);
+                    // Don't break on connection errors, just log and continue
+                    std::thread::sleep(std::time::Duration::from_secs(1));
+                }
             }
         }
+
+        log::info!("RDMA endpoint exchange server shutting down gracefully");
+        Ok(())
     }
 
     /// Handle single TCP connection for endpoint exchange
@@ -103,7 +127,7 @@ impl RdmaEndpointServer {
         let worker_connection_pair = {
             let req_guard = req_queue.lock().unwrap();
             let resp_guard = resp_queue.lock().unwrap();
-            
+
             let req_endpoint = req_guard.endpoint()?;
             let req_memory = req_guard.memory_region();
             let resp_endpoint = resp_guard.endpoint()?;
@@ -111,16 +135,20 @@ impl RdmaEndpointServer {
 
             RdmaConnectionPair {
                 request_endpoint: RdmaConnectionInfo {
-                    qp_endpoint: serde_json::to_string(&req_endpoint)
-                        .map_err(|e| io::Error::other(format!("Failed to serialize req endpoint: {}", e)))?,
-                    memory_region: serde_json::to_string(&req_memory)
-                        .map_err(|e| io::Error::other(format!("Failed to serialize req memory: {}", e)))?,
+                    qp_endpoint: serde_json::to_string(&req_endpoint).map_err(|e| {
+                        io::Error::other(format!("Failed to serialize req endpoint: {}", e))
+                    })?,
+                    memory_region: serde_json::to_string(&req_memory).map_err(|e| {
+                        io::Error::other(format!("Failed to serialize req memory: {}", e))
+                    })?,
                 },
                 response_endpoint: RdmaConnectionInfo {
-                    qp_endpoint: serde_json::to_string(&resp_endpoint)
-                        .map_err(|e| io::Error::other(format!("Failed to serialize resp endpoint: {}", e)))?,
-                    memory_region: serde_json::to_string(&resp_memory)
-                        .map_err(|e| io::Error::other(format!("Failed to serialize resp memory: {}", e)))?,
+                    qp_endpoint: serde_json::to_string(&resp_endpoint).map_err(|e| {
+                        io::Error::other(format!("Failed to serialize resp endpoint: {}", e))
+                    })?,
+                    memory_region: serde_json::to_string(&resp_memory).map_err(|e| {
+                        io::Error::other(format!("Failed to serialize resp memory: {}", e))
+                    })?,
                 },
             }
         };
@@ -136,19 +164,32 @@ impl RdmaEndpointServer {
         let mut reader = BufReader::new(&stream);
         let mut controller_info_line = String::new();
         reader.read_line(&mut controller_info_line)?;
-        let controller_connection_pair: RdmaConnectionPair = serde_json::from_str(controller_info_line.trim())
-            .map_err(|e| io::Error::other(format!("Failed to parse controller info: {}", e)))?;
+        let controller_connection_pair: RdmaConnectionPair =
+            serde_json::from_str(controller_info_line.trim())
+                .map_err(|e| io::Error::other(format!("Failed to parse controller info: {}", e)))?;
         log::info!("📥 Received controller RDMA endpoints");
 
         // Parse controller endpoints
-        let controller_req_endpoint: QueuePairEndpoint = serde_json::from_str(&controller_connection_pair.request_endpoint.qp_endpoint)
-            .map_err(|e| io::Error::other(format!("Failed to parse controller req endpoint: {}", e)))?;
-        let controller_req_memory: RemoteMemoryRegion = serde_json::from_str(&controller_connection_pair.request_endpoint.memory_region)
-            .map_err(|e| io::Error::other(format!("Failed to parse controller req memory: {}", e)))?;
-        let controller_resp_endpoint: QueuePairEndpoint = serde_json::from_str(&controller_connection_pair.response_endpoint.qp_endpoint)
-            .map_err(|e| io::Error::other(format!("Failed to parse controller resp endpoint: {}", e)))?;
-        let controller_resp_memory: RemoteMemoryRegion = serde_json::from_str(&controller_connection_pair.response_endpoint.memory_region)
-            .map_err(|e| io::Error::other(format!("Failed to parse controller resp memory: {}", e)))?;
+        let controller_req_endpoint: QueuePairEndpoint =
+            serde_json::from_str(&controller_connection_pair.request_endpoint.qp_endpoint)
+                .map_err(|e| {
+                    io::Error::other(format!("Failed to parse controller req endpoint: {}", e))
+                })?;
+        let controller_req_memory: RemoteMemoryRegion =
+            serde_json::from_str(&controller_connection_pair.request_endpoint.memory_region)
+                .map_err(|e| {
+                    io::Error::other(format!("Failed to parse controller req memory: {}", e))
+                })?;
+        let controller_resp_endpoint: QueuePairEndpoint =
+            serde_json::from_str(&controller_connection_pair.response_endpoint.qp_endpoint)
+                .map_err(|e| {
+                    io::Error::other(format!("Failed to parse controller resp endpoint: {}", e))
+                })?;
+        let controller_resp_memory: RemoteMemoryRegion =
+            serde_json::from_str(&controller_connection_pair.response_endpoint.memory_region)
+                .map_err(|e| {
+                    io::Error::other(format!("Failed to parse controller resp memory: {}", e))
+                })?;
 
         // Establish RDMA connections
         log::info!("🔗 Establishing RDMA connections with controller");
@@ -185,10 +226,10 @@ impl RdmaEndpointServer {
         }
 
         log::info!("✅ RDMA bidirectional connection established successfully");
-        
+
         // Update global connection status
         crate::worker::update_rdma_connection_status(true);
-        
+
         Ok(())
     }
 }
@@ -205,7 +246,10 @@ impl RdmaEndpointClient {
         controller_resp_queue: Arc<tokio::sync::Mutex<RdmaQueue<ShmqWorkerResp>>>,
     ) -> io::Result<()> {
         let worker_addr = format!("{}:{}", worker_host, worker_tcp_port);
-        log::info!("🔗 Connecting to worker at {} for RDMA endpoint exchange", worker_addr);
+        log::info!(
+            "🔗 Connecting to worker at {} for RDMA endpoint exchange",
+            worker_addr
+        );
 
         let stream = TcpStream::connect(&worker_addr)?;
         log::info!("✅ Connected to worker TCP server");
@@ -214,7 +258,7 @@ impl RdmaEndpointClient {
         let controller_connection_pair = {
             let req_guard = controller_req_queue.lock().await;
             let resp_guard = controller_resp_queue.lock().await;
-            
+
             let req_endpoint = req_guard.endpoint()?;
             let req_memory = req_guard.memory_region();
             let resp_endpoint = resp_guard.endpoint()?;
@@ -222,16 +266,20 @@ impl RdmaEndpointClient {
 
             RdmaConnectionPair {
                 request_endpoint: RdmaConnectionInfo {
-                    qp_endpoint: serde_json::to_string(&req_endpoint)
-                        .map_err(|e| io::Error::other(format!("Failed to serialize req endpoint: {}", e)))?,
-                    memory_region: serde_json::to_string(&req_memory)
-                        .map_err(|e| io::Error::other(format!("Failed to serialize req memory: {}", e)))?,
+                    qp_endpoint: serde_json::to_string(&req_endpoint).map_err(|e| {
+                        io::Error::other(format!("Failed to serialize req endpoint: {}", e))
+                    })?,
+                    memory_region: serde_json::to_string(&req_memory).map_err(|e| {
+                        io::Error::other(format!("Failed to serialize req memory: {}", e))
+                    })?,
                 },
                 response_endpoint: RdmaConnectionInfo {
-                    qp_endpoint: serde_json::to_string(&resp_endpoint)
-                        .map_err(|e| io::Error::other(format!("Failed to serialize resp endpoint: {}", e)))?,
-                    memory_region: serde_json::to_string(&resp_memory)
-                        .map_err(|e| io::Error::other(format!("Failed to serialize resp memory: {}", e)))?,
+                    qp_endpoint: serde_json::to_string(&resp_endpoint).map_err(|e| {
+                        io::Error::other(format!("Failed to serialize resp endpoint: {}", e))
+                    })?,
+                    memory_region: serde_json::to_string(&resp_memory).map_err(|e| {
+                        io::Error::other(format!("Failed to serialize resp memory: {}", e))
+                    })?,
                 },
             }
         };
@@ -240,8 +288,9 @@ impl RdmaEndpointClient {
         let mut reader = BufReader::new(&stream);
         let mut worker_info_line = String::new();
         reader.read_line(&mut worker_info_line)?;
-        let worker_connection_pair: RdmaConnectionPair = serde_json::from_str(worker_info_line.trim())
-            .map_err(|e| io::Error::other(format!("Failed to parse worker info: {}", e)))?;
+        let worker_connection_pair: RdmaConnectionPair =
+            serde_json::from_str(worker_info_line.trim())
+                .map_err(|e| io::Error::other(format!("Failed to parse worker info: {}", e)))?;
         log::info!("📥 Received worker RDMA endpoints");
 
         // Send controller's endpoints to worker
@@ -253,14 +302,22 @@ impl RdmaEndpointClient {
         log::info!("📤 Sent controller RDMA endpoints to worker");
 
         // Parse worker endpoints
-        let worker_req_endpoint: QueuePairEndpoint = serde_json::from_str(&worker_connection_pair.request_endpoint.qp_endpoint)
-            .map_err(|e| io::Error::other(format!("Failed to parse worker req endpoint: {}", e)))?;
-        let worker_req_memory: RemoteMemoryRegion = serde_json::from_str(&worker_connection_pair.request_endpoint.memory_region)
-            .map_err(|e| io::Error::other(format!("Failed to parse worker req memory: {}", e)))?;
-        let worker_resp_endpoint: QueuePairEndpoint = serde_json::from_str(&worker_connection_pair.response_endpoint.qp_endpoint)
-            .map_err(|e| io::Error::other(format!("Failed to parse worker resp endpoint: {}", e)))?;
-        let worker_resp_memory: RemoteMemoryRegion = serde_json::from_str(&worker_connection_pair.response_endpoint.memory_region)
-            .map_err(|e| io::Error::other(format!("Failed to parse worker resp memory: {}", e)))?;
+        let worker_req_endpoint: QueuePairEndpoint = serde_json::from_str(
+            &worker_connection_pair.request_endpoint.qp_endpoint,
+        )
+        .map_err(|e| io::Error::other(format!("Failed to parse worker req endpoint: {}", e)))?;
+        let worker_req_memory: RemoteMemoryRegion = serde_json::from_str(
+            &worker_connection_pair.request_endpoint.memory_region,
+        )
+        .map_err(|e| io::Error::other(format!("Failed to parse worker req memory: {}", e)))?;
+        let worker_resp_endpoint: QueuePairEndpoint = serde_json::from_str(
+            &worker_connection_pair.response_endpoint.qp_endpoint,
+        )
+        .map_err(|e| io::Error::other(format!("Failed to parse worker resp endpoint: {}", e)))?;
+        let worker_resp_memory: RemoteMemoryRegion = serde_json::from_str(
+            &worker_connection_pair.response_endpoint.memory_region,
+        )
+        .map_err(|e| io::Error::other(format!("Failed to parse worker resp memory: {}", e)))?;
 
         // Establish RDMA connections
         log::info!("🔗 Establishing RDMA connections with worker");
@@ -297,7 +354,7 @@ impl RdmaEndpointClient {
         stream.flush()?;
 
         log::info!("✅ RDMA bidirectional connection established successfully");
-        
+
         Ok(())
     }
 }
