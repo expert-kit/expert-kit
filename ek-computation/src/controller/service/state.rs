@@ -121,7 +121,11 @@ impl StateService for StateServerImpl {
 
         // Log RDMA TCP port if provided
         if first_message.channel == "rdma" && first_message.rdma_tcp_port > 0 {
-            log::info!("Worker {} using RDMA with TCP port {}", worker_id, first_message.rdma_tcp_port);
+            log::info!(
+                "Worker {} using RDMA with TCP port {}",
+                worker_id,
+                first_message.rdma_tcp_port
+            );
         }
 
         // Handle incoming worker requests: Ping

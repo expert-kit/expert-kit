@@ -83,7 +83,7 @@ impl RdmaEndpointServer {
                     let handle = std::thread::spawn(move || {
                         Self::handle_connection(stream, req_queue, resp_queue)
                     });
-                    
+
                     // Wait for completion
                     let result = handle.join();
 
