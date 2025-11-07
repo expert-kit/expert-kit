@@ -1,6 +1,9 @@
 from vllm import LLM, SamplingParams
 import os
 
+if os.environ.get("EK_WITH_VLLM_MINDSPORE") == "1":
+    import vllm_mindspore
+
 os.environ["VLLM_MLA_DISABLE"] = "1"
 
 os.environ["EK_ENABLE"] = "0"

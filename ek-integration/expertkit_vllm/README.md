@@ -46,7 +46,7 @@ model_config = {
 
 # Create LLM with Expert-Kit configuration
 llm = LLM(
-    model="Qwen/Qwen3-MoE-A3B", 
+    model="Qwen/Qwen3-MoE-A3B",
     tensor_parallel_size=1,
     trust_remote_code=True,
     model_config=model_config
@@ -67,6 +67,13 @@ export EK_MODEL_NAME="Qwen/Qwen3-MoE-A3B"
 ```
 
 Note: Environment variables take precedence over model configuration parameters.
+
+If you use with vllm and mindspore instead of pytorch, EK_WITH_VLLM_MINDSPORE need to be set as 1.
+
+```bash
+export EK_WITH_VLLM_MINDSPORE=1
+```
+
 
 ### 3. Enable Expert-Kit Plugin
 
@@ -113,11 +120,18 @@ This plugin currently supports:
 
 This plugin replaces the `DeepseekV2MoE` implementation with `ExpertKitMoE`, which routes expert computation to Expert-Kit service.
 
+Vllm and pytorch are the default choices, but we also support vllm and mindspore, when using mindspore, you need to set EK_WITH_VLLM_MINDSPORE to 1.
+
 ## Requirements
 
 - vLLM >= 0.8.4 (required for Qwen3-MoE support)
 - grpcio >= 1.71.0
 - Protobuf >= 5.29.4
+
+For mindspore:
+- vLLM == 0.8.4
+- vllm_mindspore == 0.8.4
+- mindspore == 2.7.0
 
 ## Configuration Priority
 
