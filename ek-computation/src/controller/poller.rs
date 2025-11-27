@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
 use diesel::{
     BelongingToDsl, ExpressionMethods, GroupedBy, SelectableHelper,
@@ -17,14 +17,21 @@ use crate::{
     },
 };
 
-use super::dispatcher::{DISPATCHER, Dispatcher};
+use super::{
+    dispatcher::{DISPATCHER, Dispatcher},
+    routing_broadcaster::RoutingBroadcaster,
+    scheduler::WorkerScheduler,
+};
 
 #[async_trait]
 pub trait StatePoller {
     async fn run(&mut self) -> EKResult<()>;
 }
 
-pub struct StatePollerImpl {}
+pub struct StatePollerImpl {
+    broadcaster: Arc<RoutingBroadcaster>,
+    scheduler: Arc<WorkerScheduler>,
+}
 
 #[async_trait]
 impl StatePoller for StatePollerImpl {
@@ -42,15 +49,12 @@ impl StatePoller for StatePollerImpl {
     }
 }
 
-impl Default for StatePollerImpl {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl StatePollerImpl {
-    pub fn new() -> Self {
-        StatePollerImpl {}
+    pub fn new(broadcaster: Arc<RoutingBroadcaster>, scheduler: Arc<WorkerScheduler>) -> Self {
+        StatePollerImpl {
+            broadcaster,
+            scheduler,
+        }
     }
 
     /// Polls the state of the system, fetching nodes and their associated experts,
@@ -92,14 +96,64 @@ impl StatePollerImpl {
         let mut lg = DISPATCHER.lock().await;
         let nodes_count = node_with_expert.len();
         log::info!(nodes_count; "polling nodes");
-        lg.update(node_with_expert).await;
+        lg.update(node_with_expert.clone()).await;
+        drop(lg); // Release dispatcher lock before updating routing
+
+        // Update routing table
+        self.update_routing(node_with_expert).await?;
+
+        Ok(())
+    }
+
+    /// Update routing table based on current state
+    async fn update_routing(&self, node_with_experts: Vec<NodeWithExperts>) -> EKResult<()> {
+        use std::collections::HashMap;
+
+        // Build map of expert_id → list of expert names
+        let mut routing_updates: HashMap<String, String> = HashMap::new();
+
+        for nwe in node_with_experts {
+            // Get node address
+            let node_addr = nwe
+                .node
+                .config
+                .get("addr")
+                .and_then(|a| a.as_str())
+                .unwrap_or("unknown")
+                .to_string();
+
+            // For each expert on this node
+            for expert in nwe.experts {
+                let expert_id = expert.expert_id;
+
+                // Use scheduler to select best worker if there are multiple replicas
+                // For now, we'll just use the first one we encounter
+                // The scheduler will handle replica selection when frontends request routing
+                if !routing_updates.contains_key(&expert_id) {
+                    routing_updates.insert(expert_id.clone(), node_addr.clone());
+                } else {
+                    // Expert exists on multiple nodes - use scheduler to pick best one
+                    match self.scheduler.select_worker_for_expert(&expert_id).await {
+                        Ok(selected_addr) => {
+                            routing_updates.insert(expert_id, selected_addr);
+                        }
+                        Err(e) => {
+                            log::warn!("Failed to schedule expert {}: {:?}", expert_id, e);
+                        }
+                    }
+                }
+            }
+        }
+
+        log::info!("Updating routing table with {} experts", routing_updates.len());
+        self.broadcaster.batch_update(routing_updates).await;
 
         Ok(())
     }
 }
 
-pub fn start_poll() {
-    let mut poller = StatePollerImpl::new();
+pub fn start_poll(broadcaster: Arc<RoutingBroadcaster>, scheduler: Arc<WorkerScheduler>) {
+    let mut poller = StatePollerImpl::new(broadcaster, scheduler);
     tokio::spawn(async move {
         if let Err(e) = poller.run().await {
             log::error!("state poller error {e}");

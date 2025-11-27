@@ -1,0 +1,49 @@
+syntax = "proto3";
+package ek.control.v1;
+
+// RoutingService provides expert-to-worker routing information to frontends
+// This enables direct frontend→worker communication without controller forwarding
+service RoutingService {
+  // GetRouting returns the current routing table (expert_id → worker_addr)
+  rpc GetRouting(GetRoutingReq) returns (GetRoutingResp);
+
+  // SubscribeRoutingUpdates streams real-time routing changes to frontends
+  // Frontends should use this to stay synchronized with controller decisions
+  rpc SubscribeRoutingUpdates(SubscribeRoutingReq) returns (stream RoutingUpdate);
+}
+
+// Request for initial routing table
+message GetRoutingReq {
+  // Optional: filter to specific expert IDs (empty = all experts)
+  repeated string expert_ids = 1;
+}
+
+// Response containing the routing table
+message GetRoutingResp {
+  // Map of expert_id → worker_addr (e.g., "expert_12" → "10.0.0.5:5001")
+  // Controller selects SINGLE worker per expert (handles replica selection internally)
+  map<string, string> routing = 1;
+
+  // Version number for change tracking (incremented on every update)
+  uint64 version = 2;
+}
+
+// Request to subscribe to routing updates
+message SubscribeRoutingReq {
+  // Current version the frontend has (0 = send all)
+  uint64 current_version = 1;
+}
+
+// Incremental routing change notification
+message RoutingUpdate {
+  enum ChangeType {
+    ADDED = 0;     // New expert mapping added
+    REMOVED = 1;   // Expert mapping removed (worker offline)
+    MODIFIED = 2;  // Expert reassigned to different worker (rebalancing)
+  }
+
+  ChangeType type = 1;
+  string expert_id = 2;
+  string worker_addr = 3;  // New address (empty for REMOVED)
+  uint64 version = 4;      // New version after this change
+}

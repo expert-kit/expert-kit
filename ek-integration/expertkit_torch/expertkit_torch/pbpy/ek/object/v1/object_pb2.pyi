@@ -23,14 +23,12 @@ class Metadata(_message.Message):
     def __init__(self, id: _Optional[str] = ..., name: _Optional[str] = ..., tags: _Optional[_Mapping[str, str]] = ...) -> None: ...
 
 class ExpertSlice(_message.Message):
-    __slots__ = ("meta", "expert_meta", "replication")
+    __slots__ = ("meta", "expert_meta")
     META_FIELD_NUMBER: _ClassVar[int]
     EXPERT_META_FIELD_NUMBER: _ClassVar[int]
-    REPLICATION_FIELD_NUMBER: _ClassVar[int]
     meta: Metadata
     expert_meta: _containers.RepeatedCompositeFieldContainer[Metadata]
-    replication: _containers.RepeatedScalarFieldContainer[int]
-    def __init__(self, meta: _Optional[_Union[Metadata, _Mapping]] = ..., expert_meta: _Optional[_Iterable[_Union[Metadata, _Mapping]]] = ..., replication: _Optional[_Iterable[int]] = ...) -> None: ...
+    def __init__(self, meta: _Optional[_Union[Metadata, _Mapping]] = ..., expert_meta: _Optional[_Iterable[_Union[Metadata, _Mapping]]] = ...) -> None: ...
 
 class Node(_message.Message):
     __slots__ = ("meta", "control_address", "data_address")
