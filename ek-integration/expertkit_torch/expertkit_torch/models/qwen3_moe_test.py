@@ -1,0 +1,719 @@
+# coding=utf-8
+# Copyright 2025 The Qwen team, Alibaba Group and the HuggingFace Inc. team. All rights reserved.
+#
+# Modifications Copyright (c) 2025 expertkit-torch.
+#
+# This file is based on code from the Qwen3 project (originally licensed under Apache 2.0)
+# and has been modified.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+
+import argparse
+import asyncio
+import io
+import json
+import os
+import time
+import torch
+import torch.nn.functional as F
+import safetensors.torch
+
+from typing import Optional, Dict, Any, List
+from transformers import (
+    AutoTokenizer,
+    AutoModelForCausalLM,
+)
+from transformers.utils.logging import set_verbosity_error
+from transformers.models.qwen3_moe import modeling_qwen3_moe as qwen3_moe
+from torch import nn
+from expertkit_torch.grpc_client_new import ExpertKitClient as PythonExpertKitClient
+
+from expertkit_torch.utils.profiler_manager import ProfilerManager
+from line_profiler import profile
+
+# Import Rust client if available
+try:
+    from expertkit_transport import ExpertKitClient as RustExpertKitClient
+    RUST_CLIENT_AVAILABLE = True
+except ImportError:
+    RUST_CLIENT_AVAILABLE = False
+    RustExpertKitClient = None
+
+set_verbosity_error()
+
+# default timeout interval for ek client, in seconds
+DEFAULT_TIMEOUT_INTVAL = 100
+layer_idx = 0
+
+# The default device should be set according to the environment.
+if torch.cuda.is_available():
+    device = "cuda"
+elif torch.backends.mps.is_available():
+    device = "mps"
+else:
+    device = "cpu"
+
+
+def _serialize_tensor(tensor: torch.Tensor) -> bytes:
+    """Serialize tensor to bytes using safetensors format (matches worker expectation)."""
+    return safetensors.torch.save({"data": tensor})
+
+
+def _deserialize_tensor(data: bytes) -> torch.Tensor:
+    """Deserialize tensor from bytes (safetensors format)."""
+    return safetensors.torch.load(data)["data"]
+
+
+class RustClientAdapter:
+    """
+    Adapter to make Rust client compatible with Python client interface.
+    """
+
+    def __init__(self, controller_addr: str, timeout_sec: float = 15.0):
+        if not RUST_CLIENT_AVAILABLE:
+            raise RuntimeError(
+                "Rust client not available. Install with: "
+                "cd ek-integration/expertkit-transport-rs && maturin develop --release"
+            )
+
+        self.client = RustExpertKitClient(controller_addr, timeout_sec)
+        self.connected = False
+        self._event_loop = None
+
+    async def start(self):
+        """Initialize client - connect to controller and fetch routing."""
+        if not self.connected:
+            self.client.connect()
+            self.connected = True
+            version = self.client.get_routing_version()
+            print(f"[RustClient] Connected: routing_version={version}")
+
+        # Store event loop reference (use get_running_loop in async context)
+        self._event_loop = asyncio.get_running_loop()
+
+    def forward_expert(
+        self,
+        expert_ids: List[List[str]],
+        hidden_state: torch.Tensor
+    ) -> torch.Tensor:
+        """
+        Forward computation to experts (matches controller's executor pattern).
+
+        The controller groups sequences by expert and sends ONE request per expert group.
+        Each request contains ONE batched safetensors blob with all sequences stacked.
+
+        Args:
+            expert_ids: Expert IDs for each sequence [batch_size, n_routed_experts]
+            hidden_state: Input tensor [batch_size, hidden_dim]
+
+        Returns:
+            Output tensor [batch_size, n_routed_experts, expert_dim]
+        """
+        origin_device = hidden_state.device
+        batch_size = len(expert_ids)
+        n_experts_per_seq = len(expert_ids[0]) if expert_ids else 0
+
+        # Group sequences by expert (matches controller's break_down_to_egress)
+        expert_to_seq = {}  # expert_id -> [(seq_idx, expert_idx), ...]
+
+        for seq_idx, experts in enumerate(expert_ids):
+            for expert_idx, expert_id in enumerate(experts):
+                if expert_id not in expert_to_seq:
+                    expert_to_seq[expert_id] = []
+                expert_to_seq[expert_id].append((seq_idx, expert_idx))
+
+        # Prepare ALL expert data at once for parallel sending
+        all_expert_ids = []
+        all_tensor_data = []
+        # Track (expert_id, seq_positions) for reconstruction
+        expert_mapping = []
+
+        for expert_id, seq_positions in expert_to_seq.items():
+            # Extract hidden states for ALL sequences that need this expert
+            seq_indices = [pos[0] for pos in seq_positions]
+            expert_input = hidden_state[seq_indices]  # [num_seqs, hidden_dim]
+
+            # Ensure contiguous and move to CPU
+            expert_input = expert_input.contiguous().cpu()
+
+            # Serialize as ONE safetensors blob containing the batched tensor
+            tensor_data = _serialize_tensor(expert_input)
+
+            all_expert_ids.append(expert_id)
+            all_tensor_data.append(tensor_data)
+            expert_mapping.append(
+                (expert_id, seq_positions, expert_input.shape))
+
+        # Send ALL expert requests at once - Rust client handles parallel execution
+        print(
+            f"[RustAdapter] Sending {len(all_expert_ids)} experts in parallel...")
+        responses = self.client.send_expert_batch(
+            all_expert_ids, all_tensor_data)
+
+        # Process all responses
+        expert_outputs = {}
+        for (expert_id, seq_positions, input_shape), response_bytes in zip(expert_mapping, responses):
+            expert_output = _deserialize_tensor(
+                response_bytes)  # [num_seqs, expert_dim]
+
+            print(f"[RustAdapter] Expert {expert_id}: sent {len(seq_positions)} seqs, "
+                  f"input shape {input_shape}, output shape {expert_output.shape}")
+
+            expert_outputs[expert_id] = expert_output
+
+        # Reconstruct output in correct format [batch_size, n_experts_per_seq, expert_dim]
+        expert_dim = list(expert_outputs.values())[0].shape[-1]
+        result = torch.zeros(
+            batch_size, n_experts_per_seq, expert_dim,
+            dtype=hidden_state.dtype,
+            device=origin_device
+        )
+
+        for expert_id, seq_positions in expert_to_seq.items():
+            expert_output = expert_outputs[expert_id].to(origin_device)
+
+            for output_idx, (seq_idx, expert_pos) in enumerate(seq_positions):
+                result[seq_idx, expert_pos] = expert_output[output_idx]
+
+        return result
+
+    async def stop(self):
+        """Cleanup - not needed for Rust client yet."""
+        pass
+
+
+def intercept_moe(
+    enable_ek: bool = True,
+    ek_addr: str = "localhost:5002",
+    ek_model_name: str = "qwen3",
+    enable_direct_path: bool = True,
+    use_rust_client: bool = False,
+):
+    class InterceptedMoE(nn.Module):
+        client = None  # Can be either PythonExpertKitClient or RustClientAdapter
+
+        def __init__(self, config):
+            super().__init__()
+            global layer_idx
+            if enable_ek and InterceptedMoE.client is None:
+                # Create ExpertKit client (Python or Rust)
+                if use_rust_client:
+                    if not RUST_CLIENT_AVAILABLE:
+                        print(
+                            "[WARNING] Rust client requested but not available. "
+                            "Install with: cd ek-integration/expertkit-transport-rs && maturin develop --release"
+                        )
+                        print("[WARNING] Falling back to Python client")
+                        use_rust = False
+                    else:
+                        use_rust = True
+                else:
+                    use_rust = False
+
+                if use_rust:
+                    # Use Rust client
+                    InterceptedMoE.client = RustClientAdapter(
+                        controller_addr=ek_addr,
+                        timeout_sec=DEFAULT_TIMEOUT_INTVAL,
+                    )
+                    print(f"[ExpertKit] Using Rust client")
+                else:
+                    # Use Python client with optional direct worker communication
+                    # Direct path reduces latency by ~24% (bypasses controller forwarding)
+                    InterceptedMoE.client = PythonExpertKitClient(
+                        controller_addr=ek_addr,
+                        timeout_sec=DEFAULT_TIMEOUT_INTVAL,
+                        enable_direct_path=enable_direct_path,
+                    )
+                    print(
+                        f"[ExpertKit] Using Python client (direct_path={enable_direct_path})")
+
+                # Initialize the client asynchronously (fetches routing table)
+                async def _init_client():
+                    await InterceptedMoE.client.start()
+
+                # Run initialization (creates new event loop if needed)
+                try:
+                    # Try to get running loop (if we're already in async context)
+                    asyncio.get_running_loop()
+                    # If we get here, we're in async context, just await
+                    import warnings
+                    warnings.warn(
+                        "Initializing ExpertKit client in async context. "
+                        "Consider calling client.start() manually.",
+                        RuntimeWarning
+                    )
+                except RuntimeError:
+                    # No running loop - create one and run initialization
+                    asyncio.run(_init_client())
+
+                print(f"[ExpertKit] Client initialized: controller={ek_addr}")
+            self.layer_id = layer_idx
+            layer_idx += 1
+            layer_idx = layer_idx % config.num_hidden_layers
+            self.num_experts = config.num_experts
+            self.top_k = config.num_experts_per_tok
+            self.norm_topk_prob = config.norm_topk_prob
+
+            self.gate = nn.Linear(config.hidden_size,
+                                  config.num_experts, bias=False)
+            if not enable_ek:
+                self.experts = nn.ModuleList(
+                    [
+                        qwen3_moe.Qwen3MoeMLP(
+                            config, intermediate_size=config.moe_intermediate_size
+                        )
+                        for _ in range(self.num_experts)
+                    ]
+                )
+
+        def ek_forward(
+            self,
+            *,
+            hidden_states: torch.Tensor,
+            routing_weights: torch.Tensor,
+            selected_experts: torch.Tensor,
+            batch_size: int,
+            sequence_length: int,
+            hidden_dim: int,
+        ):
+            # Start timing for expert computation
+            start_time = time.time()
+
+            expert_ids = []
+            total_seq_len, _ = hidden_states.shape
+            for seq_idx in range(total_seq_len):
+                eids = selected_experts[seq_idx].tolist()
+                ids = [
+                    f"{ek_model_name}/l{self.layer_id}-e{expert_idx}"
+                    for expert_idx in eids
+                ]
+                expert_ids.append(ids)
+
+            outputs = self.client.forward_expert(
+                expert_ids=expert_ids, hidden_state=hidden_states
+            )
+            outputs = outputs.to(device=hidden_states.device,
+                                 dtype=hidden_states.dtype)
+            expanded_weights = routing_weights.unsqueeze(-1)
+            output = torch.sum(expanded_weights * outputs, dim=1)
+
+            final_hidden_states = output.reshape(
+                batch_size, sequence_length, hidden_dim
+            )
+
+            # Record expert computation time if profiler is available
+            end_time = time.time()
+
+            return final_hidden_states
+
+        def normal_forward(
+            self,
+            *,
+            hidden_states: torch.Tensor,
+            routing_weights: torch.Tensor,
+            selected_experts: torch.Tensor,
+            expert_mask: torch.Tensor,
+            batch_size: int,
+            sequence_length: int,
+            hidden_dim: int,
+        ):
+            # Start timing for expert computation
+            start_time = time.time()
+
+            final_hidden_states = torch.zeros(
+                (batch_size * sequence_length, hidden_dim),
+                dtype=hidden_states.dtype,
+                device=hidden_states.device,
+            )
+            for expert_idx in range(self.num_experts):
+                expert_layer = self.experts[expert_idx]
+                idx, top_x = torch.where(expert_mask[expert_idx])
+                current_state = hidden_states[None,
+                                              top_x].reshape(-1, hidden_dim)
+                current_hidden_states = (
+                    expert_layer(current_state) *
+                    routing_weights[top_x, idx, None]
+                )
+                final_hidden_states.index_add_(
+                    0, top_x, current_hidden_states.to(hidden_states.dtype)
+                )
+            final_hidden_states = final_hidden_states.reshape(
+                batch_size, sequence_length, hidden_dim
+            )
+
+            # Record expert computation time if profiler is available
+            end_time = time.time()
+
+            return final_hidden_states
+
+        def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+            # Timing overall MoE forward pass
+            forward_start = time.time()
+
+            batch_size, sequence_length, hidden_dim = hidden_states.shape
+            hidden_states = hidden_states.view(-1, hidden_dim)
+
+            # Process router logits (no need to time separately)
+            router_logits = self.gate(hidden_states)
+            routing_weights = F.softmax(
+                router_logits, dim=1, dtype=torch.float)
+            routing_weights, selected_experts = torch.topk(
+                routing_weights, self.top_k, dim=-1
+            )
+            if self.norm_topk_prob:  # only diff with mixtral sparse moe block!
+                routing_weights /= routing_weights.sum(dim=-1, keepdim=True)
+            # we cast back to the input dtype
+            routing_weights = routing_weights.to(hidden_states.dtype)
+
+            # One hot encode the selected experts to create an expert mask
+            # this will be used to easily index which expert is going to be sollicitated
+            expert_mask = torch.nn.functional.one_hot(
+                selected_experts, num_classes=self.num_experts
+            ).permute(2, 1, 0)
+
+            if enable_ek:
+                final = self.ek_forward(
+                    hidden_states=hidden_states,
+                    routing_weights=routing_weights,
+                    selected_experts=selected_experts,
+                    batch_size=batch_size,
+                    sequence_length=sequence_length,
+                    hidden_dim=hidden_dim,
+                )
+            else:
+                final = self.normal_forward(
+                    hidden_states=hidden_states,
+                    routing_weights=routing_weights,
+                    selected_experts=selected_experts,
+                    expert_mask=expert_mask,
+                    batch_size=batch_size,
+                    sequence_length=sequence_length,
+                    hidden_dim=hidden_dim,
+                )
+
+            # Record overall MoE time only if profiler is available
+            forward_end = time.time()
+
+            return final, router_logits
+
+    delattr(qwen3_moe, "Qwen3MoeSparseMoeBlock")
+    setattr(qwen3_moe, "Qwen3MoeSparseMoeBlock", InterceptedMoE)
+
+
+tokenizer: Optional[AutoTokenizer] = None
+model: Optional[AutoModelForCausalLM] = None
+
+
+def evaluate_batch(
+    *,
+    model_path="./",
+    prompts="What is MoE Model?",
+    output_max_length=64,
+    enable_ek=True,
+    ek_addr="localhost:5002",
+    ek_model_name="qwen3",
+    enable_direct_path=True,
+    use_rust_client=False,
+) -> Dict[str, Any]:
+    """
+    Batch inference with performance profiling.
+
+    Args:
+        model_path: Path to the pretrained model
+        prompts: List of prompt strings for batch processing
+        enable_ek: Whether to enable expert knowledge
+        use_rust_client: Whether to use Rust transport client (faster)
+
+    Returns:
+        Dictionary containing results and performance metrics
+    """
+    if prompts is None:
+        prompts = ["What is MoE Model?"]
+
+    # Convert str to list
+    if isinstance(prompts, str):
+        prompts = [prompts]
+
+    # First intercept the MoE module - completely independent of profiling
+    intercept_moe(
+        enable_ek=enable_ek,
+        ek_addr=ek_addr,
+        ek_model_name=ek_model_name,
+        enable_direct_path=enable_direct_path,
+        use_rust_client=use_rust_client,
+    )
+
+    # Load the tokenizer and the model only once
+    global tokenizer, model
+    if tokenizer is None:
+        tokenizer = AutoTokenizer.from_pretrained(
+            pretrained_model_name_or_path=model_path,
+        )
+    if model is None:
+        model = AutoModelForCausalLM.from_pretrained(
+            pretrained_model_name_or_path=model_path,
+            torch_dtype="auto",
+        ).to(device)
+
+    # Initialize profiler manager with context manager
+    with ProfilerManager(batch_size=len(prompts)) as profiler:
+        # Wrap model with profiler - completely non-invasive
+        profiler.wrap_model(model)
+
+        # Prepare batch messages
+        batch_messages = []
+        for prompt in prompts:
+            messages = [{"role": "user", "content": prompt}]
+            text = tokenizer.apply_chat_template(
+                messages,
+                tokenize=False,
+                add_generation_prompt=True,
+                enable_thinking=True,
+            )
+            batch_messages.append(text)
+
+        # Tokenize batch inputs with padding
+        model_inputs = tokenizer(
+            batch_messages,
+            return_tensors="pt",
+            padding=True,
+            truncation=True,
+        ).to(model.device)
+
+        # Generate responses - profiling happens automatically via hooks
+        generated_ids = model.generate(
+            **model_inputs,
+            max_new_tokens=output_max_length,
+            pad_token_id=tokenizer.eos_token_id
+        )
+
+        # Process generated sequences
+        results = []
+        for i in range(len(prompts)):
+            # Extract output tokens
+            input_length = len(model_inputs.input_ids[i])
+            output_ids = generated_ids[i][input_length:].tolist()
+
+            # Remove padding tokens
+            if tokenizer.pad_token_id is not None:
+                output_ids = [
+                    token_id for token_id in output_ids if token_id != tokenizer.pad_token_id]
+
+            # Extract thinking content
+            thinking_finish = False
+            try:
+                # Find </think> token (151668)
+                index = len(output_ids) - output_ids[::-1].index(151668)
+                thinking_finish = True
+            except ValueError:
+                # Thinking not finished
+                index = len(output_ids) - 1
+
+            thinking_content = tokenizer.decode(
+                output_ids[:index], skip_special_tokens=True
+            ).strip("\n")
+
+            content = tokenizer.decode(
+                output_ids[index:],
+                skip_special_tokens=True
+            ).strip("\n")
+
+            results.append({
+                "prompt": prompts[i],
+                "thinking_content": thinking_content,
+                "content": content,
+                "input_tokens": len(model_inputs.input_ids[i]),
+                "output_tokens": len(output_ids),
+            })
+
+        # Context manager exit will automatically unwrap the model and print the report
+        return {
+            "results": results,
+            "performance": profiler.report()
+        }
+
+
+def sharegpt(path, max_prompt_len=None):
+    if not os.path.exists(path):
+        raise FileNotFoundError(f"File does not exist: {path}")
+    if not os.path.isfile(path):
+        raise ValueError(f"Path is not a file: {path}")
+    with open(path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    prompts = []
+    for item in data:
+        for conversation in item["conversations"]:
+            if conversation["from"] == "human":
+                if max_prompt_len is not None:
+                    prompts.append(conversation["value"][:max_prompt_len])
+                else:
+                    prompts.append(conversation["value"])
+    return prompts
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--model_path",
+        type=str,
+        required=True,
+        help="Path to the model directory.",
+    )
+    parser.add_argument(
+        "--enable_ek",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Enable ExpertKit.",
+    )
+    parser.add_argument(
+        "--ek_model_name",
+        type=str,
+        default="qwen3",
+        help="The name of the model used in ExpertKit.",
+    )
+    parser.add_argument(
+        "--ek_addr",
+        type=str,
+        default="localhost:5002",
+        help="The address of the ExpertKit controller.",
+    )
+    parser.add_argument(
+        "--ek_direct_path",
+        action=argparse.BooleanOptionalAction,
+        default=True,  # Enabled by default - implements controller's decomposition logic
+        help="Enable direct worker communication (bypasses controller forwarding). "
+             "Implements request decomposition to match worker's expected format.",
+    )
+    parser.add_argument(
+        "--use_rust_client",
+        action="store_true",
+        default=False,
+        help="Use Rust transport client for better performance. "
+             "Requires: cd ek-integration/expertkit-transport-rs && maturin develop --release",
+    )
+    parser.add_argument(
+        "--detail_profile",
+        action="store_true",
+        help="Enable detailed profiling of model components (attention vs expert).",
+    )
+    parser.add_argument(
+        "--output_max",
+        type=int,
+        default=64,
+        help="The maximum output length for the model.",
+    )
+    parser.add_argument(
+        "--dataset",
+        choices=["none", "sharegpt"],
+        default="none",
+        help="The dataset to use for evaluation.",
+    )
+    parser.add_argument(
+        "--dataset_path",
+        type=str,
+        help="Path to the dataset file.",
+    )
+    parser.add_argument(
+        "--print_response",
+        action="store_true",
+        help="Print the response content.",
+    )
+    parser.add_argument(
+        "--max_prompt_len",
+        type=int,
+        default=None,
+        help="Maximum length of each prompt (applicable for ShareGPT dataset).",
+    )
+    parser.add_argument(
+        "--prompt_num",
+        type=int,
+        default=512,
+        help="The number of prompts to use for evaluation.",
+    )
+    args = parser.parse_args()
+
+    if args.dataset == "none":
+        # Use default prompts if no dataset is specified
+        test_prompts = [
+            "What is MoE Model?",
+            "Explain the benefits of mixture of experts.",
+            "How does MoE improve model efficiency?",
+            "Compare MoE with dense models.",
+        ] * args.prompt_num
+        test_prompts = test_prompts[:args.prompt_num]
+    elif args.dataset == "sharegpt":
+        # Validate that dataset_path is provided
+        if args.dataset_path is None:
+            raise ValueError(
+                "You must provide --dataset_path when using the 'sharegpt' dataset.")
+        # Load prompts from ShareGPT dataset
+        test_prompts = sharegpt(
+            args.dataset_path, max_prompt_len=args.max_prompt_len)
+        if len(test_prompts) < args.prompt_num:
+            test_prompts *= (args.prompt_num // len(test_prompts)) + 1
+        test_prompts = test_prompts[:args.prompt_num]
+    else:
+        raise ValueError("Invalid dataset specified.")
+
+    test_batch_sizes = [1, 2, 4, 8, 16, 32, 64, 128, 256]
+    test_batch_sizes = [64]
+    aggregated_results = []
+    for batch_size in test_batch_sizes:
+        for prompts in range(0, len(test_prompts), batch_size):
+            if prompts / batch_size >= 1:
+                break
+            batch_result = evaluate_batch(
+                model_path=args.model_path,
+                prompts=test_prompts[prompts:prompts + batch_size],
+                enable_ek=args.enable_ek,
+                ek_addr=args.ek_addr,
+                ek_model_name=args.ek_model_name,
+                enable_direct_path=args.ek_direct_path,
+                use_rust_client=args.use_rust_client,
+                output_max_length=args.output_max,
+            )
+            aggregated_results.extend(batch_result["results"])
+
+    if args.print_response:
+        for result in aggregated_results[:5]:
+            print()
+            print(f"Prompt: {result['prompt']}")
+            print(f"Thinking Content: {result['thinking_content']}")
+            print(f"Response: {result['content']}")
+            print(
+                f"Input Tokens: {result['input_tokens']}, Output Tokens: {result['output_tokens']}")
+            print("-" * 40)
+
+    # Cleanup: Stop ExpertKit client if it was initialized
+    if args.enable_ek:
+        try:
+            # Access the client through the InterceptedMoE class
+            # We need to get the class dynamically since it's defined in intercept_moe
+            from expertkit_torch.grpc_client_new import ExpertKitClient
+            # Get event loop and close the client
+            try:
+                loop = asyncio.get_event_loop()
+            except RuntimeError:
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+            # Note: The client is stored as a class variable, but we can't easily access it
+            # For now, connections will be cleaned up on process exit
+            pass
+        except Exception as e:
+            print(f"Warning: Failed to cleanup ExpertKit client: {e}")
+
+
+if __name__ == "__main__":
+    main()
