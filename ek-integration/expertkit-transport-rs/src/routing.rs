@@ -6,13 +6,13 @@ use tonic::transport::Channel;
 
 // Import generated routing proto
 use crate::transport::grpc::proto::ek::control::v1::{
-    routing_service_client::RoutingServiceClient, GetRoutingReq,
+    routing_service_client::RoutingServiceClient, GetRoutingReq, WorkerEndpoint,
 };
 
 /// Routing table client for fetching expert → worker mappings
 pub struct RoutingClient {
     controller_addr: String,
-    routing_table: Arc<RwLock<HashMap<String, String>>>, // expert_id → worker_addr
+    routing_table: Arc<RwLock<HashMap<String, WorkerEndpoint>>>, // expert_id → WorkerEndpoint
     routing_version: Arc<RwLock<u64>>,
     channel: Option<Channel>,
 }
@@ -80,14 +80,14 @@ impl RoutingClient {
         Ok(())
     }
 
-    /// Get worker address for an expert
-    pub async fn get_worker(&self, expert_id: &str) -> Option<String> {
+    /// Get worker endpoint for an expert
+    pub async fn get_worker(&self, expert_id: &str) -> Option<WorkerEndpoint> {
         let table = self.routing_table.read().await;
         table.get(expert_id).cloned()
     }
 
     /// Get workers for multiple experts
-    pub async fn get_workers(&self, expert_ids: &[String]) -> HashMap<String, Option<String>> {
+    pub async fn get_workers(&self, expert_ids: &[String]) -> HashMap<String, Option<WorkerEndpoint>> {
         let table = self.routing_table.read().await;
         expert_ids
             .iter()
@@ -96,7 +96,7 @@ impl RoutingClient {
     }
 
     /// Get all routing entries
-    pub async fn get_all_routing(&self) -> HashMap<String, String> {
+    pub async fn get_all_routing(&self) -> HashMap<String, WorkerEndpoint> {
         let table = self.routing_table.read().await;
         table.clone()
     }
@@ -126,18 +126,36 @@ mod tests {
         // Manually populate for testing
         {
             let mut table = client.routing_table.write().await;
-            table.insert("expert_1".to_string(), "worker1:50051".to_string());
-            table.insert("expert_2".to_string(), "worker2:50051".to_string());
+            table.insert(
+                "expert_1".to_string(),
+                WorkerEndpoint {
+                    grpc_addr: "worker1:50051".to_string(),
+                    channel: "grpc".to_string(),
+                    rdma_tcp_port: 0,
+                    shm_queue_prefix: "".to_string(),
+                    device: "cpu".to_string(),
+                },
+            );
+            table.insert(
+                "expert_2".to_string(),
+                WorkerEndpoint {
+                    grpc_addr: "worker2:50051".to_string(),
+                    channel: "grpc".to_string(),
+                    rdma_tcp_port: 0,
+                    shm_queue_prefix: "".to_string(),
+                    device: "cpu".to_string(),
+                },
+            );
         }
 
-        assert_eq!(
-            client.get_worker("expert_1").await,
-            Some("worker1:50051".to_string())
-        );
-        assert_eq!(
-            client.get_worker("expert_2").await,
-            Some("worker2:50051".to_string())
-        );
+        let worker1 = client.get_worker("expert_1").await;
+        assert!(worker1.is_some());
+        assert_eq!(worker1.unwrap().grpc_addr, "worker1:50051");
+
+        let worker2 = client.get_worker("expert_2").await;
+        assert!(worker2.is_some());
+        assert_eq!(worker2.unwrap().grpc_addr, "worker2:50051");
+
         assert_eq!(client.get_worker("expert_3").await, None);
     }
 }

@@ -201,20 +201,26 @@ pub async fn worker_main() -> EKResult<()> {
         }
         "shm" => {
             let node_name = x::get_worker_id();
-            let recv_channel = loop {
-                if let Some(channel) =
-                    ShmQueue::<ShmqWorkerReq>::open(&format!("ek-shmq-req-{}", node_name))
-                {
-                    break Arc::new(Mutex::new(channel));
-                }
-            };
-            let send_channel = loop {
-                if let Some(channel) =
-                    ShmQueue::<ShmqWorkerResp>::open(&format!("ek-shmq-resp-{}", node_name))
-                {
-                    break Arc::new(Mutex::new(channel));
-                }
-            };
+
+            log::info!("Creating shared memory queues for worker {}", node_name);
+
+            let recv_channel = ShmQueue::<ShmqWorkerReq>::new(
+                &format!("ek-shmq-req-{}", node_name),
+                256, // Queue capacity
+            );
+            log::info!("Created request queue: /dev/shm/ek-shmq-req-{}", node_name);
+
+            let send_channel = ShmQueue::<ShmqWorkerResp>::new(
+                &format!("ek-shmq-resp-{}", node_name),
+                256, // Queue capacity
+            );
+            log::info!(
+                "Created response queue: /dev/shm/ek-shmq-resp-{}",
+                node_name
+            );
+
+            let recv_channel = Arc::new(Mutex::new(recv_channel));
+            let send_channel = Arc::new(Mutex::new(send_channel));
             let thread_count: usize = env::var("EK_WORKER_THREADS")
                 .map(|v| v.parse().unwrap_or(1))
                 .unwrap_or(1);

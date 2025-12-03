@@ -12,6 +12,20 @@ class GetRoutingReq(_message.Message):
     expert_ids: _containers.RepeatedScalarFieldContainer[str]
     def __init__(self, expert_ids: _Optional[_Iterable[str]] = ...) -> None: ...
 
+class WorkerEndpoint(_message.Message):
+    __slots__ = ("grpc_addr", "channel", "rdma_tcp_port", "shm_queue_prefix", "device")
+    GRPC_ADDR_FIELD_NUMBER: _ClassVar[int]
+    CHANNEL_FIELD_NUMBER: _ClassVar[int]
+    RDMA_TCP_PORT_FIELD_NUMBER: _ClassVar[int]
+    SHM_QUEUE_PREFIX_FIELD_NUMBER: _ClassVar[int]
+    DEVICE_FIELD_NUMBER: _ClassVar[int]
+    grpc_addr: str
+    channel: str
+    rdma_tcp_port: int
+    shm_queue_prefix: str
+    device: str
+    def __init__(self, grpc_addr: _Optional[str] = ..., channel: _Optional[str] = ..., rdma_tcp_port: _Optional[int] = ..., shm_queue_prefix: _Optional[str] = ..., device: _Optional[str] = ...) -> None: ...
+
 class GetRoutingResp(_message.Message):
     __slots__ = ("routing", "version")
     class RoutingEntry(_message.Message):
@@ -19,13 +33,13 @@ class GetRoutingResp(_message.Message):
         KEY_FIELD_NUMBER: _ClassVar[int]
         VALUE_FIELD_NUMBER: _ClassVar[int]
         key: str
-        value: str
-        def __init__(self, key: _Optional[str] = ..., value: _Optional[str] = ...) -> None: ...
+        value: WorkerEndpoint
+        def __init__(self, key: _Optional[str] = ..., value: _Optional[_Union[WorkerEndpoint, _Mapping]] = ...) -> None: ...
     ROUTING_FIELD_NUMBER: _ClassVar[int]
     VERSION_FIELD_NUMBER: _ClassVar[int]
-    routing: _containers.ScalarMap[str, str]
+    routing: _containers.MessageMap[str, WorkerEndpoint]
     version: int
-    def __init__(self, routing: _Optional[_Mapping[str, str]] = ..., version: _Optional[int] = ...) -> None: ...
+    def __init__(self, routing: _Optional[_Mapping[str, WorkerEndpoint]] = ..., version: _Optional[int] = ...) -> None: ...
 
 class SubscribeRoutingReq(_message.Message):
     __slots__ = ("current_version",)
@@ -34,7 +48,7 @@ class SubscribeRoutingReq(_message.Message):
     def __init__(self, current_version: _Optional[int] = ...) -> None: ...
 
 class RoutingUpdate(_message.Message):
-    __slots__ = ("type", "expert_id", "worker_addr", "version")
+    __slots__ = ("type", "expert_id", "endpoint", "version")
     class ChangeType(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
         __slots__ = ()
         ADDED: _ClassVar[RoutingUpdate.ChangeType]
@@ -45,10 +59,10 @@ class RoutingUpdate(_message.Message):
     MODIFIED: RoutingUpdate.ChangeType
     TYPE_FIELD_NUMBER: _ClassVar[int]
     EXPERT_ID_FIELD_NUMBER: _ClassVar[int]
-    WORKER_ADDR_FIELD_NUMBER: _ClassVar[int]
+    ENDPOINT_FIELD_NUMBER: _ClassVar[int]
     VERSION_FIELD_NUMBER: _ClassVar[int]
     type: RoutingUpdate.ChangeType
     expert_id: str
-    worker_addr: str
+    endpoint: WorkerEndpoint
     version: int
-    def __init__(self, type: _Optional[_Union[RoutingUpdate.ChangeType, str]] = ..., expert_id: _Optional[str] = ..., worker_addr: _Optional[str] = ..., version: _Optional[int] = ...) -> None: ...
+    def __init__(self, type: _Optional[_Union[RoutingUpdate.ChangeType, str]] = ..., expert_id: _Optional[str] = ..., endpoint: _Optional[_Union[WorkerEndpoint, _Mapping]] = ..., version: _Optional[int] = ...) -> None: ...

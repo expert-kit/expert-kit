@@ -31,37 +31,43 @@ impl ShmTransport {
     /// Discover worker queue by scanning /dev/shm
     async fn discover_worker(&self, endpoint: &str) -> Result<(ShmQueue, ShmQueue)> {
         // Parse endpoint to extract worker identifier
-        // Expected format: "shm://worker-{id}" or just worker name
-        let worker_name = endpoint
-            .strip_prefix("shm://")
-            .unwrap_or(endpoint)
-            .to_string();
+        let worker_id = endpoint;
 
-        // Try to find existing queues
+        // Worker creates queues with format: ek-shmq-{req,resp}-{worker_id}
+        let req_name = format!("ek-shmq-req-{}", worker_id);
+        let resp_name = format!("ek-shmq-resp-{}", worker_id);
+
+        eprintln!(
+            "[ShmTransport] Looking for worker queues: {}, {}",
+            req_name, resp_name
+        );
+
+        // Try to find existing queues in /dev/shm
         let shm_dir = Path::new("/dev/shm");
-
-        // Look for queue pairs: {worker_name}-req and {worker_name}-resp
-        let req_name = format!("{}-req", worker_name);
-        let resp_name = format!("{}-resp", worker_name);
-
-        // Check if queues exist
         let req_path = shm_dir.join(&req_name);
         let resp_path = shm_dir.join(&resp_name);
 
         if !req_path.exists() || !resp_path.exists() {
             return Err(anyhow::anyhow!(
-                "Worker queues not found: {:?}, {:?}",
-                req_path,
-                resp_path
+                "Worker queues not found in /dev/shm: {} (exists: {}), {} (exists: {}). \
+                 Worker may not have started yet, or channel type may be wrong.",
+                req_name,
+                req_path.exists(),
+                resp_name,
+                resp_path.exists()
             ));
         }
 
-        // Open queues (don't create)
+        eprintln!("[ShmTransport] Found worker queues, opening...");
+
+        // Open queues (don't create - worker creates them!)
         let req_queue = ShmQueue::open(&req_name, 16, REQ_CAPACITY)
             .ok_or_else(|| anyhow::anyhow!("Failed to open request queue: {}", req_name))?;
 
         let resp_queue = ShmQueue::open(&resp_name, 16, RESP_CAPACITY)
             .ok_or_else(|| anyhow::anyhow!("Failed to open response queue: {}", resp_name))?;
+
+        eprintln!("[ShmTransport] Successfully opened worker queues");
 
         Ok((req_queue, resp_queue))
     }
@@ -83,16 +89,19 @@ impl ShmTransport {
 impl Transport for ShmTransport {
     async fn send_batch(
         &self,
-        endpoint: &str,
+        endpoint: &WorkerEndpoint,
         requests: Vec<ExpertRequest>,
     ) -> Result<Vec<ExpertResponse>> {
+        // Extract queue prefix from endpoint
+        let queue_prefix = &endpoint.shm_queue_prefix;
+
         // Ensure connection exists
-        self.get_connection(endpoint).await?;
+        self.get_connection(queue_prefix).await?;
 
         let mut connections = self.connections.lock().await;
         let (req_queue, resp_queue) = connections
-            .get_mut(endpoint)
-            .ok_or_else(|| anyhow::anyhow!("Connection not found for {}", endpoint))?;
+            .get_mut(queue_prefix)
+            .ok_or_else(|| anyhow::anyhow!("Connection not found for {}", queue_prefix))?;
 
         // Send all requests
         let mut request_ids = Vec::new();
@@ -130,8 +139,8 @@ impl Transport for ShmTransport {
                     }
                 }
                 Err(ShmQueueError::Empty) => {
-                    // Queue empty, wait a bit
-                    tokio::time::sleep(tokio::time::Duration::from_micros(100)).await;
+                    // tokio::time::sleep(tokio::time::Duration::from_micros(1)).await;
+                    continue;
                 }
                 Err(e) => {
                     return Err(anyhow::anyhow!("Failed to receive response: {}", e));
@@ -162,7 +171,9 @@ impl Transport for ShmTransport {
         TransportType::SharedMemory
     }
 
-    async fn is_available(&self, endpoint: &str) -> bool {
-        self.discover_worker(endpoint).await.is_ok()
+    async fn is_available(&self, endpoint: &WorkerEndpoint) -> bool {
+        self.discover_worker(&endpoint.shm_queue_prefix)
+            .await
+            .is_ok()
     }
 }

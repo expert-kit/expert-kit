@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{RwLock, broadcast};
 
-use crate::proto::ek::control::v1::{GetRoutingResp, RoutingUpdate, routing_update::ChangeType};
+use crate::proto::ek::control::v1::{GetRoutingResp, RoutingUpdate, WorkerEndpoint, routing_update::ChangeType};
 
 /// RoutingBroadcaster manages routing table and broadcasts updates to subscribed frontends
 /// This is the central pub/sub system for routing metadata distribution
@@ -12,8 +12,8 @@ pub struct RoutingBroadcaster {
 }
 
 struct RoutingBroadcasterInner {
-    /// Current routing table: expert_id → worker_addr
-    routing: RwLock<HashMap<String, String>>,
+    /// Current routing table: expert_id → WorkerEndpoint
+    routing: RwLock<HashMap<String, WorkerEndpoint>>,
 
     /// Current version number (incremented on every change)
     version: RwLock<u64>,
@@ -45,7 +45,7 @@ impl RoutingBroadcaster {
             // Return only requested experts
             filter
                 .into_iter()
-                .filter_map(|id| routing_map.get(&id).map(|addr| (id, addr.clone())))
+                .filter_map(|id| routing_map.get(&id).map(|endpoint| (id, endpoint.clone())))
                 .collect()
         } else {
             // Return all experts
@@ -67,7 +67,7 @@ impl RoutingBroadcaster {
     }
 
     /// Add or update an expert mapping
-    pub async fn upsert_expert(&self, expert_id: String, worker_addr: String) {
+    pub async fn upsert_expert(&self, expert_id: String, endpoint: WorkerEndpoint) {
         let mut routing = self.inner.routing.write().await;
         let mut version = self.inner.version.write().await;
 
@@ -77,13 +77,13 @@ impl RoutingBroadcaster {
             ChangeType::Added
         };
 
-        routing.insert(expert_id.clone(), worker_addr.clone());
+        routing.insert(expert_id.clone(), endpoint.clone());
         *version += 1;
 
         let update = RoutingUpdate {
             r#type: change_type as i32,
             expert_id,
-            worker_addr,
+            endpoint: Some(endpoint),
             version: *version,
         };
 
@@ -102,7 +102,7 @@ impl RoutingBroadcaster {
             let update = RoutingUpdate {
                 r#type: ChangeType::Removed as i32,
                 expert_id,
-                worker_addr: String::new(), // Empty for removals
+                endpoint: None, // No endpoint for removals
                 version: *version,
             };
 
@@ -112,24 +112,24 @@ impl RoutingBroadcaster {
     }
 
     /// Batch update multiple expert mappings atomically
-    pub async fn batch_update(&self, updates: HashMap<String, String>) {
+    pub async fn batch_update(&self, updates: HashMap<String, WorkerEndpoint>) {
         let mut routing = self.inner.routing.write().await;
         let mut version = self.inner.version.write().await;
 
-        for (expert_id, worker_addr) in updates {
+        for (expert_id, endpoint) in updates {
             let change_type = if routing.contains_key(&expert_id) {
                 ChangeType::Modified
             } else {
                 ChangeType::Added
             };
 
-            routing.insert(expert_id.clone(), worker_addr.clone());
+            routing.insert(expert_id.clone(), endpoint.clone());
             *version += 1;
 
             let update = RoutingUpdate {
                 r#type: change_type as i32,
                 expert_id,
-                worker_addr,
+                endpoint: Some(endpoint),
                 version: *version,
             };
 
@@ -150,7 +150,7 @@ impl RoutingBroadcaster {
                 let update = RoutingUpdate {
                     r#type: ChangeType::Removed as i32,
                     expert_id,
-                    worker_addr: String::new(),
+                    endpoint: None,
                     version: *version,
                 };
 

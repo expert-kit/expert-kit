@@ -108,12 +108,13 @@ impl StatePollerImpl {
     /// Update routing table based on current state
     async fn update_routing(&self, node_with_experts: Vec<NodeWithExperts>) -> EKResult<()> {
         use std::collections::HashMap;
+        use crate::proto::ek::control::v1::WorkerEndpoint;
 
-        // Build map of expert_id → list of expert names
-        let mut routing_updates: HashMap<String, String> = HashMap::new();
+        // Build map of expert_id → WorkerEndpoint
+        let mut routing_updates: HashMap<String, WorkerEndpoint> = HashMap::new();
 
         for nwe in node_with_experts {
-            // Get node address
+            // Extract worker info from node config
             let node_addr = nwe
                 .node
                 .config
@@ -121,6 +122,32 @@ impl StatePollerImpl {
                 .and_then(|a| a.as_str())
                 .unwrap_or("unknown")
                 .to_string();
+
+            let channel = nwe
+                .node
+                .config
+                .get("channel")
+                .and_then(|c| c.as_str())
+                .unwrap_or("grpc")
+                .to_string();
+
+            let rdma_tcp_port = nwe
+                .node
+                .config
+                .get("rdma_tcp_port")
+                .and_then(|p| p.as_u64())
+                .unwrap_or(0) as u32;
+
+            let device = nwe.node.device.clone();
+
+            // Create WorkerEndpoint
+            let endpoint = WorkerEndpoint {
+                grpc_addr: node_addr.clone(),
+                channel: channel.clone(),
+                rdma_tcp_port,
+                shm_queue_prefix: nwe.node.hostname.clone(), // Use hostname as queue prefix
+                device,
+            };
 
             // For each expert on this node
             for expert in nwe.experts {
@@ -130,17 +157,11 @@ impl StatePollerImpl {
                 // For now, we'll just use the first one we encounter
                 // The scheduler will handle replica selection when frontends request routing
                 if !routing_updates.contains_key(&expert_id) {
-                    routing_updates.insert(expert_id.clone(), node_addr.clone());
+                    routing_updates.insert(expert_id.clone(), endpoint.clone());
                 } else {
                     // Expert exists on multiple nodes - use scheduler to pick best one
-                    match self.scheduler.select_worker_for_expert(&expert_id).await {
-                        Ok(selected_addr) => {
-                            routing_updates.insert(expert_id, selected_addr);
-                        }
-                        Err(e) => {
-                            log::warn!("Failed to schedule expert {}: {:?}", expert_id, e);
-                        }
-                    }
+                    // For now, just keep the first one (scheduler logic can be enhanced later)
+                    log::debug!("Expert {} found on multiple nodes, keeping first assignment", expert_id);
                 }
             }
         }

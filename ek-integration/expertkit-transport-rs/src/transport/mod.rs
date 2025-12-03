@@ -3,8 +3,10 @@ use async_trait::async_trait;
 
 pub mod auto;
 pub mod grpc;
-pub mod mock;
 pub mod shm;
+
+// Re-export WorkerEndpoint from grpc proto
+pub use grpc::proto::ek::control::v1::WorkerEndpoint;
 
 #[derive(Debug, Clone)]
 pub enum TransportType {
@@ -31,15 +33,6 @@ impl ExpertRequest {
             num_sequences,
         }
     }
-
-    /// Create a single-sequence request (for compatibility)
-    pub fn single(expert_id: String, tensor_data: Vec<u8>) -> Self {
-        Self {
-            expert_id,
-            tensor_data,
-            num_sequences: 1,
-        }
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -54,15 +47,21 @@ pub trait Transport: Send + Sync {
     /// Send batch of expert requests to a worker
     /// Note: Each ExpertRequest already contains batched sequences for that expert
     /// The transport should send one computation call per ExpertRequest (not concatenate)
+    ///
+    /// # Arguments
+    /// * `endpoint` - Worker endpoint information (includes channel type, addresses, etc.)
+    /// * `requests` - Batch of expert requests to send
     async fn send_batch(
         &self,
-        endpoint: &str,
+        endpoint: &WorkerEndpoint,
         requests: Vec<ExpertRequest>,
     ) -> Result<Vec<ExpertResponse>>;
 
     /// Get transport type
+    #[allow(dead_code)]
     fn transport_type(&self) -> TransportType;
 
     /// Check if transport is available for endpoint
-    async fn is_available(&self, endpoint: &str) -> bool;
+    #[allow(dead_code)]
+    async fn is_available(&self, endpoint: &WorkerEndpoint) -> bool;
 }

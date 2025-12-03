@@ -18,11 +18,29 @@ message GetRoutingReq {
   repeated string expert_ids = 1;
 }
 
+// Worker endpoint information including transport details
+message WorkerEndpoint {
+  // gRPC address (e.g., "http://10.0.0.5:5001")
+  string grpc_addr = 1;
+
+  // Transport channel type: "grpc", "rdma", or "shm"
+  string channel = 2;
+
+  // RDMA-specific: TCP port for RDMA endpoint exchange (0 if not RDMA)
+  uint32 rdma_tcp_port = 3;
+
+  // SHM-specific: Queue name prefix for shared memory (empty if not SHM)
+  string shm_queue_prefix = 4;
+
+  // Worker device type (e.g., "cuda:0", "cpu")
+  string device = 5;
+}
+
 // Response containing the routing table
 message GetRoutingResp {
-  // Map of expert_id → worker_addr (e.g., "expert_12" → "10.0.0.5:5001")
+  // Map of expert_id → worker endpoint with full transport info
   // Controller selects SINGLE worker per expert (handles replica selection internally)
-  map<string, string> routing = 1;
+  map<string, WorkerEndpoint> routing = 1;
 
   // Version number for change tracking (incremented on every update)
   uint64 version = 2;
@@ -44,6 +62,6 @@ message RoutingUpdate {
 
   ChangeType type = 1;
   string expert_id = 2;
-  string worker_addr = 3;  // New address (empty for REMOVED)
-  uint64 version = 4;      // New version after this change
+  WorkerEndpoint endpoint = 3;  // New endpoint info (unset for REMOVED)
+  uint64 version = 4;           // New version after this change
 }

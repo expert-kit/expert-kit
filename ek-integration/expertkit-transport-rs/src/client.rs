@@ -2,6 +2,7 @@ use anyhow::Result;
 use std::collections::HashMap;
 
 use crate::routing::RoutingClient;
+use crate::transport::grpc::proto::ek::control::v1::WorkerEndpoint;
 use crate::transport::{ExpertRequest, ExpertResponse, Transport, auto::AutoTransport};
 
 /// High-level client with worker-level batching and routing
@@ -55,11 +56,12 @@ impl ExpertKitClient {
             ));
         }
 
-        // Group by expert (expert_id -> [(tensor_data, original_idx)])
-        let mut expert_batches: HashMap<String, (String, Vec<(Vec<u8>, usize)>)> = HashMap::new();
+        // Group by expert (expert_id -> [(worker_endpoint, tensor_data, original_idx)])
+        let mut expert_batches: HashMap<String, (WorkerEndpoint, Vec<(Vec<u8>, usize)>)> =
+            HashMap::new();
 
         for (idx, expert_id) in expert_ids.iter().enumerate() {
-            let worker_addr = workers
+            let worker_endpoint = workers
                 .get(expert_id)
                 .and_then(|w| w.as_ref())
                 .ok_or_else(|| anyhow::anyhow!("Worker not found for expert {}", expert_id))?
@@ -67,7 +69,7 @@ impl ExpertKitClient {
 
             expert_batches
                 .entry(expert_id.clone())
-                .or_insert_with(|| (worker_addr, Vec::new()))
+                .or_insert_with(|| (worker_endpoint, Vec::new()))
                 .1
                 .push((tensor_data[idx].clone(), idx));
         }
@@ -81,7 +83,7 @@ impl ExpertKitClient {
         // Send one request per expert (in parallel)
         let mut tasks = Vec::new();
 
-        for (expert_id, (worker_addr, batch)) in expert_batches {
+        for (expert_id, (worker_endpoint, batch)) in expert_batches {
             let transport = &self.transport;
 
             // Combine all sequence tensors into ONE batched safetensors blob
@@ -104,7 +106,9 @@ impl ExpertKitClient {
 
             // Create async task
             let task = async move {
-                let responses = transport.send_batch(&worker_addr, vec![request]).await?;
+                let responses = transport
+                    .send_batch(&worker_endpoint, vec![request])
+                    .await?;
                 Ok::<(String, ExpertResponse, Vec<usize>), anyhow::Error>((
                     expert_id,
                     responses.into_iter().next().unwrap(),

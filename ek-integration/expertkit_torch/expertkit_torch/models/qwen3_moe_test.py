@@ -87,20 +87,10 @@ class RustClientAdapter:
                 "cd ek-integration/expertkit-transport-rs && maturin develop --release"
             )
 
+        # Create Rust client and connect immediately
         self.client = RustExpertKitClient(controller_addr, timeout_sec)
-        self.connected = False
-        self._event_loop = None
-
-    async def start(self):
-        """Initialize client - connect to controller and fetch routing."""
-        if not self.connected:
-            self.client.connect()
-            self.connected = True
-            version = self.client.get_routing_version()
-            print(f"[RustClient] Connected: routing_version={version}")
-
-        # Store event loop reference (use get_running_loop in async context)
-        self._event_loop = asyncio.get_running_loop()
+        self.client.connect()
+        print(f"[RustClient] Connected to {controller_addr}")
 
     def forward_expert(
         self,
@@ -188,16 +178,11 @@ class RustClientAdapter:
 
         return result
 
-    async def stop(self):
-        """Cleanup - not needed for Rust client yet."""
-        pass
-
 
 def intercept_moe(
     enable_ek: bool = True,
     ek_addr: str = "localhost:5002",
     ek_model_name: str = "qwen3",
-    enable_direct_path: bool = True,
     use_rust_client: bool = False,
 ):
     class InterceptedMoE(nn.Module):
@@ -229,36 +214,14 @@ def intercept_moe(
                     )
                     print(f"[ExpertKit] Using Rust client")
                 else:
-                    # Use Python client with optional direct worker communication
-                    # Direct path reduces latency by ~24% (bypasses controller forwarding)
+                    # Use Python client wrapper (delegates to Rust)
                     InterceptedMoE.client = PythonExpertKitClient(
                         controller_addr=ek_addr,
                         timeout_sec=DEFAULT_TIMEOUT_INTVAL,
-                        enable_direct_path=enable_direct_path,
                     )
-                    print(
-                        f"[ExpertKit] Using Python client (direct_path={enable_direct_path})")
+                    print(f"[ExpertKit] Using Python client (wrapper around Rust)")
 
-                # Initialize the client asynchronously (fetches routing table)
-                async def _init_client():
-                    await InterceptedMoE.client.start()
-
-                # Run initialization (creates new event loop if needed)
-                try:
-                    # Try to get running loop (if we're already in async context)
-                    asyncio.get_running_loop()
-                    # If we get here, we're in async context, just await
-                    import warnings
-                    warnings.warn(
-                        "Initializing ExpertKit client in async context. "
-                        "Consider calling client.start() manually.",
-                        RuntimeWarning
-                    )
-                except RuntimeError:
-                    # No running loop - create one and run initialization
-                    asyncio.run(_init_client())
-
-                print(f"[ExpertKit] Client initialized: controller={ek_addr}")
+                print(f"[ExpertKit] Client connected: controller={ek_addr}")
             self.layer_id = layer_idx
             layer_idx += 1
             layer_idx = layer_idx % config.num_hidden_layers
@@ -424,7 +387,6 @@ def evaluate_batch(
     enable_ek=True,
     ek_addr="localhost:5002",
     ek_model_name="qwen3",
-    enable_direct_path=True,
     use_rust_client=False,
 ) -> Dict[str, Any]:
     """
@@ -451,7 +413,6 @@ def evaluate_batch(
         enable_ek=enable_ek,
         ek_addr=ek_addr,
         ek_model_name=ek_model_name,
-        enable_direct_path=enable_direct_path,
         use_rust_client=use_rust_client,
     )
 
@@ -590,13 +551,6 @@ def main():
         help="The address of the ExpertKit controller.",
     )
     parser.add_argument(
-        "--ek_direct_path",
-        action=argparse.BooleanOptionalAction,
-        default=True,  # Enabled by default - implements controller's decomposition logic
-        help="Enable direct worker communication (bypasses controller forwarding). "
-             "Implements request decomposition to match worker's expected format.",
-    )
-    parser.add_argument(
         "--use_rust_client",
         action="store_true",
         default=False,
@@ -680,7 +634,6 @@ def main():
                 enable_ek=args.enable_ek,
                 ek_addr=args.ek_addr,
                 ek_model_name=args.ek_model_name,
-                enable_direct_path=args.ek_direct_path,
                 use_rust_client=args.use_rust_client,
                 output_max_length=args.output_max,
             )
@@ -696,23 +649,7 @@ def main():
                 f"Input Tokens: {result['input_tokens']}, Output Tokens: {result['output_tokens']}")
             print("-" * 40)
 
-    # Cleanup: Stop ExpertKit client if it was initialized
-    if args.enable_ek:
-        try:
-            # Access the client through the InterceptedMoE class
-            # We need to get the class dynamically since it's defined in intercept_moe
-            from expertkit_torch.grpc_client_new import ExpertKitClient
-            # Get event loop and close the client
-            try:
-                loop = asyncio.get_event_loop()
-            except RuntimeError:
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-            # Note: The client is stored as a class variable, but we can't easily access it
-            # For now, connections will be cleaned up on process exit
-            pass
-        except Exception as e:
-            print(f"Warning: Failed to cleanup ExpertKit client: {e}")
+    # Note: Rust client handles cleanup automatically on process exit
 
 
 if __name__ == "__main__":

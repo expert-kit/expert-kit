@@ -25,7 +25,7 @@ pub mod proto {
     }
 }
 
-use proto::ek::worker::v1::{computation_service_client::ComputationServiceClient, ForwardReq};
+use proto::ek::worker::v1::{ForwardReq, computation_service_client::ComputationServiceClient};
 
 /// gRPC transport with connection pooling
 pub struct GrpcTransport {
@@ -78,16 +78,16 @@ impl GrpcTransport {
 impl Transport for GrpcTransport {
     async fn send_batch(
         &self,
-        endpoint: &str,
+        endpoint: &WorkerEndpoint,
         requests: Vec<ExpertRequest>,
     ) -> Result<Vec<ExpertResponse>> {
-        let channel = self.get_channel(endpoint).await?;
+        // Extract gRPC address from endpoint
+        let channel = self.get_channel(&endpoint.grpc_addr).await?;
         let mut client = ComputationServiceClient::new(channel)
             .max_decoding_message_size(self.max_message_size)
             .max_encoding_message_size(self.max_message_size);
 
         // Send ONE gRPC request PER ExpertRequest
-        // This matches the controller's executor pattern
         let mut responses = Vec::new();
 
         for req in requests {
@@ -99,11 +99,9 @@ impl Transport for GrpcTransport {
                 })
                 .collect();
 
-            // The tensor_data is ALREADY a complete safetensors blob
-            // DO NOT concatenate or modify it!
             let grpc_req = ForwardReq {
                 instance_id: "0".to_string(),
-                tensor: req.tensor_data,  // Use as-is, don't concatenate!
+                tensor: req.tensor_data, // Use as-is, don't concatenate!
                 sequences,
             };
 
@@ -142,7 +140,7 @@ impl Transport for GrpcTransport {
         TransportType::Grpc
     }
 
-    async fn is_available(&self, endpoint: &str) -> bool {
-        self.get_channel(endpoint).await.is_ok()
+    async fn is_available(&self, endpoint: &WorkerEndpoint) -> bool {
+        self.get_channel(&endpoint.grpc_addr).await.is_ok()
     }
 }

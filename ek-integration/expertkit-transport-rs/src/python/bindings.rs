@@ -2,17 +2,13 @@ use pyo3::prelude::*;
 use pyo3::types::PyBytes;
 
 use crate::client::ExpertKitClient as RustExpertKitClient;
-use crate::transport::{
-    ExpertRequest, Transport, auto::AutoTransport, grpc::GrpcTransport, mock::MockTransport,
-    shm::ShmTransport,
-};
 
-/// High-level ExpertKit client with routing and batching (Phase 4)
+const DEFAULT_THREAD_NUM: usize = 6;
+
+/// High-level ExpertKit client with routing and batching
 #[pyclass]
 pub struct PyExpertKitClient {
     client: Option<RustExpertKitClient>,
-    controller_addr: String,
-    timeout_sec: f64,
     runtime: Option<tokio::runtime::Runtime>, // Shared runtime for all requests
 }
 
@@ -23,14 +19,19 @@ impl PyExpertKitClient {
         let timeout = timeout_sec.unwrap_or(2.0);
 
         // Create ONE shared Tokio runtime for all requests
-        let runtime = tokio::runtime::Runtime::new().map_err(|e| {
-            pyo3::exceptions::PyRuntimeError::new_err(format!("Failed to create runtime: {}", e))
-        })?;
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(DEFAULT_THREAD_NUM)
+            .enable_all()
+            .build()
+            .map_err(|e| {
+                pyo3::exceptions::PyRuntimeError::new_err(format!(
+                    "Failed to create runtime: {}",
+                    e
+                ))
+            })?;
 
         Ok(Self {
-            client: Some(RustExpertKitClient::new(controller_addr.clone(), timeout)),
-            controller_addr,
-            timeout_sec: timeout,
+            client: Some(RustExpertKitClient::new(controller_addr, timeout)),
             runtime: Some(runtime),
         })
     }
@@ -105,20 +106,5 @@ impl PyExpertKitClient {
                 .block_on(async { client.refresh_routing().await })
                 .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
         })
-    }
-
-    /// Get routing table version
-    fn get_routing_version(&self, py: Python) -> PyResult<u64> {
-        let client = self
-            .client
-            .as_ref()
-            .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("Client not initialized"))?;
-
-        let runtime = self
-            .runtime
-            .as_ref()
-            .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("Runtime not initialized"))?;
-
-        py.allow_threads(|| Ok(runtime.block_on(async { client.get_routing_version().await })))
     }
 }
