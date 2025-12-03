@@ -48,7 +48,7 @@ class ExpertKitClient:
         """
         Forward computation to experts.
 
-        All async operations happen in Rust - this is synchronous from Python's perspective.
+        Serializes input once, Rust handles all decomposition and reconstruction.
 
         Args:
             expert_ids: Expert IDs for each sequence [batch_size, n_routed_experts]
@@ -57,60 +57,23 @@ class ExpertKitClient:
         Returns:
             Output tensor [batch_size, n_routed_experts, expert_dim]
         """
-        # Decompose requests by expert (as Rust expects)
-        expert_to_sequences = {}
-        for seq_idx, experts in enumerate(expert_ids):
-            for expert_idx, expert_id in enumerate(experts):
-                if expert_id not in expert_to_sequences:
-                    expert_to_sequences[expert_id] = []
-                expert_to_sequences[expert_id].append((seq_idx, expert_idx))
+        origin_device = hidden_state.device
 
-        # Prepare all expert data
-        all_expert_ids = []
-        all_tensor_data = []
-        expert_mapping = []
+        # Serialize input once
+        hidden_state_bytes = safetensors.torch.save(
+            {"data": hidden_state.cpu().contiguous()}
+        )
 
-        for expert_id, seq_positions in expert_to_sequences.items():
-            seq_indices = [pos[0] for pos in seq_positions]
-            expert_input = hidden_state[seq_indices].contiguous().cpu()
+        logger.debug(
+            f"Sending batch_size={len(expert_ids)} to Rust (all processing in Rust)"
+        )
 
-            # Serialize to safetensors
-            tensor_bytes = safetensors.torch.save({"data": expert_input})
+        # Rust does everything: decompose, route, dispatch, reconstruct
+        response_bytes = self.rust_client.forward_expert(
+            expert_ids, hidden_state_bytes
+        )
 
-            all_expert_ids.append(expert_id)
-            all_tensor_data.append(tensor_bytes)
-            expert_mapping.append(
-                (expert_id, seq_positions, expert_input.shape))
+        # Deserialize output once
+        output = safetensors.torch.load(response_bytes)["data"]
 
-        # Send all experts to Rust client (blocks until all complete)
-        logger.debug(f"Sending {len(all_expert_ids)} experts to Rust client")
-        responses = self.rust_client.send_expert_batch(
-            all_expert_ids, all_tensor_data)
-
-        # Reconstruct output in original format
-        batch_size = len(expert_ids)
-        n_experts_per_seq = len(expert_ids[0]) if expert_ids else 0
-
-        result = [[None for _ in range(n_experts_per_seq)]
-                  for _ in range(batch_size)]
-
-        for (expert_id, seq_positions, input_shape), response_bytes in zip(expert_mapping, responses):
-            # Deserialize response
-            expert_output = safetensors.torch.load(response_bytes)["data"]
-
-            # Place outputs back in correct positions
-            for output_idx, (seq_idx, expert_pos) in enumerate(seq_positions):
-                result[seq_idx][expert_pos] = expert_output[output_idx]
-
-        # Convert to tensor
-        output_tensors = []
-        for seq_result in result:
-            seq_tensors = [t for t in seq_result if t is not None]
-            if len(seq_tensors) != n_experts_per_seq:
-                raise RuntimeError(
-                    f"Incomplete result: got {len(seq_tensors)}, expected {n_experts_per_seq}"
-                )
-            output_tensors.append(torch.stack(seq_tensors, dim=0))
-
-        final_output = torch.stack(output_tensors, dim=0)
-        return final_output.to(hidden_state.device)
+        return output.to(origin_device)

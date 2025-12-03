@@ -30,6 +30,10 @@ libc = "0.2"
 # Phase 4 dependencies
 futures = "0.3"
 
+# Tensor processing
+safetensors = { workspace = true }
+ndarray = { workspace = true }
+
 [build-dependencies]
 tonic-build = "0.11"
 

@@ -89,6 +89,37 @@ impl PyExpertKitClient {
             .collect())
     }
 
+    /// Forward expert computation
+    fn forward_expert<'py>(
+        &self,
+        py: Python<'py>,
+        expert_ids: Vec<Vec<String>>,
+        hidden_state: &PyBytes,
+    ) -> PyResult<&'py PyBytes> {
+        let client = self
+            .client
+            .as_ref()
+            .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("Client not initialized"))?;
+
+        let runtime = self
+            .runtime
+            .as_ref()
+            .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("Runtime not initialized"))?;
+
+        // Convert to Vec<u8>
+        let hidden_state_bytes = hidden_state.as_bytes().to_vec();
+
+        // Release GIL and do all processing in Rust
+        let response_bytes = py.allow_threads(|| {
+            runtime
+                .block_on(async { client.forward_expert(expert_ids, hidden_state_bytes).await })
+                .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
+        })?;
+
+        // Return as PyBytes
+        Ok(PyBytes::new(py, &response_bytes))
+    }
+
     /// Refresh routing table
     fn refresh_routing(&self, py: Python) -> PyResult<()> {
         let client = self
