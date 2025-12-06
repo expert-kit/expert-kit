@@ -1,9 +1,10 @@
 use pyo3::prelude::*;
-use pyo3::types::PyBytes;
+use pyo3::types::PyAny;
 
 use crate::client::ExpertKitClient as RustExpertKitClient;
+use crate::utils::{TensorMetadata, pytorch_to_tch_tensor, tch_to_pytorch_tensor};
 
-const DEFAULT_THREAD_NUM: usize = 6;
+const DEFAULT_THREAD_NUM: usize = 16;
 
 /// High-level ExpertKit client with routing and batching
 #[pyclass]
@@ -55,47 +56,14 @@ impl PyExpertKitClient {
         })
     }
 
-    /// Send batch of expert requests with automatic worker-level batching
-    fn send_expert_batch<'py>(
-        &self,
-        py: Python<'py>,
-        expert_ids: Vec<String>,
-        tensor_data: Vec<&PyBytes>,
-    ) -> PyResult<Vec<&'py PyBytes>> {
-        let client = self
-            .client
-            .as_ref()
-            .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("Client not initialized"))?;
-
-        let runtime = self
-            .runtime
-            .as_ref()
-            .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("Runtime not initialized"))?;
-
-        // Convert Python bytes to Vec<Vec<u8>>
-        let tensors: Vec<Vec<u8>> = tensor_data.iter().map(|b| b.as_bytes().to_vec()).collect();
-
-        // Use the shared runtime (not a new one each time!)
-        let responses = py.allow_threads(|| {
-            runtime
-                .block_on(async { client.send_expert_batch(expert_ids, tensors).await })
-                .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
-        })?;
-
-        // Convert back to Python bytes
-        Ok(responses
-            .into_iter()
-            .map(|data| PyBytes::new(py, &data))
-            .collect())
-    }
-
     /// Forward expert computation
     fn forward_expert<'py>(
         &self,
         py: Python<'py>,
         expert_ids: Vec<Vec<String>>,
-        hidden_state: &PyBytes,
-    ) -> PyResult<&'py PyBytes> {
+        hidden_state: &PyAny,
+    ) -> PyResult<PyObject> {
+        let t = std::time::Instant::now();
         let client = self
             .client
             .as_ref()
@@ -106,18 +74,43 @@ impl PyExpertKitClient {
             .as_ref()
             .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("Runtime not initialized"))?;
 
-        // Convert to Vec<u8>
-        let hidden_state_bytes = hidden_state.as_bytes().to_vec();
+        // Extract tensor metadata from Python
+        let metadata = TensorMetadata::from_pytorch(hidden_state)?;
 
-        // Release GIL and do all processing in Rust
-        let response_bytes = py.allow_threads(|| {
+        eprintln!(
+            "[PyBinding-Time] 🚗 Runtime get and extracted tensor metadata in {:?} μs",
+            t.elapsed().as_micros()
+        );
+
+        // Convert PyTorch tensor to tch::Tensor
+        let t = std::time::Instant::now();
+        let input_tensor = pytorch_to_tch_tensor(hidden_state, &metadata)?;
+        eprintln!(
+            "[PyBinding-Time] 🚗 Converted PyTorch tensor to tch::Tensor in {:?} μs",
+            t.elapsed().as_micros()
+        );
+
+        // Release GIL and process
+        let t = std::time::Instant::now();
+        let output_tensor = py.allow_threads(|| {
             runtime
-                .block_on(async { client.forward_expert(expert_ids, hidden_state_bytes).await })
+                .block_on(async { client.forward_expert_tensor(expert_ids, input_tensor).await })
                 .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
         })?;
+        eprintln!(
+            "[PyBinding-Time] 🚗 Processed tensor in {:?} μs",
+            t.elapsed().as_micros()
+        );
 
-        // Return as PyBytes
-        Ok(PyBytes::new(py, &response_bytes))
+        // Convert tch::Tensor back to PyTorch tensor
+        let t = std::time::Instant::now();
+        let final_tensor = tch_to_pytorch_tensor(py, &output_tensor, &metadata.device_str)?;
+        eprintln!(
+            "[PyBinding-Time] 🚗 Converted tch::Tensor back to PyTorch tensor in {:?} μs",
+            t.elapsed().as_micros()
+        );
+
+        Ok(final_tensor.into())
     }
 
     /// Refresh routing table

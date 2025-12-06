@@ -48,32 +48,23 @@ class ExpertKitClient:
         """
         Forward computation to experts.
 
-        Serializes input once, Rust handles all decomposition and reconstruction.
+        Passes tensor pointer directly to Rust.
 
         Args:
             expert_ids: Expert IDs for each sequence [batch_size, n_routed_experts]
-            hidden_state: Input tensor [batch_size, hidden_dim]
+            hidden_state: Input tensor [batch_size, hidden_dim] (CPU or CUDA)
 
         Returns:
-            Output tensor [batch_size, n_routed_experts, expert_dim]
+            Output tensor [batch_size, n_routed_experts, expert_dim] (same device)
         """
-        origin_device = hidden_state.device
-
-        # Serialize input once
-        hidden_state_bytes = safetensors.torch.save(
-            {"data": hidden_state.cpu().contiguous()}
-        )
-
         logger.debug(
-            f"Sending batch_size={len(expert_ids)} to Rust (all processing in Rust)"
+            f"Sending batch_size={len(expert_ids)}"
         )
 
-        # Rust does everything: decompose, route, dispatch, reconstruct
-        response_bytes = self.rust_client.forward_expert(
-            expert_ids, hidden_state_bytes
-        )
+        # Pass tensor directly to Rust
+        # Rust accesses tensor memory directly via pointer
+        output = self.rust_client.forward_expert(expert_ids, hidden_state)
 
-        # Deserialize output once
-        output = safetensors.torch.load(response_bytes)["data"]
+        logger.debug(f"Received output shape: {output.shape}")
 
-        return output.to(origin_device)
+        return output

@@ -26,6 +26,7 @@ tower = "0.4"
 # Shared memory dependencies (Phase 3)
 nix = { version = "0.29", features = ["mman", "fs"] }
 libc = "0.2"
+dashmap = "6.0"
 
 # Phase 4 dependencies
 futures = "0.3"
@@ -33,6 +34,7 @@ futures = "0.3"
 # Tensor processing
 safetensors = { workspace = true }
 ndarray = { workspace = true }
+tch = { workspace = true }
 
 [build-dependencies]
 tonic-build = "0.11"

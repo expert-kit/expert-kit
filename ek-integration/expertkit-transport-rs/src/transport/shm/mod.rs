@@ -3,6 +3,7 @@ mod queue;
 pub use queue::{ShmQueue, ShmQueueError, ShmqWorkerReq, ShmqWorkerResp};
 
 use super::*;
+use dashmap::DashMap;
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
@@ -14,8 +15,13 @@ const RESP_CAPACITY: usize = 8 + 8 + MAX_TENSOR_SIZE;
 
 /// Shared memory transport for local workers
 pub struct ShmTransport {
-    /// Cache of opened request/response queue pairs
-    connections: Arc<Mutex<HashMap<String, (ShmQueue, ShmQueue)>>>,
+    /// Cache of request queues
+    req_connections: Arc<DashMap<String, Arc<Mutex<ShmQueue>>>>,
+    /// Cache of response queues
+    resp_connections: Arc<DashMap<String, Arc<Mutex<ShmQueue>>>>,
+    /// Pending responses cache
+    /// Maps worker endpoint -> (response_id -> response)
+    pending_responses: Arc<DashMap<String, Arc<Mutex<HashMap<usize, ShmqWorkerResp>>>>>,
     /// Timeout for operations
     timeout: std::time::Duration,
 }
@@ -23,9 +29,20 @@ pub struct ShmTransport {
 impl ShmTransport {
     pub fn new(timeout_sec: f64) -> Self {
         Self {
-            connections: Arc::new(Mutex::new(HashMap::new())),
+            req_connections: Arc::new(DashMap::new()),
+            resp_connections: Arc::new(DashMap::new()),
+            pending_responses: Arc::new(DashMap::new()),
             timeout: std::time::Duration::from_secs_f64(timeout_sec),
         }
+    }
+
+    /// Get or create pending response map for a worker
+    fn get_pending_map(&self, endpoint: &str) -> Arc<Mutex<HashMap<usize, ShmqWorkerResp>>> {
+        self.pending_responses
+            .entry(endpoint.to_string())
+            .or_insert_with(|| Arc::new(Mutex::new(HashMap::new())))
+            .value()
+            .clone()
     }
 
     /// Discover worker queue by scanning /dev/shm
@@ -60,7 +77,7 @@ impl ShmTransport {
 
         eprintln!("[ShmTransport] Found worker queues, opening...");
 
-        // Open queues (don't create - worker creates them!)
+        // Open queues
         let req_queue = ShmQueue::open(&req_name, 16, REQ_CAPACITY)
             .ok_or_else(|| anyhow::anyhow!("Failed to open request queue: {}", req_name))?;
 
@@ -72,16 +89,64 @@ impl ShmTransport {
         Ok((req_queue, resp_queue))
     }
 
-    /// Get or create connection to worker
-    async fn get_connection(&self, endpoint: &str) -> Result<()> {
-        let mut connections = self.connections.lock().await;
-
-        if !connections.contains_key(endpoint) {
-            let (req_queue, resp_queue) = self.discover_worker(endpoint).await?;
-            connections.insert(endpoint.to_string(), (req_queue, resp_queue));
+    /// Get or create request queue for sending
+    async fn get_req_queue(&self, endpoint: &str) -> Result<Arc<Mutex<ShmQueue>>> {
+        // Fast path: check if request queue exists
+        if let Some(queue) = self.req_connections.get(endpoint) {
+            return Ok(queue.value().clone());
         }
 
-        Ok(())
+        // Slow path: discover worker and create both queues
+        let (req_queue, resp_queue) = self.discover_worker(endpoint).await?;
+
+        let req_arc = Arc::new(Mutex::new(req_queue));
+        let resp_arc = Arc::new(Mutex::new(resp_queue));
+
+        // Insert both queues
+        self.req_connections
+            .entry(endpoint.to_string())
+            .or_insert_with(|| req_arc.clone());
+        self.resp_connections
+            .entry(endpoint.to_string())
+            .or_insert(resp_arc);
+
+        // Return the inserted value (in case another thread won)
+        Ok(self
+            .req_connections
+            .get(endpoint)
+            .expect("Just inserted")
+            .value()
+            .clone())
+    }
+
+    /// Get or create response queue for receiving
+    async fn get_resp_queue(&self, endpoint: &str) -> Result<Arc<Mutex<ShmQueue>>> {
+        // Fast path: check if response queue exists
+        if let Some(queue) = self.resp_connections.get(endpoint) {
+            return Ok(queue.value().clone());
+        }
+
+        // Slow path: discover worker and create both queues
+        let (req_queue, resp_queue) = self.discover_worker(endpoint).await?;
+
+        let req_arc = Arc::new(Mutex::new(req_queue));
+        let resp_arc = Arc::new(Mutex::new(resp_queue));
+
+        // Insert both queues
+        self.req_connections
+            .entry(endpoint.to_string())
+            .or_insert(req_arc);
+        self.resp_connections
+            .entry(endpoint.to_string())
+            .or_insert_with(|| resp_arc.clone());
+
+        // Return the inserted value
+        Ok(self
+            .resp_connections
+            .get(endpoint)
+            .expect("Just inserted")
+            .value()
+            .clone())
     }
 }
 
@@ -92,32 +157,31 @@ impl Transport for ShmTransport {
         endpoint: &WorkerEndpoint,
         requests: Vec<ExpertRequest>,
     ) -> Result<Vec<ExpertResponse>> {
-        // Extract queue prefix from endpoint
         let queue_prefix = &endpoint.shm_queue_prefix;
 
-        // Ensure connection exists
-        self.get_connection(queue_prefix).await?;
+        // Get queue handles (separate locks!)
+        let req_queue_arc = self.get_req_queue(queue_prefix).await?;
+        let resp_queue_arc = self.get_resp_queue(queue_prefix).await?;
+        let pending_map = self.get_pending_map(queue_prefix);
 
-        let mut connections = self.connections.lock().await;
-        let (req_queue, resp_queue) = connections
-            .get_mut(queue_prefix)
-            .ok_or_else(|| anyhow::anyhow!("Connection not found for {}", queue_prefix))?;
-
-        // Send all requests
+        // Send all requests - only locks req_queue
         let mut request_ids = Vec::new();
-        for req in &requests {
-            let shm_req = ShmqWorkerReq::new(&req.expert_id, &req.tensor_data);
-            let req_id = shm_req.id;
+        {
+            let mut req_queue = req_queue_arc.lock().await;
+            for req in &requests {
+                let shm_req = ShmqWorkerReq::new(&req.expert_id, &req.tensor_data);
+                let req_id = shm_req.id;
 
-            // Send request
-            req_queue
-                .send(&shm_req)
-                .map_err(|e| anyhow::anyhow!("Failed to send request: {}", e))?;
+                // Send request
+                req_queue
+                    .send(&shm_req)
+                    .map_err(|e| anyhow::anyhow!("Failed to send request: {}", e))?;
 
-            request_ids.push(req_id);
+                request_ids.push(req_id);
+            }
         }
 
-        // Collect responses (may arrive out of order)
+        // Collect responses
         let mut responses_map: HashMap<usize, ShmqWorkerResp> = HashMap::new();
         let start = std::time::Instant::now();
 
@@ -130,17 +194,44 @@ impl Transport for ShmTransport {
                 ));
             }
 
-            // Try to receive response
-            match resp_queue.recv::<ShmqWorkerResp>() {
+            // Check if responses are in the pending map
+            {
+                let mut pending = pending_map.lock().await;
+                for &req_id in &request_ids {
+                    if let Some(resp) = pending.remove(&req_id) {
+                        responses_map.insert(req_id, resp);
+                    }
+                }
+            }
+
+            // If we have all responses, break early
+            if responses_map.len() == requests.len() {
+                break;
+            }
+
+            // Try to receive a response from the queue
+            let recv_result = {
+                let mut resp_queue = resp_queue_arc.lock().await;
+                resp_queue.recv::<ShmqWorkerResp>()
+            };
+
+            match recv_result {
                 Ok(resp) => {
+                    let resp_id = resp.id;
                     // Check if this is one of our responses
-                    if request_ids.contains(&resp.id) {
-                        responses_map.insert(resp.id, resp);
+                    if request_ids.contains(&resp_id) {
+                        responses_map.insert(resp_id, resp);
+                    } else {
+                        let mut pending = pending_map.lock().await;
+                        pending.insert(resp_id, resp);
+                        eprintln!(
+                            "[ShmTransport] Response {} not for this batch, saved for another task",
+                            resp_id
+                        );
                     }
                 }
                 Err(ShmQueueError::Empty) => {
-                    // tokio::time::sleep(tokio::time::Duration::from_micros(1)).await;
-                    continue;
+                    tokio::time::sleep(tokio::time::Duration::from_micros(1)).await;
                 }
                 Err(e) => {
                     return Err(anyhow::anyhow!("Failed to receive response: {}", e));

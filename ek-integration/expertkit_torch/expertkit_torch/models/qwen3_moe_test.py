@@ -27,7 +27,6 @@ import os
 import time
 import torch
 import torch.nn.functional as F
-import safetensors.torch
 
 from typing import Optional, Dict, Any, List
 from transformers import (
@@ -37,18 +36,10 @@ from transformers import (
 from transformers.utils.logging import set_verbosity_error
 from transformers.models.qwen3_moe import modeling_qwen3_moe as qwen3_moe
 from torch import nn
-from expertkit_torch.grpc_client_new import ExpertKitClient as PythonExpertKitClient
+from expertkit_torch.grpc_client_new import ExpertKitClient
 
 from expertkit_torch.utils.profiler_manager import ProfilerManager
 from line_profiler import profile
-
-# Import Rust client if available
-try:
-    from expertkit_transport import ExpertKitClient as RustExpertKitClient
-    RUST_CLIENT_AVAILABLE = True
-except ImportError:
-    RUST_CLIENT_AVAILABLE = False
-    RustExpertKitClient = None
 
 set_verbosity_error()
 
@@ -65,163 +56,25 @@ else:
     device = "cpu"
 
 
-def _serialize_tensor(tensor: torch.Tensor) -> bytes:
-    """Serialize tensor to bytes using safetensors format (matches worker expectation)."""
-    return safetensors.torch.save({"data": tensor})
-
-
-def _deserialize_tensor(data: bytes) -> torch.Tensor:
-    """Deserialize tensor from bytes (safetensors format)."""
-    return safetensors.torch.load(data)["data"]
-
-
-class RustClientAdapter:
-    """
-    Adapter to make Rust client compatible with Python client interface.
-    """
-
-    def __init__(self, controller_addr: str, timeout_sec: float = 15.0):
-        if not RUST_CLIENT_AVAILABLE:
-            raise RuntimeError(
-                "Rust client not available. Install with: "
-                "cd ek-integration/expertkit-transport-rs && maturin develop --release"
-            )
-
-        # Create Rust client and connect immediately
-        self.client = RustExpertKitClient(controller_addr, timeout_sec)
-        self.client.connect()
-        print(f"[RustClient] Connected to {controller_addr}")
-
-    def forward_expert(
-        self,
-        expert_ids: List[List[str]],
-        hidden_state: torch.Tensor
-    ) -> torch.Tensor:
-        """
-        Forward computation to experts (matches controller's executor pattern).
-
-        The controller groups sequences by expert and sends ONE request per expert group.
-        Each request contains ONE batched safetensors blob with all sequences stacked.
-
-        Args:
-            expert_ids: Expert IDs for each sequence [batch_size, n_routed_experts]
-            hidden_state: Input tensor [batch_size, hidden_dim]
-
-        Returns:
-            Output tensor [batch_size, n_routed_experts, expert_dim]
-        """
-        origin_device = hidden_state.device
-        batch_size = len(expert_ids)
-        n_experts_per_seq = len(expert_ids[0]) if expert_ids else 0
-
-        # Group sequences by expert (matches controller's break_down_to_egress)
-        expert_to_seq = {}  # expert_id -> [(seq_idx, expert_idx), ...]
-
-        for seq_idx, experts in enumerate(expert_ids):
-            for expert_idx, expert_id in enumerate(experts):
-                if expert_id not in expert_to_seq:
-                    expert_to_seq[expert_id] = []
-                expert_to_seq[expert_id].append((seq_idx, expert_idx))
-
-        # Prepare ALL expert data at once for parallel sending
-        all_expert_ids = []
-        all_tensor_data = []
-        # Track (expert_id, seq_positions) for reconstruction
-        expert_mapping = []
-
-        for expert_id, seq_positions in expert_to_seq.items():
-            # Extract hidden states for ALL sequences that need this expert
-            seq_indices = [pos[0] for pos in seq_positions]
-            expert_input = hidden_state[seq_indices]  # [num_seqs, hidden_dim]
-
-            # Ensure contiguous and move to CPU
-            expert_input = expert_input.contiguous().cpu()
-
-            # Serialize as ONE safetensors blob containing the batched tensor
-            tensor_data = _serialize_tensor(expert_input)
-
-            all_expert_ids.append(expert_id)
-            all_tensor_data.append(tensor_data)
-            expert_mapping.append(
-                (expert_id, seq_positions, expert_input.shape))
-
-        # Send ALL expert requests at once - Rust client handles parallel execution
-        print(
-            f"[RustAdapter] Sending {len(all_expert_ids)} experts in parallel...")
-        responses = self.client.send_expert_batch(
-            all_expert_ids, all_tensor_data)
-
-        # Process all responses
-        expert_outputs = {}
-        for (expert_id, seq_positions, input_shape), response_bytes in zip(expert_mapping, responses):
-            expert_output = _deserialize_tensor(
-                response_bytes)  # [num_seqs, expert_dim]
-
-            print(f"[RustAdapter] Expert {expert_id}: sent {len(seq_positions)} seqs, "
-                  f"input shape {input_shape}, output shape {expert_output.shape}")
-
-            expert_outputs[expert_id] = expert_output
-
-        # Reconstruct output in correct format [batch_size, n_experts_per_seq, expert_dim]
-        expert_dim = list(expert_outputs.values())[0].shape[-1]
-        result = torch.zeros(
-            batch_size, n_experts_per_seq, expert_dim,
-            dtype=hidden_state.dtype,
-            device=origin_device
-        )
-
-        for expert_id, seq_positions in expert_to_seq.items():
-            expert_output = expert_outputs[expert_id].to(origin_device)
-
-            for output_idx, (seq_idx, expert_pos) in enumerate(seq_positions):
-                result[seq_idx, expert_pos] = expert_output[output_idx]
-
-        return result
-
-
 def intercept_moe(
     enable_ek: bool = True,
     ek_addr: str = "localhost:5002",
     ek_model_name: str = "qwen3",
-    use_rust_client: bool = False,
 ):
     class InterceptedMoE(nn.Module):
-        client = None  # Can be either PythonExpertKitClient or RustClientAdapter
+        client = None  # ExpertKitClient with zero-copy tensor API
 
         def __init__(self, config):
             super().__init__()
             global layer_idx
             if enable_ek and InterceptedMoE.client is None:
-                # Create ExpertKit client (Python or Rust)
-                if use_rust_client:
-                    if not RUST_CLIENT_AVAILABLE:
-                        print(
-                            "[WARNING] Rust client requested but not available. "
-                            "Install with: cd ek-integration/expertkit-transport-rs && maturin develop --release"
-                        )
-                        print("[WARNING] Falling back to Python client")
-                        use_rust = False
-                    else:
-                        use_rust = True
-                else:
-                    use_rust = False
-
-                if use_rust:
-                    # Use Rust client
-                    InterceptedMoE.client = RustClientAdapter(
-                        controller_addr=ek_addr,
-                        timeout_sec=DEFAULT_TIMEOUT_INTVAL,
-                    )
-                    print(f"[ExpertKit] Using Rust client")
-                else:
-                    # Use Python client wrapper (delegates to Rust)
-                    InterceptedMoE.client = PythonExpertKitClient(
-                        controller_addr=ek_addr,
-                        timeout_sec=DEFAULT_TIMEOUT_INTVAL,
-                    )
-                    print(f"[ExpertKit] Using Python client (wrapper around Rust)")
-
-                print(f"[ExpertKit] Client connected: controller={ek_addr}")
+                # Create ExpertKit client (zero-copy Rust implementation)
+                InterceptedMoE.client = ExpertKitClient(
+                    controller_addr=ek_addr,
+                    timeout_sec=DEFAULT_TIMEOUT_INTVAL,
+                )
+                print(
+                    f"[ExpertKit] Client connected (zero-copy): controller={ek_addr}")
             self.layer_id = layer_idx
             layer_idx += 1
             layer_idx = layer_idx % config.num_hidden_layers
@@ -264,6 +117,7 @@ def intercept_moe(
                 ]
                 expert_ids.append(ids)
 
+            print(f"🚀dtype: {hidden_states.dtype}")
             outputs = self.client.forward_expert(
                 expert_ids=expert_ids, hidden_state=hidden_states
             )
@@ -387,7 +241,6 @@ def evaluate_batch(
     enable_ek=True,
     ek_addr="localhost:5002",
     ek_model_name="qwen3",
-    use_rust_client=False,
 ) -> Dict[str, Any]:
     """
     Batch inference with performance profiling.
@@ -396,7 +249,6 @@ def evaluate_batch(
         model_path: Path to the pretrained model
         prompts: List of prompt strings for batch processing
         enable_ek: Whether to enable expert knowledge
-        use_rust_client: Whether to use Rust transport client (faster)
 
     Returns:
         Dictionary containing results and performance metrics
@@ -413,7 +265,6 @@ def evaluate_batch(
         enable_ek=enable_ek,
         ek_addr=ek_addr,
         ek_model_name=ek_model_name,
-        use_rust_client=use_rust_client,
     )
 
     # Load the tokenizer and the model only once
@@ -551,13 +402,6 @@ def main():
         help="The address of the ExpertKit controller.",
     )
     parser.add_argument(
-        "--use_rust_client",
-        action="store_true",
-        default=False,
-        help="Use Rust transport client for better performance. "
-             "Requires: cd ek-integration/expertkit-transport-rs && maturin develop --release",
-    )
-    parser.add_argument(
         "--detail_profile",
         action="store_true",
         help="Enable detailed profiling of model components (attention vs expert).",
@@ -634,7 +478,6 @@ def main():
                 enable_ek=args.enable_ek,
                 ek_addr=args.ek_addr,
                 ek_model_name=args.ek_model_name,
-                use_rust_client=args.use_rust_client,
                 output_max_length=args.output_max,
             )
             aggregated_results.extend(batch_result["results"])

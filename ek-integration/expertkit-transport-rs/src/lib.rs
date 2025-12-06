@@ -4,6 +4,7 @@ mod client;
 mod python;
 mod routing;
 mod transport;
+mod utils;
 
 use python::bindings::PyExpertKitClient;
 
