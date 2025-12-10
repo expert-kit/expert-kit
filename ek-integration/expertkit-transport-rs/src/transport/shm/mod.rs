@@ -7,7 +7,7 @@ use dashmap::DashMap;
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
-use tokio::sync::Mutex;
+use parking_lot::Mutex;
 
 const MAX_TENSOR_SIZE: usize = 64 * 1024 * 1024; // 64 MB
 const REQ_CAPACITY: usize = 8 + 64 + 8 + MAX_TENSOR_SIZE;
@@ -167,7 +167,7 @@ impl Transport for ShmTransport {
         // Send all requests - only locks req_queue
         let mut request_ids = Vec::new();
         {
-            let mut req_queue = req_queue_arc.lock().await;
+            let mut req_queue = req_queue_arc.lock();
             for req in &requests {
                 let shm_req = ShmqWorkerReq::new(&req.expert_id, &req.tensor_data);
                 let req_id = shm_req.id;
@@ -196,7 +196,7 @@ impl Transport for ShmTransport {
 
             // Check if responses are in the pending map
             {
-                let mut pending = pending_map.lock().await;
+                let mut pending = pending_map.lock();
                 for &req_id in &request_ids {
                     if let Some(resp) = pending.remove(&req_id) {
                         responses_map.insert(req_id, resp);
@@ -209,9 +209,9 @@ impl Transport for ShmTransport {
                 break;
             }
 
-            // Try to receive a response from the queue
+            // Try to receive response (parking_lot mutex is fast enough for direct use)
             let recv_result = {
-                let mut resp_queue = resp_queue_arc.lock().await;
+                let mut resp_queue = resp_queue_arc.lock();
                 resp_queue.recv::<ShmqWorkerResp>()
             };
 
@@ -222,16 +222,13 @@ impl Transport for ShmTransport {
                     if request_ids.contains(&resp_id) {
                         responses_map.insert(resp_id, resp);
                     } else {
-                        let mut pending = pending_map.lock().await;
+                        let mut pending = pending_map.lock();
                         pending.insert(resp_id, resp);
-                        eprintln!(
-                            "[ShmTransport] Response {} not for this batch, saved for another task",
-                            resp_id
-                        );
                     }
                 }
                 Err(ShmQueueError::Empty) => {
-                    tokio::time::sleep(tokio::time::Duration::from_micros(1)).await;
+                    // Yield to allow other tasks to run
+                    tokio::task::yield_now().await;
                 }
                 Err(e) => {
                     return Err(anyhow::anyhow!("Failed to receive response: {}", e));

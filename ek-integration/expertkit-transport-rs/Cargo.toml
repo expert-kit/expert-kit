@@ -27,6 +27,7 @@ tower = "0.4"
 nix = { version = "0.29", features = ["mman", "fs"] }
 libc = "0.2"
 dashmap = "6.0"
+parking_lot = "0.12"
 
 # Phase 4 dependencies
 futures = "0.3"

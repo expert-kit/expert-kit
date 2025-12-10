@@ -1625,6 +1625,7 @@ dependencies = [
  "libc",
  "ndarray",
  "nix 0.29.0",
+ "parking_lot",
  "prost 0.12.6",
  "pyo3",
  "safetensors 0.5.3",

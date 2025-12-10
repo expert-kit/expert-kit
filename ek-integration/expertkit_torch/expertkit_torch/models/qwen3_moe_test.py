@@ -117,21 +117,31 @@ def intercept_moe(
                 ]
                 expert_ids.append(ids)
 
-            print(f"🚀dtype: {hidden_states.dtype}")
+            forward_start_time = time.time()
             outputs = self.client.forward_expert(
                 expert_ids=expert_ids, hidden_state=hidden_states
             )
+            forward_cost = time.time() - forward_start_time
+
+            to_gpu_start_time = time.time()
             outputs = outputs.to(device=hidden_states.device,
                                  dtype=hidden_states.dtype)
+            to_gpu_cost = time.time() - to_gpu_start_time
+
+            sum_and_reshape_start_time = time.time()
             expanded_weights = routing_weights.unsqueeze(-1)
             output = torch.sum(expanded_weights * outputs, dim=1)
 
             final_hidden_states = output.reshape(
                 batch_size, sequence_length, hidden_dim
             )
+            sum_and_reshape_cost = time.time() - sum_and_reshape_start_time
 
             # Record expert computation time if profiler is available
-            end_time = time.time()
+            full_cost = time.time() - start_time
+
+            print("🔑 full_cost: {:.6f}μs, forward_cost: {:.6f}μs, to_gpu_cost: {:.6f}μs, sum_and_reshape_cost: {:.6f}μs".format(
+                full_cost * 1e6, forward_cost * 1e6, to_gpu_cost * 1e6, sum_and_reshape_cost * 1e6))
 
             return final_hidden_states
 
@@ -466,7 +476,7 @@ def main():
         raise ValueError("Invalid dataset specified.")
 
     test_batch_sizes = [1, 2, 4, 8, 16, 32, 64, 128, 256]
-    test_batch_sizes = [64]
+    test_batch_sizes = [1]
     aggregated_results = []
     for batch_size in test_batch_sizes:
         for prompts in range(0, len(test_prompts), batch_size):

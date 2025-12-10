@@ -1,5 +1,6 @@
 use anyhow::Result;
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use crate::routing::RoutingClient;
 use crate::transport::{ExpertRequest, ExpertResponse, Transport, auto::AutoTransport};
@@ -10,14 +11,14 @@ use tch::Tensor;
 /// High-level client with worker-level batching and routing
 pub struct ExpertKitClient {
     routing: RoutingClient,
-    transport: AutoTransport,
+    transport: Arc<AutoTransport>,
 }
 
 impl ExpertKitClient {
     pub fn new(controller_addr: String, timeout_sec: f64) -> Self {
         Self {
             routing: RoutingClient::new(controller_addr),
-            transport: AutoTransport::new(timeout_sec),
+            transport: Arc::new(AutoTransport::new(timeout_sec)),
         }
     }
 
@@ -79,8 +80,8 @@ impl ExpertKitClient {
             ));
         }
 
-        // Build requests: slice tensor directly
-        let mut tasks = Vec::new();
+        // Build requests: slice tensor directly and spawn tasks immediately
+        let mut handles = Vec::new();
         let mut expert_metadata = Vec::new();
 
         let task_create_t = std::time::Instant::now();
@@ -95,38 +96,47 @@ impl ExpertKitClient {
             expert_metadata.push((expert_id.clone(), seq_positions.clone()));
 
             let hidden_state_ref = hidden_state.shallow_clone();
+            let expert_id_clone = expert_id.clone();
+            let seq_positions_clone = seq_positions.clone();
+            let transport = Arc::clone(&self.transport);
 
-            // Create async task
-            let transport = &self.transport;
-            let task = async move {
-                // let task_create_t_clone = task_create_t.clone();
+            let handle = tokio::spawn(async move {
                 let sub_task_t = std::time::Instant::now();
+
+                eprintln!(
+                    "[Client-Time] ⚡ Task SPAWNED for expert {} at {:?} μs from task_create_t",
+                    expert_id_clone,
+                    task_create_t.elapsed().as_micros()
+                );
+
+                // Tensor operations run directly (they're already parallelized by being in separate tasks)
+                let prep_start = std::time::Instant::now();
+
                 // Extract sequence indices
-                let seq_indices: Vec<i64> = seq_positions
+                let seq_indices: Vec<i64> = seq_positions_clone
                     .iter()
                     .map(|(seq_idx, _)| *seq_idx as i64)
                     .collect();
 
-                // Create index tensor from slice and move to same device as hidden_state
+                // Create index tensor and slice
                 let index_tensor = Tensor::from_slice(&seq_indices);
-
-                // Slice the tensor
                 let expert_input = hidden_state_ref.index_select(0, &index_tensor);
 
                 // Serialize for network transfer
                 let tensor_bytes = serialize_tch_tensor_2_safetensor(&expert_input)?;
+                let num_sequences = seq_indices.len();
+
+                eprintln!(
+                    "[Client-Time] 🛸 BEFORE SEND for expert {} with {} sequences, prep took {:?} μs, cost from task create time {:?} μs",
+                    expert_id_clone,
+                    num_sequences,
+                    prep_start.elapsed().as_micros(),
+                    task_create_t.elapsed().as_micros()
+                );
 
                 // Create request
                 let request =
-                    ExpertRequest::new(expert_id.clone(), tensor_bytes, seq_indices.len());
-
-                eprintln!(
-                    "[Client-Time] 🛸 Created sub-task for expert {} with {} sequences in {:?} μs, cost from task create time {:?} μs",
-                    expert_id,
-                    seq_positions.len(),
-                    sub_task_t.elapsed().as_micros(),
-                    task_create_t.elapsed().as_micros()
-                );
+                    ExpertRequest::new(expert_id_clone.clone(), tensor_bytes, num_sequences);
 
                 let send_t = std::time::Instant::now();
                 let responses = transport
@@ -134,25 +144,29 @@ impl ExpertKitClient {
                     .await?;
 
                 eprintln!(
-                    "[Client-Time] 🔚 Sub-task for expert {} completed in {:?} μs, cost from send {:?} μs, cost from task create time {:?} μs",
-                    expert_id,
+                    "[Client-Time] 🔚 Sub-task for expert {} completed in {:?} μs, send_batch took {:?} μs, cost from task create time {:?} μs",
+                    expert_id_clone,
                     sub_task_t.elapsed().as_micros(),
                     send_t.elapsed().as_micros(),
                     task_create_t.elapsed().as_micros()
                 );
 
                 Ok::<(String, ExpertResponse), anyhow::Error>((
-                    expert_id.clone(),
+                    expert_id_clone,
                     responses.into_iter().next().unwrap(),
                 ))
-            };
+            });
 
-            tasks.push(task);
+            handles.push(handle);
         }
 
-        // Execute all requests in parallel
-        eprintln!("[Client] Sending {} parallel requests", tasks.len());
-        let results = futures::future::try_join_all(tasks).await?;
+        // Execute all requests in parallel and collect results
+        eprintln!("[Client] Spawned {} parallel tasks", handles.len());
+        let results = futures::future::try_join_all(handles.into_iter().map(|h| async move {
+            h.await
+                .map_err(|e| anyhow::anyhow!("Task join error: {}", e))?
+        }))
+        .await?;
 
         // Reconstruct output: place expert outputs back in original positions
         let n_experts_per_seq = expert_ids[0].len();
