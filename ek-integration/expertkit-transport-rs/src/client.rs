@@ -81,8 +81,8 @@ impl ExpertKitClient {
         }
 
         // Build requests: slice tensor directly and spawn tasks immediately
-        let mut handles = Vec::new();
-        let mut expert_metadata = Vec::new();
+        let mut jobs: tokio::task::JoinSet<Result<(String, Tensor)>> = tokio::task::JoinSet::new();
+        let mut expert_metadata: HashMap<String, Vec<(usize, usize)>> = HashMap::new();
 
         let task_create_t = std::time::Instant::now();
         for (expert_id, seq_positions) in expert_to_sequences.iter() {
@@ -93,14 +93,14 @@ impl ExpertKitClient {
                 .clone();
 
             // Store metadata for reconstruction
-            expert_metadata.push((expert_id.clone(), seq_positions.clone()));
+            expert_metadata.insert(expert_id.clone(), seq_positions.clone());
 
             let hidden_state_ref = hidden_state.shallow_clone();
             let expert_id_clone = expert_id.clone();
             let seq_positions_clone = seq_positions.clone();
-            let transport = Arc::clone(&self.transport);
+            let transport = self.transport.clone();
 
-            let handle = tokio::spawn(async move {
+            jobs.spawn(async move {
                 let sub_task_t = std::time::Instant::now();
 
                 eprintln!(
@@ -109,7 +109,7 @@ impl ExpertKitClient {
                     task_create_t.elapsed().as_micros()
                 );
 
-                // Tensor operations run directly (they're already parallelized by being in separate tasks)
+                // Tensor operations run directly
                 let prep_start = std::time::Instant::now();
 
                 // Extract sequence indices
@@ -151,22 +151,21 @@ impl ExpertKitClient {
                     task_create_t.elapsed().as_micros()
                 );
 
-                Ok::<(String, ExpertResponse), anyhow::Error>((
+                Ok((
                     expert_id_clone,
-                    responses.into_iter().next().unwrap(),
+                    deserialize_safetensor_2_tch_tensor(&responses.into_iter().next().unwrap().tensor_data).unwrap(),
                 ))
             });
-
-            handles.push(handle);
         }
 
         // Execute all requests in parallel and collect results
-        eprintln!("[Client] Spawned {} parallel tasks", handles.len());
-        let results = futures::future::try_join_all(handles.into_iter().map(|h| async move {
-            h.await
-                .map_err(|e| anyhow::anyhow!("Task join error: {}", e))?
-        }))
-        .await?;
+        eprintln!("[Client] Spawned {} parallel tasks", jobs.len());
+        let results: Vec<(String, Tensor)> = jobs
+            .join_all()
+            .await
+            .into_iter()
+            .map(|res: Result<(String, Tensor), _>| res.unwrap())
+            .collect();
 
         // Reconstruct output: place expert outputs back in original positions
         let n_experts_per_seq = expert_ids[0].len();
@@ -179,15 +178,14 @@ impl ExpertKitClient {
             output_tensors.push(row);
         }
 
-        for ((expert_id, seq_positions), (_expert_id_resp, response)) in
-            expert_metadata.iter().zip(results.iter())
-        {
-            // Deserialize response to tensor
-            let expert_output = deserialize_safetensor_2_tch_tensor(&response.tensor_data)?;
+        for (expert_id_resp, resp_tensor) in results.iter() {
+            let seq_positions = expert_metadata
+                .get(expert_id_resp)
+                .ok_or_else(|| anyhow::anyhow!("Missing metadata for expert {}", expert_id_resp))?;
 
             // Place each sequence's output in the correct position
             for (output_idx, (seq_idx, expert_pos)) in seq_positions.iter().enumerate() {
-                let seq_output = expert_output.get(output_idx as i64);
+                let seq_output = resp_tensor.get(output_idx as i64);
                 output_tensors[*seq_idx][*expert_pos] = Some(seq_output);
             }
         }
