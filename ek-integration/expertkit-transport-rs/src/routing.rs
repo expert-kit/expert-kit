@@ -1,4 +1,5 @@
 use anyhow::Result;
+use log::info;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -71,7 +72,7 @@ impl RoutingClient {
 
         *version = routing_response.version;
 
-        eprintln!(
+        info!(
             "Routing table updated: {} experts, version={}",
             table.len(),
             *version

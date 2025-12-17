@@ -1,4 +1,5 @@
 use super::*;
+use log::debug;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -105,7 +106,7 @@ impl Transport for GrpcTransport {
                 sequences,
             };
 
-            eprintln!(
+            debug!(
                 "[GrpcTransport] Sending request for expert {} with {} sequences, tensor size {} bytes",
                 req.expert_id,
                 req.num_sequences,
@@ -121,7 +122,7 @@ impl Transport for GrpcTransport {
             // The response is a complete safetensors blob
             let output_tensor = response.into_inner().output_tensor;
 
-            eprintln!(
+            debug!(
                 "[GrpcTransport] Received response for expert {}, size {} bytes",
                 req.expert_id,
                 output_tensor.len()

@@ -1,5 +1,6 @@
 use super::*;
 use crate::transport::{grpc::GrpcTransport, shm::ShmTransport};
+use log::info;
 
 /// Transport selector based on WorkerEndpoint channel type
 pub struct AutoTransport {
@@ -29,7 +30,7 @@ impl Transport for AutoTransport {
         match endpoint.channel.as_str() {
             "grpc" => {
                 // Worker has gRPC server - use gRPC transport
-                eprintln!(
+                info!(
                     "[AutoTransport] Using gRPC for worker {}",
                     endpoint.grpc_addr
                 );
@@ -46,7 +47,7 @@ impl Transport for AutoTransport {
             }
             "shm" => {
                 // Worker has shared memory queues - workers CREATE /dev/shm files!
-                eprintln!(
+                info!(
                     "[AutoTransport] Using SHM for worker {} (queue: {})",
                     endpoint.grpc_addr, endpoint.shm_queue_prefix
                 );

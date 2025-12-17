@@ -3,6 +3,7 @@ use pyo3::types::PyAny;
 
 use crate::client::ExpertKitClient as RustExpertKitClient;
 use crate::utils::{TensorMetadata, pytorch_to_tch_tensor, tch_to_pytorch_tensor};
+use env_logger;
 
 const DEFAULT_THREAD_NUM: usize = 16;
 
@@ -17,6 +18,7 @@ pub struct PyExpertKitClient {
 impl PyExpertKitClient {
     #[new]
     fn new(controller_addr: String, timeout_sec: Option<f64>) -> PyResult<Self> {
+        env_logger::init();
         let timeout = timeout_sec.unwrap_or(2.0);
 
         // Create ONE shared Tokio runtime for all requests

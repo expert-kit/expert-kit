@@ -4,6 +4,7 @@ pub use queue::{ShmQueue, ShmQueueError, ShmqWorkerReq, ShmqWorkerResp};
 
 use super::*;
 use dashmap::DashMap;
+use log::debug;
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
@@ -54,7 +55,7 @@ impl ShmTransport {
         let req_name = format!("ek-shmq-req-{}", worker_id);
         let resp_name = format!("ek-shmq-resp-{}", worker_id);
 
-        eprintln!(
+        debug!(
             "[ShmTransport] Looking for worker queues: {}, {}",
             req_name, resp_name
         );
@@ -75,7 +76,7 @@ impl ShmTransport {
             ));
         }
 
-        eprintln!("[ShmTransport] Found worker queues, opening...");
+        debug!("[ShmTransport] Found worker queues, opening...");
 
         // Open queues
         let req_queue = ShmQueue::open(&req_name, 16, REQ_CAPACITY)
@@ -84,7 +85,7 @@ impl ShmTransport {
         let resp_queue = ShmQueue::open(&resp_name, 16, RESP_CAPACITY)
             .ok_or_else(|| anyhow::anyhow!("Failed to open response queue: {}", resp_name))?;
 
-        eprintln!("[ShmTransport] Successfully opened worker queues");
+        debug!("[ShmTransport] Successfully opened worker queues");
 
         Ok((req_queue, resp_queue))
     }

@@ -1,4 +1,5 @@
 use anyhow::Result;
+use log::{debug, warn};
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyBytes, PyDict};
 use safetensors::{Dtype, SafeTensors, tensor::View};
@@ -160,7 +161,7 @@ impl TensorMetadata {
         let dtype_obj = py_tensor.getattr("dtype")?;
         let dtype_str: String = format!("{:?}", dtype_obj);
 
-        eprintln!(
+        debug!(
             "[PyBinding-Time] 🔧 Extracted tensor metadata in {:?} μs",
             t.elapsed().as_micros()
         );
@@ -178,7 +179,7 @@ impl TensorMetadata {
             s if s.contains("uint8") => tch::Kind::Uint8,
             s if s.contains("bool") => tch::Kind::Bool,
             _ => {
-                eprintln!(
+                warn!(
                     "[PyBinding] Unknown dtype: {}, defaulting to Float32",
                     dtype_str
                 );
@@ -186,7 +187,7 @@ impl TensorMetadata {
             }
         };
 
-        eprintln!(
+        debug!(
             "[PyBinding] Received tensor: shape={:?}, dtype={:?}, device={}, requires_grad={}",
             shape, tch_kind, device_str, requires_grad
         );
@@ -217,14 +218,14 @@ impl TensorMetadata {
 pub fn pytorch_to_tch_tensor(py_tensor: &PyAny, metadata: &TensorMetadata) -> PyResult<Tensor> {
     // For CUDA tensors, we MUST copy to CPU first before extracting pointer
     let cpu_tensor = if metadata.device_str == "cuda" {
-        eprintln!("[PyBinding] CUDA tensor detected, copying to CPU");
+        debug!("[PyBinding] CUDA tensor detected, copying to CPU");
         py_tensor.call_method0("cpu")?
     } else {
         py_tensor
     };
 
     let t = std::time::Instant::now();
-    eprintln!(
+    debug!(
         "[PyBinding-Time] 🔧 Prepared tensor on CPU in {:?} μs",
         t.elapsed().as_micros()
     );
@@ -232,7 +233,7 @@ pub fn pytorch_to_tch_tensor(py_tensor: &PyAny, metadata: &TensorMetadata) -> Py
     // Ensure contiguous layout
     let t = std::time::Instant::now();
     let cpu_tensor = cpu_tensor.call_method0("contiguous")?;
-    eprintln!(
+    debug!(
         "[PyBinding-Time] 🔧 Made tensor contiguous in {:?} μs",
         t.elapsed().as_micros()
     );
@@ -242,12 +243,12 @@ pub fn pytorch_to_tch_tensor(py_tensor: &PyAny, metadata: &TensorMetadata) -> Py
     let numel: usize = metadata.shape.iter().product::<i64>() as usize;
     let data_ptr = cpu_tensor.call_method0("data_ptr")?.extract::<usize>()?;
 
-    eprintln!(
+    debug!(
         "[PyBinding-Time] 🔧 Extracted data pointer in {:?} μs",
         t.elapsed().as_micros()
     );
 
-    eprintln!(
+    debug!(
         "[PyBinding] Extracting {} elements as {:?}",
         numel, metadata.tch_kind
     );
@@ -263,12 +264,12 @@ pub fn pytorch_to_tch_tensor(py_tensor: &PyAny, metadata: &TensorMetadata) -> Py
         })?
     };
 
-    eprintln!(
+    debug!(
         "[PyBinding-Time] 🔧 Created tch::Tensor in {:?} μs",
         t.elapsed().as_micros()
     );
 
-    eprintln!("[PyBinding] Created tch::Tensor: {:?}", input_tensor.size());
+    debug!("[PyBinding] Created tch::Tensor: {:?}", input_tensor.size());
 
     Ok(input_tensor)
 }
@@ -284,7 +285,7 @@ pub fn tch_to_pytorch_tensor<'py>(
     let output_shape: Vec<i64> = output_tensor.size();
     let cpu_output = output_tensor.to(tch::Device::Cpu);
 
-    eprintln!(
+    debug!(
         "[PyBinding] Got output tensor: shape={:?}, dtype={:?}",
         output_shape,
         cpu_output.kind()
@@ -362,7 +363,7 @@ pub fn tch_to_pytorch_tensor<'py>(
         }
     };
 
-    eprintln!(
+    debug!(
         "[PyBinding-Time] 🔧 Converted back to PyTorch tensor in {:?} μs",
         t.elapsed().as_micros()
     );

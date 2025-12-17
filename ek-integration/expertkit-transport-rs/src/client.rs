@@ -1,4 +1,5 @@
 use anyhow::Result;
+use log::{debug, info};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -38,7 +39,7 @@ impl ExpertKitClient {
         let batch_size = hidden_state.size()[0] as usize;
         let hidden_dim = hidden_state.size()[1] as usize;
 
-        eprintln!(
+        debug!(
             "[Client] forward_expert_tensor: batch_size={}, hidden_dim={}, device={:?}",
             batch_size,
             hidden_dim,
@@ -57,7 +58,7 @@ impl ExpertKitClient {
             }
         }
 
-        eprintln!(
+        info!(
             "[Client] Decomposed {} sequences into {} unique experts",
             expert_ids.len(),
             expert_to_sequences.len()
@@ -103,7 +104,7 @@ impl ExpertKitClient {
             jobs.spawn(async move {
                 let sub_task_t = std::time::Instant::now();
 
-                eprintln!(
+                debug!(
                     "[Client-Time] ⚡ Task SPAWNED for expert {} at {:?} μs from task_create_t",
                     expert_id_clone,
                     task_create_t.elapsed().as_micros()
@@ -126,7 +127,7 @@ impl ExpertKitClient {
                 let tensor_bytes = serialize_tch_tensor_2_safetensor(&expert_input)?;
                 let num_sequences = seq_indices.len();
 
-                eprintln!(
+                debug!(
                     "[Client-Time] 🛸 BEFORE SEND for expert {} with {} sequences, prep took {:?} μs, cost from task create time {:?} μs",
                     expert_id_clone,
                     num_sequences,
@@ -143,7 +144,7 @@ impl ExpertKitClient {
                     .send_batch(&worker_endpoint, vec![request])
                     .await?;
 
-                eprintln!(
+                debug!(
                     "[Client-Time] 🔚 Sub-task for expert {} completed in {:?} μs, send_batch took {:?} μs, cost from task create time {:?} μs",
                     expert_id_clone,
                     sub_task_t.elapsed().as_micros(),
@@ -159,15 +160,21 @@ impl ExpertKitClient {
         }
 
         // Execute all requests in parallel and collect results
-        eprintln!("[Client] Spawned {} parallel tasks", jobs.len());
+        info!("[Client] Spawned {} parallel tasks", jobs.len());
+        let t = std::time::Instant::now();
         let results: Vec<(String, Tensor)> = jobs
             .join_all()
             .await
             .into_iter()
             .map(|res: Result<(String, Tensor), _>| res.unwrap())
             .collect();
+        debug!(
+            "[Client-Time] 🚀 All expert tasks completed in {:?} μs",
+            t.elapsed().as_micros()
+        );
 
         // Reconstruct output: place expert outputs back in original positions
+        let t = std::time::Instant::now();
         let n_experts_per_seq = expert_ids[0].len();
         let mut output_tensors: Vec<Vec<Option<Tensor>>> = Vec::new();
         for _ in 0..batch_size {
@@ -177,7 +184,12 @@ impl ExpertKitClient {
             }
             output_tensors.push(row);
         }
+        debug!(
+            "[Client-Time] 🧩 Starting reconstruction of output tensors in {:?} μs",
+            t.elapsed().as_micros()
+        );
 
+        let t = std::time::Instant::now();
         for (expert_id_resp, resp_tensor) in results.iter() {
             let seq_positions = expert_metadata
                 .get(expert_id_resp)
@@ -189,10 +201,15 @@ impl ExpertKitClient {
                 output_tensors[*seq_idx][*expert_pos] = Some(seq_output);
             }
         }
+        debug!(
+            "[Client-Time] 🧩 Completed reconstruction of output tensors in {:?} μs",
+            t.elapsed().as_micros()
+        );
 
         // Stack tensors to create final output [batch_size, n_experts, expert_dim]
         let mut final_output_rows = Vec::new();
 
+        let t = std::time::Instant::now();
         for seq_outputs in output_tensors {
             let outputs: Vec<Tensor> = seq_outputs
                 .into_iter()
@@ -207,10 +224,15 @@ impl ExpertKitClient {
         // Stack all sequences
         let final_output = Tensor::stack(&final_output_rows, 0);
 
-        eprintln!(
+        debug!(
             "[Client] Reconstructed output shape: {:?}, device: {:?}",
             final_output.size(),
             final_output.device()
+        );
+
+        debug!(
+            "[Client-Time] 🧩 Completed stacking of final output tensors in {:?} μs",
+            t.elapsed().as_micros()
         );
 
         Ok(final_output)
