@@ -18,7 +18,10 @@ pub struct PyExpertKitClient {
 impl PyExpertKitClient {
     #[new]
     fn new(controller_addr: String, timeout_sec: Option<f64>) -> PyResult<Self> {
-        env_logger::init();
+        if env_logger::try_init().is_ok() {
+            log::info!("Logger initialized");
+        }
+
         let timeout = timeout_sec.unwrap_or(2.0);
 
         // Create ONE shared Tokio runtime for all requests

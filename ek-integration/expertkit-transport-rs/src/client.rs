@@ -27,6 +27,12 @@ impl ExpertKitClient {
     pub async fn connect(&mut self) -> Result<()> {
         self.routing.connect().await?;
         self.routing.fetch_routing(None).await?;
+
+        // Warm up connections to all known workers
+        let routing_table = self.routing.get_all_routing().await;
+        let endpoints: Vec<_> = routing_table.values().cloned().collect();
+        self.transport.warmup_connections(&endpoints).await?;
+
         Ok(())
     }
 
@@ -240,6 +246,13 @@ impl ExpertKitClient {
 
     /// Refresh routing table
     pub async fn refresh_routing(&self) -> Result<()> {
-        self.routing.fetch_routing(None).await
+        self.routing.fetch_routing(None).await?;
+
+        // Warm up connections to any new workers
+        let routing_table = self.routing.get_all_routing().await;
+        let endpoints: Vec<_> = routing_table.values().cloned().collect();
+        self.transport.warmup_connections(&endpoints).await?;
+
+        Ok(())
     }
 }

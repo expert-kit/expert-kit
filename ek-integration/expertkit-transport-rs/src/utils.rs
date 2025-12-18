@@ -102,15 +102,23 @@ impl View for SafeView<'_> {
 /// Serialize tch::Tensor to safetensors format
 pub fn serialize_tch_tensor_2_safetensor(tensor: &Tensor) -> Result<Vec<u8>> {
     // Convert to CPU and make contiguous
+    let copy_start = std::time::Instant::now();
     let cpu_tensor = tensor.to(tch::Device::Cpu).contiguous();
+    let copy_elapsed = copy_start.elapsed();
+    debug!("[GPU-Copy] 📥 GPU→CPU (serialize): {:?}", copy_elapsed);
 
     // Create SafeView
     let view = SafeView::try_from(&cpu_tensor)?;
 
     // Serialize using safetensors
+    let serialize_start = std::time::Instant::now();
     let views = vec![("data", view)];
-    safetensors::serialize(views, &None)
-        .map_err(|e| anyhow::anyhow!("Failed to serialize tensor: {}", e))
+    let result = safetensors::serialize(views, &None)
+        .map_err(|e| anyhow::anyhow!("Failed to serialize tensor: {}", e))?;
+    let serialize_elapsed = serialize_start.elapsed();
+    debug!("[Serialize] 📦 Safetensors: {:?} ({} bytes)", serialize_elapsed, result.len());
+
+    Ok(result)
 }
 
 /// Deserialize safetensors to tch::Tensor

@@ -2,12 +2,15 @@ use super::*;
 use crate::transport::{grpc::GrpcTransport, shm::ShmTransport};
 use log::info;
 
+#[cfg(feature = "rdma")]
+use crate::transport::rdma::RdmaTransport;
+
 /// Transport selector based on WorkerEndpoint channel type
 pub struct AutoTransport {
     grpc: GrpcTransport,
     shm: ShmTransport,
-    // TODO: Add RDMA transport when implemented
-    // rdma: RdmaTransport,
+    #[cfg(feature = "rdma")]
+    rdma: RdmaTransport,
 }
 
 impl AutoTransport {
@@ -15,7 +18,89 @@ impl AutoTransport {
         Self {
             grpc: GrpcTransport::new(timeout_sec),
             shm: ShmTransport::new(timeout_sec),
+            #[cfg(feature = "rdma")]
+            rdma: RdmaTransport::new(timeout_sec),
         }
+    }
+
+    /// Warm up connections to all workers in the routing table
+    pub async fn warmup_connections(&self, endpoints: &[WorkerEndpoint]) -> Result<()> {
+        info!(
+            "[AutoTransport] Warming up connections to {} workers",
+            endpoints.len()
+        );
+
+        let start = std::time::Instant::now();
+        let mut tasks: Vec<tokio::task::JoinHandle<Result<()>>> = Vec::new();
+
+        for endpoint in endpoints {
+            match endpoint.channel.as_str() {
+                "rdma" => {
+                    #[cfg(feature = "rdma")]
+                    {
+                        info!(
+                            "[AutoTransport] Pre-connecting RDMA to worker {} (TCP port {})",
+                            endpoint.grpc_addr, endpoint.rdma_tcp_port
+                        );
+                        let endpoint_clone = endpoint.clone();
+                        let rdma = self.rdma.clone();
+                        tasks.push(tokio::spawn(async move {
+                            rdma.warmup_connection(&endpoint_clone).await
+                        }));
+                    }
+                    #[cfg(not(feature = "rdma"))]
+                    {
+                        log::warn!(
+                            "[AutoTransport] Skipping RDMA warmup for {} (feature not enabled)",
+                            endpoint.grpc_addr
+                        );
+                    }
+                }
+                "shm" => {
+                    // SHM connections are lazy (just open existing files), so no warmup needed
+                    info!(
+                        "[AutoTransport] Skipping warmup for SHM worker {} (lazy connection)",
+                        endpoint.grpc_addr
+                    );
+                }
+                "grpc" => {
+                    // gRPC connections are also lazy, no warmup needed
+                    info!(
+                        "[AutoTransport] Skipping warmup for gRPC worker {} (lazy connection)",
+                        endpoint.grpc_addr
+                    );
+                }
+                _ => {}
+            }
+        }
+
+        // Wait for all warmup tasks to complete
+        let results = futures::future::join_all(tasks).await;
+        let mut success_count = 0;
+        let mut error_count = 0;
+
+        for result in results {
+            match result {
+                Ok(Ok(_)) => success_count += 1,
+                Ok(Err(e)) => {
+                    log::error!("[AutoTransport] Warmup connection failed: {}", e);
+                    error_count += 1;
+                }
+                Err(e) => {
+                    log::error!("[AutoTransport] Warmup task panicked: {}", e);
+                    error_count += 1;
+                }
+            }
+        }
+
+        info!(
+            "[AutoTransport] Connection warmup completed in {:?} - {} succeeded, {} failed",
+            start.elapsed(),
+            success_count,
+            error_count
+        );
+
+        Ok(())
     }
 }
 
@@ -37,13 +122,26 @@ impl Transport for AutoTransport {
                 self.grpc.send_batch(endpoint, requests).await
             }
             "rdma" => {
-                // Worker has RDMA queues - client needs RDMA transport
-                Err(anyhow::anyhow!(
-                    "RDMA transport not yet implemented in client. \
-                     Worker {} advertises channel='rdma' (TCP port {}), but client only supports gRPC.",
-                    endpoint.grpc_addr,
-                    endpoint.rdma_tcp_port
-                ))
+                #[cfg(feature = "rdma")]
+                {
+                    // Worker has RDMA queues - use RDMA transport
+                    info!(
+                        "[AutoTransport] Using RDMA for worker {} (TCP port {})",
+                        endpoint.grpc_addr, endpoint.rdma_tcp_port
+                    );
+                    self.rdma.send_batch(endpoint, requests).await
+                }
+                #[cfg(not(feature = "rdma"))]
+                {
+                    // RDMA feature not enabled
+                    Err(anyhow::anyhow!(
+                        "RDMA transport not available. Worker {} advertises channel='rdma' (TCP port {}), \
+                         but this client was not built with RDMA support. \
+                         Rebuild with: cargo build --features rdma",
+                        endpoint.grpc_addr,
+                        endpoint.rdma_tcp_port
+                    ))
+                }
             }
             "shm" => {
                 // Worker has shared memory queues - workers CREATE /dev/shm files!
@@ -70,6 +168,16 @@ impl Transport for AutoTransport {
         match endpoint.channel.as_str() {
             "grpc" => self.grpc.is_available(endpoint).await,
             "shm" => self.shm.is_available(endpoint).await,
+            "rdma" => {
+                #[cfg(feature = "rdma")]
+                {
+                    self.rdma.is_available(endpoint).await
+                }
+                #[cfg(not(feature = "rdma"))]
+                {
+                    false
+                }
+            }
             _ => false,
         }
     }

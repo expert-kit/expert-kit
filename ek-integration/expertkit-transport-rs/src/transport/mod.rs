@@ -5,6 +5,9 @@ pub mod auto;
 pub mod grpc;
 pub mod shm;
 
+#[cfg(feature = "rdma")]
+pub mod rdma;
+
 // Re-export WorkerEndpoint from grpc proto
 pub use grpc::proto::ek::control::v1::WorkerEndpoint;
 
@@ -16,7 +19,6 @@ pub enum TransportType {
 }
 
 /// Request for a single expert computation
-/// Each request represents ONE expert, but can contain MULTIPLE sequences
 #[derive(Debug, Clone)]
 pub struct ExpertRequest {
     pub expert_id: String,
@@ -45,12 +47,6 @@ pub struct ExpertResponse {
 #[async_trait]
 pub trait Transport: Send + Sync {
     /// Send batch of expert requests to a worker
-    /// Note: Each ExpertRequest already contains batched sequences for that expert
-    /// The transport should send one computation call per ExpertRequest (not concatenate)
-    ///
-    /// # Arguments
-    /// * `endpoint` - Worker endpoint information (includes channel type, addresses, etc.)
-    /// * `requests` - Batch of expert requests to send
     async fn send_batch(
         &self,
         endpoint: &WorkerEndpoint,
