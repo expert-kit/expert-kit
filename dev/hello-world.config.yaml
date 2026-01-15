@@ -21,6 +21,7 @@ worker:
   broadcast: 127.0.0.1
   ports:
     main: 51234
+  device: cpu
 
 controller:
   listen: 0.0.0.0

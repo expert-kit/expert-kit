@@ -6,7 +6,8 @@ members = [
     "ek-cli",
     "ek-computation",
     "ek-db",
-    "ek-ggml", "ek-integration/expertkit-transport-rs",
+    "ek-ggml", 
+    "ek-integration/expertkit-transport-rs",
 ]
 default-members = ["ek-cli"]
 
@@ -129,6 +130,7 @@ tracing = { version = "0.1.41", default-features = false, features = [
 ] }
 tracing-opentelemetry = "0.30.0"
 tracing-subscriber = { version = "0.3.19", default-features = false, features = [
+    "fmt",
     "std",
     "registry",
     "local-time",

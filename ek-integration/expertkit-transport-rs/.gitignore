@@ -1,2 +1,4 @@
-python/
+# python/
+*.so
+__pycache__/
 .pytest_cache/
