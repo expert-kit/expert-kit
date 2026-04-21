@@ -4,6 +4,7 @@ use std::{
         Arc, OnceLock,
         atomic::{AtomicUsize, Ordering},
     },
+    time::{Duration, Instant},
 };
 
 use crate::{
@@ -23,6 +24,11 @@ use url::Url;
 
 const MAX_RETRIES: u32 = 3;
 const BASE_DELAY_MS: u64 = 1000;
+
+const GRPC_CONNECT_TIMEOUT_SECS: u64 = 10;
+const GRPC_KEEPALIVE_INTERVAL_SECS: u64 = 30;
+const GRPC_KEEPALIVE_TIMEOUT_SECS: u64 = 5;
+const GRPC_IDLE_TIMEOUT_SECS: u64 = 300;
 
 pub type ExpertId = String;
 pub type ExpertIdRef<'a> = &'a str;
@@ -124,6 +130,12 @@ enum ChannelMeta {
     Rdma(RdmaChannelMeta),
 }
 
+struct WorkerChannelPool {
+    channel: Channel,
+    addr: String,
+    last_used: Instant,
+}
+
 /// RDMA connection state for a worker node
 #[derive(Clone)]
 struct RdmaNodeConnection {
@@ -134,6 +146,10 @@ struct RdmaNodeConnection {
 
 pub struct ExpertRegistryImpl {
     eid2channels: HashMap<ExpertId, Vec<ChannelMeta>>,
+    /// Per-worker gRPC Channel（key = hostname）。
+    /// Each worker maintains a WorkerChannelPool, which contains a single connection with keepalive enabled.
+    /// The parameter channel shared by all experts on this worker.
+    worker_grpc_pools: HashMap<String, WorkerChannelPool>,
     all_shm_channels: HashMap<String, LocalShmChannel>,
     all_rdma_connections: HashMap<String, RdmaNodeConnection>,
     reader: Box<dyn StateReader + Send + Sync>,
@@ -194,6 +210,8 @@ impl ExpertRegistryImpl {
     }
 
     async fn create_then_select_channel(&mut self, eid: ExpertIdRef<'_>) -> EKResult<ChannelMeta> {
+        self.cleanup_idle_pools();
+
         let nodes = self.reader.node_by_expert(eid).await?;
         for node in nodes {
             let addr = node.config["addr"].as_str().unwrap().to_owned();
@@ -201,11 +219,11 @@ impl ExpertRegistryImpl {
 
             match channel.as_str() {
                 "grpc" => {
-                    let end = Channel::from_shared(addr)
-                        .map_err(|e| EKError::InvalidInput(format!("invalid url for gRPC: {e}")))?;
-                    let channel = end.connect().await?;
+                    let ch = self
+                        .get_or_create_worker_channel(&addr, &node.hostname)
+                        .await?;
                     let meta = GrpcChannelMeta {
-                        ch: channel,
+                        ch,
                         host_id: node.hostname.clone(),
                     };
                     self.eid2channels
@@ -450,6 +468,11 @@ impl ExpertRegistryImpl {
             });
         }
 
+        // Remove gRPC channel pool for this worker
+        if self.worker_grpc_pools.remove(host_id).is_some() {
+            log::info!("WorkerChannelPool removed for deregistered worker {}", host_id);
+        }
+
         // Remove SHM channels
         self.all_shm_channels
             .retain(|hostname, _| hostname != host_id);
@@ -473,10 +496,92 @@ impl ExpertRegistryImpl {
     pub fn new() -> Self {
         Self {
             eid2channels: HashMap::new(),
+            worker_grpc_pools: HashMap::new(),
             all_shm_channels: HashMap::new(),
             all_rdma_connections: HashMap::new(),
             reader: Box::new(StateReaderImpl::new()),
         }
+    }
+}
+
+// ── gRPC
+impl ExpertRegistryImpl {
+    /// Retrieve an existing Channel from the per-worker pool, or create one on first access.
+    /// Reuse path: directly clone the Channel handle (zero system calls, no new TCP connection).
+    /// Creation path: call `build_grpc_channel` to create a Channel with keepalive parameters.
+    async fn get_or_create_worker_channel(
+        &mut self,
+        addr: &str,
+        hostname: &str,
+    ) -> EKResult<Channel> {
+        if let Some(pool) = self.worker_grpc_pools.get_mut(hostname) {
+            pool.last_used = Instant::now();
+            log::debug!("reusing gRPC channel for worker {hostname} (addr={addr})");
+            return Ok(pool.channel.clone());
+        }
+
+        log::info!("WorkerChannelPool: creating first connection for {hostname} (addr={addr})");
+        let channel = Self::build_grpc_channel(addr).await?;
+
+        self.worker_grpc_pools.insert(
+            hostname.to_owned(),
+            WorkerChannelPool {
+                channel: channel.clone(),
+                addr: addr.to_owned(),
+                last_used: Instant::now(),
+            },
+        );
+        Ok(channel)
+    }
+
+    /// Builds a gRPC Channel with timeout and HTTP/2 keepalive parameters.
+    ///
+    /// - `connect_timeout`           = 10s  (maximum time for TCP + TLS handshake)
+    /// - `tcp_keepalive`             = 30s  (OS-level TCP keepalive probe interval)
+    /// - `http2_keep_alive_interval` = 30s  (application-level HTTP/2 PING interval)
+    /// - `keep_alive_timeout`        = 5s   (connection is closed if no PING response within this time)
+    /// - `keep_alive_while_idle`     = true (send PINGs even when idle to prevent NAT timeouts)
+    async fn build_grpc_channel(addr: &str) -> EKResult<Channel> {
+        Channel::from_shared(addr.to_owned())
+            .map_err(|e| EKError::InvalidInput(format!("invalid url for gRPC: {e}")))?
+            .connect_timeout(Duration::from_secs(GRPC_CONNECT_TIMEOUT_SECS))
+            .tcp_keepalive(Some(Duration::from_secs(GRPC_KEEPALIVE_INTERVAL_SECS)))
+            .http2_keep_alive_interval(Duration::from_secs(GRPC_KEEPALIVE_INTERVAL_SECS))
+            .keep_alive_timeout(Duration::from_secs(GRPC_KEEPALIVE_TIMEOUT_SECS))
+            .keep_alive_while_idle(true)
+            .connect()
+            .await
+            .map_err(|e| {
+                EKError::IoError(std::io::Error::other(format!(
+                    "gRPC connect failed ({addr}): {e}"
+                )))
+            })
+    }
+
+    /// Evicts connection pool entries that have been idle for more than
+    /// `GRPC_IDLE_TIMEOUT_SECS` (default: 300s).
+    ///
+    /// Invoked at the entry of each `create_then_select_channel` call.
+    /// The overhead is minimal (only iterates over a HashMap proportional
+    /// to the number of workers), and it prevents connection resource
+    /// accumulation/leaks during long-running execution.
+    fn cleanup_idle_pools(&mut self) {
+        let deadline = Duration::from_secs(GRPC_IDLE_TIMEOUT_SECS);
+        let now = Instant::now();
+        self.worker_grpc_pools.retain(|hostname, pool| {
+            let idle = now.duration_since(pool.last_used);
+            if idle > deadline {
+                log::info!(
+                    "WorkerChannelPool: evicting idle pool for {hostname} addr={} \
+                     (idle {:.0}s > timeout {GRPC_IDLE_TIMEOUT_SECS}s)",
+                    pool.addr,
+                    idle.as_secs_f32()
+                );
+                false
+            } else {
+                true
+            }
+        });
     }
 }
 
