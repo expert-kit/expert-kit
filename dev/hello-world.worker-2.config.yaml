@@ -22,6 +22,8 @@ worker:
   metrics: 0.0.0.0:9092
   ports:
     main: 51235
+  mem_capacity_mb: 4096    # reported in heartbeats; used for recovery target selection
+  shutdown_grace_secs: 30  # wait this long after SIGTERM before forcing exit
 
 controller:
   listen: 0.0.0.0
@@ -29,3 +31,5 @@ controller:
   ports:
     intra: 5001
     inter: 5002
+  fault_detection:
+    heartbeat_timeout_secs: 10

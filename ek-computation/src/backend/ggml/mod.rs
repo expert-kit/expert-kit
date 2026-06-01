@@ -11,6 +11,7 @@ impl From<crate::backend::DType> for Kind {
     fn from(value: crate::backend::DType) -> Self {
         match value {
             crate::backend::DType::Float => Kind::F32,
+            crate::backend::DType::Float16 => Kind::F16,
             crate::backend::DType::BFloat16 => Kind::BF16,
             _ => unimplemented!(),
         }
@@ -21,6 +22,7 @@ impl From<ek_ggml::Kind> for crate::backend::DType {
     fn from(value: Kind) -> Self {
         match value {
             Kind::F32 => crate::backend::DType::Float,
+            Kind::F16 => crate::backend::DType::Float16,
             Kind::BF16 => crate::backend::DType::BFloat16,
             _ => unimplemented!(),
         }

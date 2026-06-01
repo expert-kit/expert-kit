@@ -14,6 +14,7 @@ ek-ggml = { workspace = true }
 actix-web = { workspace = true }
 async-trait = { workspace = true }
 clap = { workspace = true }
+dashmap = { workspace = true }
 diesel = { workspace = true }
 diesel-async = { workspace = true }
 env_logger = { workspace = true }

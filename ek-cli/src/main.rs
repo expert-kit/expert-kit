@@ -1,13 +1,18 @@
 use std::{env, mem::transmute, path::PathBuf, sync::LazyLock};
+mod bench;
 mod db;
 mod doctor;
 mod model;
 mod pretrain;
 mod schedule;
+mod wm_server;
 
 mod affinity;
 mod onnx;
+mod weight_index;
 use affinity::try_apply_cpu_affinity;
+use weight_index::{WeightIndexCommand, execute_weight_index};
+use bench::execute_bench;
 use db::execute_db;
 use doctor::doctor_main;
 use ek_base::config::get_ek_settings_base;
@@ -22,6 +27,7 @@ use tokio::runtime::Runtime;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 use ek_db::weight_srv;
+use wm_server::wm_server_main;
 
 use clap::{Parser, Subcommand};
 use model::execute_model;
@@ -57,6 +63,11 @@ enum Command {
         port: u16,
         #[arg(long)]
         model: Vec<PathBuf>,
+        /// Disable the expert index fast path (for ablation study baseline).
+        /// Forces every request to use mmap + re-serialization regardless of
+        /// whether an index exists in the cache directory.
+        #[arg(long, default_value_t = false)]
+        no_index: bool,
     },
 
     #[command(about = "safetensor pretrain weight manipulation")]
@@ -87,6 +98,21 @@ enum Command {
     Onnx {
         #[command(subcommand)]
         command: onnx::OnnxCommand,
+    },
+
+    #[command(about = "expert weight index operations")]
+    Weight {
+        #[command(subcommand)]
+        command: WeightIndexCommand,
+    },
+
+    #[command(about = "run standalone peer weight HTTP server")]
+    WmServer {},
+
+    #[command(about = "benchmark expert weight loading")]
+    Bench {
+        #[command(subcommand)]
+        command: bench::BenchCommand,
     },
 }
 
@@ -283,13 +309,24 @@ fn main() {
             Command::Worker {} => worker_main().await,
             Command::Controller {} => controller_main().await,
             Command::Doctor {} => doctor_main().await,
-            Command::WeightServer { host, port, model } => {
+            Command::WeightServer { host, port, model, no_index } => {
                 let model: &[PathBuf] = unsafe { transmute(model.as_slice()) };
-                weight_srv::server::listen(model, (host, port)).await
+                let cache_dir = if no_index {
+                    None
+                } else {
+                    match &ek_base::config::get_ek_settings().weight.cache {
+                        ek_base::config::OpenDALStorage::Fs(cfg) => Some(PathBuf::from(&cfg.path)),
+                        _ => None,
+                    }
+                };
+                weight_srv::server::listen(model, cache_dir, (host, port)).await
             }
+            Command::Weight { command } => execute_weight_index(command).await,
             Command::DB { command } => execute_db(command).await,
             Command::Model { command } => execute_model(command).await,
             Command::Schedule { command } => execute_schedule(command).await,
+            Command::WmServer {} => wm_server_main().await,
+            Command::Bench { command } => execute_bench(command).await,
         }
     });
 

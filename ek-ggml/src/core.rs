@@ -145,6 +145,7 @@ unsafe impl<const N: usize> Send for Graph<N> {}
 #[non_exhaustive]
 pub enum Kind {
     F32 = bindings::ggml_type_GGML_TYPE_F32,
+    F16 = bindings::ggml_type_GGML_TYPE_F16,
     BF16 = bindings::ggml_type_GGML_TYPE_BF16,
 }
 

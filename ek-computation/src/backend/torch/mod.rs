@@ -29,6 +29,7 @@ impl From<DType> for tch::Kind {
             DType::Uint8 => tch::Kind::Uint8,
             DType::Int16 => tch::Kind::Int16,
             DType::Int8 => tch::Kind::Int8,
+            DType::Float16 => tch::Kind::Half,
             DType::BFloat16 => tch::Kind::BFloat16,
             DType::Float8e4m3fn => tch::Kind::Float8e4m3fn,
             DType::Float8e4m3fnuz => tch::Kind::Float8e4m3fnuz,

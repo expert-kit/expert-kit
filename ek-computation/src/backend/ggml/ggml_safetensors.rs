@@ -6,6 +6,7 @@ use crate::backend::ggml::GgmlTensor;
 pub fn ggml_kind_to_dtype(kind: Kind) -> Result<Dtype, Kind> {
     match kind {
         Kind::F32 => Ok(Dtype::F32),
+        Kind::F16 => Ok(Dtype::F16),
         Kind::BF16 => Ok(Dtype::BF16),
         _ => Err(kind),
     }
@@ -14,6 +15,7 @@ pub fn ggml_kind_to_dtype(kind: Kind) -> Result<Dtype, Kind> {
 pub fn dtype_to_ggml_kind(dtype: Dtype) -> Result<Kind, Dtype> {
     match dtype {
         Dtype::F32 => Ok(Kind::F32),
+        Dtype::F16 => Ok(Kind::F16),
         Dtype::BF16 => Ok(Kind::BF16),
         _ => Err(dtype),
     }

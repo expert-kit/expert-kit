@@ -9,6 +9,7 @@ use std::time::Duration;
 use std::{env, panic};
 
 use ek_base::tracing::grpc::OTelGrpcServerMiddleware;
+use ek_db::weight_manager::{LocalWeightManager, peer_server};
 use state::StateInspector;
 use tokio::select;
 use tokio::signal;
@@ -28,6 +29,15 @@ use crate::x::get_graceful_shutdown_ch;
 
 use super::worker::state::StateClient;
 use ek_base::{config::get_ek_settings, error::EKResult};
+
+/// Set to true on SIGTERM; the heartbeat stream reads this and sets last_will=true
+/// in all subsequent heartbeats so the controller can start proactive migration.
+static LAST_WILL: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+pub fn get_last_will() -> bool {
+    LAST_WILL.load(Ordering::Relaxed)
+}
 
 // Global storage for RDMA queues and TCP server
 static RDMA_REQ_QUEUE: OnceLock<Arc<Mutex<RdmaQueue<ShmqWorkerReq>>>> = OnceLock::new();
@@ -137,6 +147,33 @@ pub async fn worker_main() -> EKResult<()> {
     let mut sync_srvs = Vec::new();
     tch::set_num_threads(*WORKER_PARALLEL as _);
 
+    // Initialize LocalWeightManager (shared between WeightService and StateClient)
+    let wm = LocalWeightManager::new_shared();
+    log::info!(
+        "LocalWeightManager initialized (mem_cache={}MB)",
+        settings.weight.mem_cache_mb
+    );
+
+    // Start peer weight HTTP server
+    {
+        let wm_listen = settings.weight.wm_listen.clone();
+        let wm_clone = wm.clone();
+        let wm_addr: std::net::SocketAddr = wm_listen
+            .parse()
+            .expect("invalid weight.wm_listen address");
+        tokio::spawn(async move {
+            log::info!("Peer weight HTTP server listening on {wm_addr}");
+            match peer_server::start_peer_server(wm_clone, &wm_addr).await {
+                Ok(server) => {
+                    if let Err(e) = server.await {
+                        log::error!("Peer weight server error: {e}");
+                    }
+                }
+                Err(e) => log::error!("Failed to start peer weight server: {e}"),
+            }
+        });
+    }
+
     // Determine queue type based on configuration
     // Note: Channel should be created before stateClient start for endpoint exchange
     let rdma_tcp_port: Option<u16> = if settings.worker.channel == "rdma" {
@@ -155,14 +192,22 @@ pub async fn worker_main() -> EKResult<()> {
         None
     };
 
+    // Channel for controller to notify that proactive migration is complete.
+    let (preemption_tx, preemption_rx) = tokio::sync::oneshot::channel::<()>();
+
     // Spawn state client task (handles expert loading/unloading)
     let cli = tokio::task::spawn(async move {
         let worker_id = x::get_worker_id();
         log::info!("ek hostname: {worker_id:}");
         let control_endpoint = x::get_controller_addr();
         log::info!("control endpoint {:}", control_endpoint.uri());
-        let mut state_client =
-            StateClient::new_with_rdma_tcp_port(control_endpoint, &worker_id, rdma_tcp_port);
+        let mut state_client = StateClient::new_with_rdma_tcp_port(
+            control_endpoint,
+            &worker_id,
+            rdma_tcp_port,
+            wm,
+        );
+        state_client.set_preemption_notifier(preemption_tx);
         if let Err(e) = state_client.run(cli_cancel).await {
             log::error!("state client error {e:}");
         }
@@ -201,20 +246,26 @@ pub async fn worker_main() -> EKResult<()> {
         }
         "shm" => {
             let node_name = x::get_worker_id();
-            let recv_channel = loop {
-                if let Some(channel) =
-                    ShmQueue::<ShmqWorkerReq>::open(&format!("ek-shmq-req-{}", node_name))
-                {
-                    break Arc::new(Mutex::new(channel));
-                }
-            };
-            let send_channel = loop {
-                if let Some(channel) =
-                    ShmQueue::<ShmqWorkerResp>::open(&format!("ek-shmq-resp-{}", node_name))
-                {
-                    break Arc::new(Mutex::new(channel));
-                }
-            };
+
+            log::info!("Creating shared memory queues for worker {}", node_name);
+
+            let recv_channel = ShmQueue::<ShmqWorkerReq>::new(
+                &format!("ek-shmq-req-{}", node_name),
+                256, // Queue capacity
+            );
+            log::info!("Created request queue: /dev/shm/ek-shmq-req-{}", node_name);
+
+            let send_channel = ShmQueue::<ShmqWorkerResp>::new(
+                &format!("ek-shmq-resp-{}", node_name),
+                256, // Queue capacity
+            );
+            log::info!(
+                "Created response queue: /dev/shm/ek-shmq-resp-{}",
+                node_name
+            );
+
+            let recv_channel = Arc::new(Mutex::new(recv_channel));
+            let send_channel = Arc::new(Mutex::new(send_channel));
             let thread_count: usize = env::var("EK_WORKER_THREADS")
                 .map(|v| v.parse().unwrap_or(1))
                 .unwrap_or(1);
@@ -233,7 +284,8 @@ pub async fn worker_main() -> EKResult<()> {
                             if let Ok(req) = recv_channel.lock().unwrap().recv() {
                                 break req;
                             }
-                            std::thread::sleep(Duration::from_micros(100));
+                            std::hint::spin_loop();
+                            std::thread::yield_now();
                         };
                         log::debug!(
                             "received request: id={} expert={}",
@@ -313,7 +365,8 @@ pub async fn worker_main() -> EKResult<()> {
                             match recv_channel.lock().unwrap().recv() {
                                 Ok(req) => break req,
                                 Err(_) => {
-                                    std::thread::sleep(Duration::from_micros(100));
+                                    std::hint::spin_loop();
+                                    std::thread::yield_now();
                                     continue;
                                 }
                             }
@@ -373,24 +426,75 @@ pub async fn worker_main() -> EKResult<()> {
         }
     }
 
-    // Wait for any task to complete or receive shutdown signal
-    select! {
-        _ = cli => { },
-        _ = async_srv => { },
-        _ = state_inspect => { },
-        _ = signal::ctrl_c() => {
-            log::info!("ctrl-c signal received, shutting down");
-            *poison.lock().unwrap() = true;
-            token.clone().cancel();
-
-            let(_,rx) = get_graceful_shutdown_ch();
-            rx.lock().await.recv().await;
-            for srv in sync_srvs {
-                srv.join().unwrap();
+    // SIGTERM listener: use a oneshot channel so the select! arms are platform-independent.
+    // On unix the spawned task forwards SIGTERM; on other platforms the sender is held
+    // forever so sigterm_rx never fires.
+    let (sigterm_tx, mut sigterm_rx) = tokio::sync::oneshot::channel::<()>();
+    tokio::spawn(async move {
+        #[cfg(unix)]
+        {
+            if let Ok(mut sig) = tokio::signal::unix::signal(
+                tokio::signal::unix::SignalKind::terminate(),
+            ) {
+                sig.recv().await;
+                let _ = sigterm_tx.send(());
+                return;
             }
-            log::info!("graceful shutdown channel received, shutting down now");
         }
+        // Non-unix or signal setup failure: hold sender indefinitely so sigterm_rx
+        // never fires.
+        let _keep_alive = sigterm_tx;
+        std::future::pending::<()>().await
+    });
+
+    // Wait for any task to complete or receive a shutdown signal.
+    // sync_srvs is joined AFTER the select so both signal arms can reference it.
+    let shutdown_signal: Option<&str> = select! {
+        _ = cli => None,
+        _ = async_srv => None,
+        _ = state_inspect => None,
+        _ = signal::ctrl_c() => Some("ctrl-c"),
+        _ = &mut sigterm_rx => Some("SIGTERM"),
     };
+
+    // Graceful preemption for ctrl-c / SIGTERM
+    if let Some(signal) = shutdown_signal {
+        log::info!(
+            "{signal} received, starting graceful preemption (grace={}s)",
+            settings.worker.shutdown_grace_secs
+        );
+        // 1. Signal last_will — next heartbeat(s) will carry last_will=true
+        LAST_WILL.store(true, Ordering::Relaxed);
+        // 2. Poison compute gate — stop accepting new expert requests immediately
+        *poison.lock().unwrap() = true;
+        // 3. Wait for controller to confirm migration complete, or timeout
+        match tokio::time::timeout(
+            Duration::from_secs(settings.worker.shutdown_grace_secs),
+            preemption_rx,
+        ).await {
+            Ok(Ok(())) => {
+                log::info!("Controller confirmed preemption complete");
+            }
+            Ok(Err(_)) => {
+                log::warn!("Preemption channel dropped, proceeding with shutdown");
+            }
+            Err(_) => {
+                log::warn!(
+                    "Preemption timeout after {}s, forcing shutdown",
+                    settings.worker.shutdown_grace_secs
+                );
+            }
+        }
+        // 4. Cancel async tasks (heartbeat, state client, etc.)
+        token.cancel();
+        let (_, rx) = get_graceful_shutdown_ch();
+        rx.lock().await.recv().await;
+        log::info!("Graceful preemption complete");
+    }
+
+    for srv in sync_srvs {
+        srv.join().unwrap();
+    }
 
     Ok(())
 }

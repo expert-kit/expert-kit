@@ -3,19 +3,24 @@ use tonic::transport::Endpoint;
 use std::{str::FromStr, sync::Arc};
 
 use ek_base::{config::get_ek_settings, error::EKResult};
-use ek_db::safetensor::{ExpertKey, SafeTensorDB};
+use ek_db::{safetensor::ExpertKey, weight_manager::LocalWeightManager};
 use tokio::sync::RwLock;
 
-use crate::{ffn::ExpertBackend, x};
+use crate::ffn::ExpertBackend;
 
 use super::manager::ExpertDB;
 
-/// Load expert task - handles expert loading and database insertion
-/// This function updates the shared database that both async and sync gates use
+/// Load expert task - fetches weight bytes from the LocalWeightManager,
+/// builds the ExpertBackend, and inserts it into the shared ExpertDB.
+///
+/// Zero-copy: `wm.get_expert()` returns an `Arc<Bytes>` whose refcount is
+/// incremented atomically. The bytes are borrowed by SafeTensors for the
+/// duration of `ExpertBackend::build`, then the Arc is dropped here while
+/// the WM retains its own reference for future callers.
 pub async fn load_expert_task(
-    tensor_db: Arc<RwLock<SafeTensorDB>>,
+    weight_manager: Arc<LocalWeightManager>,
     expert_db: Arc<RwLock<dyn ExpertDB + Sync + Send + 'static>>,
-    instance: x::EKInstance,
+    instance: crate::x::EKInstance,
     expert_key: &ExpertKey,
 ) -> EKResult<()> {
     let expert_str_key = expert_key.as_object_key();
@@ -26,21 +31,28 @@ pub async fn load_expert_task(
         wg.mark_loading(&expert_str_key)?;
     }
 
-    // Load tensor and build backend
-    {
-        let rg = tensor_db.read().await;
-        let st = rg.load(expert_key).await?;
-        let backend = ExpertBackend::build(instance, &st).await?;
-
-        if get_ek_settings().worker.drop_cache {
-            // If drop_cache is enabled, remove the tensor after building the backend
-            rg.remove(expert_key).await?;
-        }
-
-        // Insert loaded expert into shared database (accessible by both async and sync gates)
-        let mut edb_wg = expert_db.write().await;
-        edb_wg.insert(&expert_str_key, backend).await?;
+    // Fetch bytes and build backend within a scoped block so that
+    // `bytes` (and thus `st`) are dropped before we take the expert_db write lock.
+    // On any error, unmark_loading so the expert can be retried on the next update.
+    let backend = match async {
+        let bytes = weight_manager.get_expert(expert_key).await?;
+        let st = safetensors::SafeTensors::deserialize(&bytes)?;
+        ExpertBackend::build(instance, &st).await
+        // `bytes` and `st` are dropped here
     }
+    .await
+    {
+        Ok(b) => b,
+        Err(e) => {
+            let mut wg = expert_db.write().await;
+            wg.unmark_loading(&expert_str_key);
+            return Err(e);
+        }
+    };
+
+    // Insert loaded expert into shared database
+    let mut edb_wg = expert_db.write().await;
+    edb_wg.insert(&expert_str_key, backend).await?;
 
     Ok(())
 }

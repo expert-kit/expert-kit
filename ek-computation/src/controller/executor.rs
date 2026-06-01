@@ -196,9 +196,50 @@ impl NaiveExecutor {
 
         while let Some((expert_id, egress_meta)) = self.pending_egress.pop_first() {
             let expert_id: ExpertIdRef = expert_id.as_ref();
-            let Ok(client) = self.registry.lock().await.select(expert_id).await else {
-                log::warn!("failed to select client for expert {expert_id}");
-                continue;
+
+            // Retry selecting a worker — the expert may be in recovery
+            // (recently assigned to a surviving worker but not yet loaded).
+            // Wait up to ~62 s for it to become available before giving up.
+            const MAX_ATTEMPTS: u32 = 6;
+            let client = {
+                let mut last_err = None;
+                let mut found = None;
+                for attempt in 0..MAX_ATTEMPTS {
+                    match self.registry.lock().await.select(expert_id).await {
+                        Ok(c) => {
+                            if attempt > 0 {
+                                log::info!(
+                                    "controller executor: worker found for {expert_id} on attempt {}",
+                                    attempt + 1
+                                );
+                            }
+                            found = Some(c);
+                            break;
+                        }
+                        Err(e) => {
+                            let backoff = std::time::Duration::from_secs(1u64 << attempt.min(4));
+                            log::info!(
+                                "controller executor: no worker for {expert_id} \
+                                 (attempt {}/{MAX_ATTEMPTS}), retrying in {:?}: {e}",
+                                attempt + 1,
+                                backoff
+                            );
+                            last_err = Some(e);
+                            tokio::time::sleep(backoff).await;
+                        }
+                    }
+                }
+                match found {
+                    Some(c) => c,
+                    None => {
+                        log::error!(
+                            "controller executor: no worker for {expert_id} after \
+                             {MAX_ATTEMPTS} attempts: {:?}",
+                            last_err
+                        );
+                        continue; // skip this expert
+                    }
+                }
             };
             chips.push((expert_id.to_owned(), egress_meta.to_owned()));
 
@@ -371,8 +412,10 @@ impl NaiveExecutor {
         for (egress_idx, handle) in handles.into_iter().enumerate() {
             let egress = &chips[egress_idx];
             let Ok(res) = handle.await? else {
-                log::error!("failed to receive response for expert {}", egress.0);
-                continue;
+                return Err(EKError::RuntimeError(format!(
+                    "failed to receive response for expert {}",
+                    egress.0
+                )));
             };
             let res_safetensor = SafeTensors::deserialize(res.output_tensor())?;
             // TODO: hardcode safe tensor name

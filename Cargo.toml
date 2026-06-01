@@ -6,7 +6,7 @@ members = [
     "ek-cli",
     "ek-computation",
     "ek-db",
-    "ek-ggml",
+    "ek-ggml", "ek-integration/expertkit-transport-rs",
 ]
 default-members = ["ek-cli"]
 

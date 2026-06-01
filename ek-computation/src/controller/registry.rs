@@ -8,7 +8,7 @@ use std::{
 
 use crate::{
     shmq::{GeneralShmQueueBytes, RdmaEndpointClient, ShmQueue, rdma_impl::RdmaQueue},
-    state::io::{StateReader, StateReaderImpl},
+    state::io::StateReaderImpl,
 };
 use ek_base::{
     error::{EKError, EKResult},
@@ -23,6 +23,10 @@ use url::Url;
 
 const MAX_RETRIES: u32 = 3;
 const BASE_DELAY_MS: u64 = 1000;
+
+/// When true, force controller to use gRPC for all worker connections.
+/// Set to false to respect each worker's configured channel (shm/rdma/grpc).
+const FORCE_GRPC_CHANNEL: bool = false;
 
 pub type ExpertId = String;
 pub type ExpertIdRef<'a> = &'a str;
@@ -97,6 +101,8 @@ pub trait ExpertRegistry {
     async fn select(&mut self, eid: ExpertIdRef<'_>) -> EKResult<ExpertClient>;
     async fn reset(&mut self) -> EKResult<()>;
     async fn deregister(&mut self, host_id: &str);
+    /// Clear the deregistered flag for a returning worker.
+    fn reregister(&mut self, host_id: &str);
 }
 
 #[derive(Clone)]
@@ -136,7 +142,10 @@ pub struct ExpertRegistryImpl {
     eid2channels: HashMap<ExpertId, Vec<ChannelMeta>>,
     all_shm_channels: HashMap<String, LocalShmChannel>,
     all_rdma_connections: HashMap<String, RdmaNodeConnection>,
-    reader: Box<dyn StateReader + Send + Sync>,
+    /// Hostnames that have been explicitly deregistered.  Checked in
+    /// `create_then_select_channel` to avoid reconnecting to a dead
+    /// node before `deactivate_node` finishes its DB write.
+    deregistered: std::collections::HashSet<String>,
 }
 
 #[async_trait::async_trait]
@@ -159,6 +168,9 @@ impl ExpertRegistry for ExpertRegistryImpl {
     }
     async fn deregister(&mut self, host_id: &str) {
         self.inner_deregister(host_id).await;
+    }
+    fn reregister(&mut self, host_id: &str) {
+        self.deregistered.remove(host_id);
     }
 }
 
@@ -194,10 +206,36 @@ impl ExpertRegistryImpl {
     }
 
     async fn create_then_select_channel(&mut self, eid: ExpertIdRef<'_>) -> EKResult<ChannelMeta> {
-        let nodes = self.reader.node_by_expert(eid).await?;
+        // Only consider nodes where the expert is actually "loaded" —
+        // not "scheduled" or "pending" (still being loaded by progressive
+        // assignment).  This prevents routing to workers that just
+        // reconnected and haven't loaded the expert yet.
+        let nodes = StateReaderImpl::new()
+            .node_by_expert_loaded(eid)
+            .await?;
+
         for node in nodes {
-            let addr = node.config["addr"].as_str().unwrap().to_owned();
-            let channel = node.config["channel"].as_str().unwrap().to_owned();
+            // Skip nodes that have been explicitly deregistered — instant
+            // in-memory check, no race with deactivate_node's DB write.
+            if self.deregistered.contains(&node.hostname) {
+                continue;
+            }
+            // Skip deactivated nodes (empty config after deactivate_node)
+            let addr = match node.config.get("addr").and_then(|v| v.as_str()) {
+                Some(a) => a.to_owned(),
+                None => continue,
+            };
+            let configured_channel = match node.config.get("channel").and_then(|v| v.as_str()) {
+                Some(c) => c.to_owned(),
+                None => continue,
+            };
+
+            // Force gRPC if configured, otherwise use the node's channel type
+            let channel = if FORCE_GRPC_CHANNEL {
+                "grpc".to_string()
+            } else {
+                configured_channel
+            };
 
             match channel.as_str() {
                 "grpc" => {
@@ -441,6 +479,10 @@ impl ExpertRegistryImpl {
     pub async fn inner_deregister(&mut self, host_id: &str) {
         log::info!("deregister host_id {host_id}");
 
+        // Mark as deregistered so create_then_select_channel won't
+        // reconnect before deactivate_node's DB write commits.
+        self.deregistered.insert(host_id.to_string());
+
         // Remove from all channel types
         for (_, channels) in self.eid2channels.iter_mut() {
             channels.retain(|meta| match meta {
@@ -461,6 +503,7 @@ impl ExpertRegistryImpl {
 
         log::info!("Deregistered worker: {}", host_id);
     }
+
 }
 
 impl Default for ExpertRegistryImpl {
@@ -475,7 +518,7 @@ impl ExpertRegistryImpl {
             eid2channels: HashMap::new(),
             all_shm_channels: HashMap::new(),
             all_rdma_connections: HashMap::new(),
-            reader: Box::new(StateReaderImpl::new()),
+            deregistered: std::collections::HashSet::new(),
         }
     }
 }

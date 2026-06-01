@@ -9,6 +9,7 @@ pub enum DType {
     Uint8,
     Int8,
     Int16,
+    Float16,
     BFloat16,
     Float,
     Float8e4m3fn,
@@ -21,6 +22,7 @@ impl DType {
             DType::Uint8 => 1,
             DType::Int8 => 1,
             DType::Int16 => 2,
+            DType::Float16 => 2,
             DType::BFloat16 => 2,
             DType::Float => 4,
             DType::Float8e4m3fn | DType::Float8e4m3fnuz => 1, // Assuming these are packed formats
@@ -48,6 +50,9 @@ impl From<&str> for Device {
         let str_dev = value.to_lowercase();
         if str_dev == "cpu" {
             Device::CPU
+        } else if let Some(str_dev) = str_dev.strip_prefix("cuda:") {
+            let idx = str_dev.parse::<usize>().unwrap_or(0);
+            Device::CUDA(idx)
         } else if let Some(str_dev) = str_dev.strip_prefix("cuda") {
             let idx = str_dev.parse::<usize>().unwrap_or(0);
             Device::CUDA(idx)

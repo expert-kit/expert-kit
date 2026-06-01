@@ -12,6 +12,7 @@ dependencies = [
     "grpcio>=1.71.0",
     "grpcio-tools>=1.71.0",
     "ipykernel>=6.29.5",
+    "line-profiler>=5.0.0",
     "matplotlib>=3.10.1",
     "onnx>=1.17.0",
     "onnxscript>=0.2.2",
@@ -24,7 +25,7 @@ dependencies = [
     "safetensors>=0.5.3",
     "sympy>=1.14.0",
     "torch==2.7.0",
-    "transformers[cu128]>=4.51.3",
+    "transformers[cu128]>=4.54.0",
     "uvloop>=0.21.0",
 ]
 

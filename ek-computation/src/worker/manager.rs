@@ -17,6 +17,7 @@ pub trait ExpertDB {
     async fn keys(&self) -> EKResult<Vec<String>>;
     async fn load(&self, id: &str) -> EKResult<Arc<ExpertBackend>>;
     fn mark_loading(&mut self, id: &str) -> EKResult<bool>;
+    fn unmark_loading(&mut self, id: &str);
     fn loaded(&self) -> usize;
     fn loading(&self) -> usize;
     fn has(&self, id: &str) -> bool;
@@ -30,6 +31,7 @@ pub trait ExpertDBSync {
     fn keys(&self) -> EKResult<Vec<String>>;
     fn load(&self, id: &str) -> EKResult<Arc<ExpertBackend>>;
     fn mark_loading(&mut self, id: &str) -> EKResult<bool>;
+    fn unmark_loading(&mut self, id: &str);
     fn loaded(&self) -> usize;
     fn loading(&self) -> usize;
     fn has(&self, id: &str) -> bool;
@@ -115,6 +117,10 @@ impl ExpertDBCore {
         Ok(true)
     }
 
+    fn unmark_loading(&mut self, id: &str) {
+        self.loading.remove(id);
+    }
+
     fn remove(&mut self, id: &str) -> EKResult<()> {
         self.tree.remove(id);
         Ok(())
@@ -170,6 +176,13 @@ impl ExpertDB for ExpertDBImplAsync {
         })
     }
 
+    fn unmark_loading(&mut self, id: &str) {
+        tokio::task::block_in_place(|| {
+            let mut core = self.core.blocking_write();
+            core.unmark_loading(id);
+        })
+    }
+
     async fn remove(&mut self, id: &str) -> EKResult<()> {
         let mut core = self.core.write().await;
         core.remove(id)
@@ -210,6 +223,11 @@ impl ExpertDBSync for ExpertDBImplSync {
     fn mark_loading(&mut self, id: &str) -> EKResult<bool> {
         let mut core = self.core.blocking_write();
         core.mark_loading(id)
+    }
+
+    fn unmark_loading(&mut self, id: &str) {
+        let mut core = self.core.blocking_write();
+        core.unmark_loading(id);
     }
 
     fn remove(&mut self, id: &str) -> EKResult<()> {

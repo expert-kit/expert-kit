@@ -107,28 +107,17 @@ class StateServiceStub(object):
         Args:
             channel: A grpc.Channel.
         """
-        self.Retrieve = channel.unary_stream(
-                '/ek.worker.v1.StateService/Retrieve',
-                request_serializer=ek_dot_worker_dot_v1_dot_expert__pb2.RetrieveStateReq.SerializeToString,
-                response_deserializer=ek_dot_worker_dot_v1_dot_expert__pb2.RetrieveStateResp.FromString,
-                _registered_method=True)
-        self.Update = channel.unary_unary(
-                '/ek.worker.v1.StateService/Update',
-                request_serializer=ek_dot_worker_dot_v1_dot_expert__pb2.UpdateStateReq.SerializeToString,
-                response_deserializer=ek_dot_worker_dot_v1_dot_expert__pb2.UpdateStateResp.FromString,
+        self.Exchange = channel.stream_stream(
+                '/ek.worker.v1.StateService/Exchange',
+                request_serializer=ek_dot_worker_dot_v1_dot_expert__pb2.ExchangeReq.SerializeToString,
+                response_deserializer=ek_dot_worker_dot_v1_dot_expert__pb2.ExchangeResp.FromString,
                 _registered_method=True)
 
 
 class StateServiceServicer(object):
     """Missing associated documentation comment in .proto file."""
 
-    def Retrieve(self, request, context):
-        """Missing associated documentation comment in .proto file."""
-        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
-        context.set_details('Method not implemented!')
-        raise NotImplementedError('Method not implemented!')
-
-    def Update(self, request, context):
+    def Exchange(self, request_iterator, context):
         """Missing associated documentation comment in .proto file."""
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
@@ -137,15 +126,10 @@ class StateServiceServicer(object):
 
 def add_StateServiceServicer_to_server(servicer, server):
     rpc_method_handlers = {
-            'Retrieve': grpc.unary_stream_rpc_method_handler(
-                    servicer.Retrieve,
-                    request_deserializer=ek_dot_worker_dot_v1_dot_expert__pb2.RetrieveStateReq.FromString,
-                    response_serializer=ek_dot_worker_dot_v1_dot_expert__pb2.RetrieveStateResp.SerializeToString,
-            ),
-            'Update': grpc.unary_unary_rpc_method_handler(
-                    servicer.Update,
-                    request_deserializer=ek_dot_worker_dot_v1_dot_expert__pb2.UpdateStateReq.FromString,
-                    response_serializer=ek_dot_worker_dot_v1_dot_expert__pb2.UpdateStateResp.SerializeToString,
+            'Exchange': grpc.stream_stream_rpc_method_handler(
+                    servicer.Exchange,
+                    request_deserializer=ek_dot_worker_dot_v1_dot_expert__pb2.ExchangeReq.FromString,
+                    response_serializer=ek_dot_worker_dot_v1_dot_expert__pb2.ExchangeResp.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -159,7 +143,7 @@ class StateService(object):
     """Missing associated documentation comment in .proto file."""
 
     @staticmethod
-    def Retrieve(request,
+    def Exchange(request_iterator,
             target,
             options=(),
             channel_credentials=None,
@@ -169,39 +153,12 @@ class StateService(object):
             wait_for_ready=None,
             timeout=None,
             metadata=None):
-        return grpc.experimental.unary_stream(
-            request,
+        return grpc.experimental.stream_stream(
+            request_iterator,
             target,
-            '/ek.worker.v1.StateService/Retrieve',
-            ek_dot_worker_dot_v1_dot_expert__pb2.RetrieveStateReq.SerializeToString,
-            ek_dot_worker_dot_v1_dot_expert__pb2.RetrieveStateResp.FromString,
-            options,
-            channel_credentials,
-            insecure,
-            call_credentials,
-            compression,
-            wait_for_ready,
-            timeout,
-            metadata,
-            _registered_method=True)
-
-    @staticmethod
-    def Update(request,
-            target,
-            options=(),
-            channel_credentials=None,
-            call_credentials=None,
-            insecure=False,
-            compression=None,
-            wait_for_ready=None,
-            timeout=None,
-            metadata=None):
-        return grpc.experimental.unary_unary(
-            request,
-            target,
-            '/ek.worker.v1.StateService/Update',
-            ek_dot_worker_dot_v1_dot_expert__pb2.UpdateStateReq.SerializeToString,
-            ek_dot_worker_dot_v1_dot_expert__pb2.UpdateStateResp.FromString,
+            '/ek.worker.v1.StateService/Exchange',
+            ek_dot_worker_dot_v1_dot_expert__pb2.ExchangeReq.SerializeToString,
+            ek_dot_worker_dot_v1_dot_expert__pb2.ExchangeResp.FromString,
             options,
             channel_credentials,
             insecure,

@@ -7,7 +7,7 @@ setup(
     author="ExpertMesh Team",
     packages=find_packages(),
     install_requires=[
-        "vllm",
+        "vllm>=0.14.1",
         "torch>=2.0.0",
         "grpcio>=1.44.0",
         "protobuf>=5.29.0",
