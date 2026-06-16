@@ -1,3 +1,4 @@
+pub mod weight_provision;
 pub mod xpu_ffn;
 pub mod xpu_ffn_activate;
 pub mod xpu_ffn_queue;

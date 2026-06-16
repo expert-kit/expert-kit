@@ -28,4 +28,10 @@ criterion_group!(
     benchmarks::xpu_ffn::bench,
     benchmarks::xpu_transfer::bench,
 );
-criterion_main!(benches);
+
+criterion_group!(
+    provision_benches,
+    benchmarks::weight_provision::bench,
+);
+
+criterion_main!(benches, provision_benches);

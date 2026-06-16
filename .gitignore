@@ -20,3 +20,6 @@ __pycache__
 # output
 output/
 .idea
+
+# others
+experiments/

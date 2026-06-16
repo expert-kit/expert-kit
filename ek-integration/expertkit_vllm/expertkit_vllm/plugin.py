@@ -32,11 +32,10 @@ def register():
 
 def expert_mode_register():
     print("🚀expertkit-vllm integration in expert_mode mode")
-    #TODO: need test, cause A10 has limited GPU memory, too small for testing
-    
+
     import vllm.model_executor.layers.fused_moe as fused_moe_module
     import vllm.model_executor.layers.fused_moe.layer as fused_moe
-    
+
     fused_moe.FusedMoE = GrpcExpert
     fused_moe_module.FusedMoE = GrpcExpert
 

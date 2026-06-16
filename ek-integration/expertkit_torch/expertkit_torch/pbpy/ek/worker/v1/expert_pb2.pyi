@@ -44,27 +44,29 @@ class ExpertState(_message.Message):
     stage: ExpertState.Stage
     def __init__(self, stage: _Optional[_Union[ExpertState.Stage, str]] = ...) -> None: ...
 
-class RetrieveStateReq(_message.Message):
-    __slots__ = ()
-    def __init__(self) -> None: ...
+class ExchangeReq(_message.Message):
+    __slots__ = ("id", "addr", "channel", "device", "last_will", "rdma_tcp_port")
+    ID_FIELD_NUMBER: _ClassVar[int]
+    ADDR_FIELD_NUMBER: _ClassVar[int]
+    CHANNEL_FIELD_NUMBER: _ClassVar[int]
+    DEVICE_FIELD_NUMBER: _ClassVar[int]
+    LAST_WILL_FIELD_NUMBER: _ClassVar[int]
+    RDMA_TCP_PORT_FIELD_NUMBER: _ClassVar[int]
+    id: str
+    addr: str
+    channel: str
+    device: str
+    last_will: bool
+    rdma_tcp_port: int
+    def __init__(self, id: _Optional[str] = ..., addr: _Optional[str] = ..., channel: _Optional[str] = ..., device: _Optional[str] = ..., last_will: bool = ..., rdma_tcp_port: _Optional[int] = ...) -> None: ...
 
-class RetrieveStateResp(_message.Message):
-    __slots__ = ("states",)
+class ExchangeResp(_message.Message):
+    __slots__ = ("state",)
     class ExpertWithState(_message.Message):
         __slots__ = ("target",)
         TARGET_FIELD_NUMBER: _ClassVar[int]
         target: _object_pb2.ExpertSlice
         def __init__(self, target: _Optional[_Union[_object_pb2.ExpertSlice, _Mapping]] = ...) -> None: ...
-    STATES_FIELD_NUMBER: _ClassVar[int]
-    states: _containers.RepeatedCompositeFieldContainer[RetrieveStateResp.ExpertWithState]
-    def __init__(self, states: _Optional[_Iterable[_Union[RetrieveStateResp.ExpertWithState, _Mapping]]] = ...) -> None: ...
-
-class UpdateStateReq(_message.Message):
-    __slots__ = ("target",)
-    TARGET_FIELD_NUMBER: _ClassVar[int]
-    target: _object_pb2.ExpertSlice
-    def __init__(self, target: _Optional[_Union[_object_pb2.ExpertSlice, _Mapping]] = ...) -> None: ...
-
-class UpdateStateResp(_message.Message):
-    __slots__ = ()
-    def __init__(self) -> None: ...
+    STATE_FIELD_NUMBER: _ClassVar[int]
+    state: ExchangeResp.ExpertWithState
+    def __init__(self, state: _Optional[_Union[ExchangeResp.ExpertWithState, _Mapping]] = ...) -> None: ...

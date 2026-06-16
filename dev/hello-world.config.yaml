@@ -21,6 +21,8 @@ worker:
   broadcast: 127.0.0.1
   ports:
     main: 51234
+  mem_capacity_mb: 4096    # reported in heartbeats; used for recovery target selection
+  shutdown_grace_secs: 30  # wait this long after SIGTERM before forcing exit
 
 controller:
   listen: 0.0.0.0
@@ -28,3 +30,24 @@ controller:
   ports:
     intra: 5001
     inter: 5002
+
+  fault_detection:
+    heartbeat_timeout_secs: 10       # seconds before a silent worker triggers recovery
+    node_active_threshold_secs: 60   # seconds before a node is excluded from routing/recovery
+    poller_interval_secs: 5          # routing table rebuild interval
+
+  # replication:              # hot-expert replication (opt-in)
+  #   enabled: true
+  #   hotspot_threshold: 5    # requests/window before an expert is replicated
+  #   target_rate_per_worker: 5
+  #   max_replicas: 3
+
+  # provisioning:             # cloud node provisioning on capacity shortfall (opt-in)
+  #   enabled: true
+  #   script: "./scripts/provision-aliyun.sh"
+  #   cooldown_secs: 120
+
+  # scaling:                  # progressive expert assignment on worker join (opt-in)
+  #   auto_assign: true
+  #   experts_per_step: 8
+  #   step_delay_ms: 200

@@ -37,7 +37,7 @@ impl ModelConfig {
 
     pub fn moe_layers(&self) -> Option<(usize, usize)> {
         match self.model_type() {
-            "deepseek_v3" => {
+            "deepseek_v2" | "deepseek_v3" => {
                 let start = self
                     .map
                     .get("first_k_dense_replace")
@@ -56,7 +56,9 @@ impl ModelConfig {
 
     pub fn routed_experts(&self) -> Option<usize> {
         match self.model_type() {
-            "deepseek_v3" => Some(self.map.get("n_routed_experts")?.as_u64()? as usize),
+            "deepseek_v2" | "deepseek_v3" => {
+                Some(self.map.get("n_routed_experts")?.as_u64()? as usize)
+            }
             "qwen3_moe" => Some(self.map.get("num_experts")?.as_u64()? as usize),
             "mixtral" => Some(self.map.get("num_local_experts")?.as_u64()? as usize),
             _ => {
@@ -68,7 +70,7 @@ impl ModelConfig {
     pub fn dim(&self) -> Option<(usize, usize)> {
         let hidden = self.map.get("hidden_size")?.as_u64()? as usize;
         let intermediate = match self.model_type() {
-            "deepseek_v3" | "qwen3_moe" => {
+            "deepseek_v2" | "deepseek_v3" | "qwen3_moe" => {
                 self.map.get("moe_intermediate_size")?.as_u64()? as usize
             }
             "mixtral" => self.map.get("intermediate_size")?.as_u64()? as usize,
@@ -258,7 +260,7 @@ where
         expert_id: usize,
     ) -> EKResult<Vec<String>> {
         match self.model_config.model_type() {
-            "deepseek_v3" | "qwen3_moe" => {
+            "deepseek_v2" | "deepseek_v3" | "qwen3_moe" => {
                 let key_up =
                     format!("model.layers.{layer_id}.mlp.experts.{expert_id}.up_proj.weight");
                 let key_up_scale = format!("{key_up}_scale_inv");
@@ -266,9 +268,9 @@ where
                 let key_gate =
                     format!("model.layers.{layer_id}.mlp.experts.{expert_id}.down_proj.weight");
                 let key_gate_scale = format!("{key_gate}_scale_inv");
+
                 let key_down =
                     format!("model.layers.{layer_id}.mlp.experts.{expert_id}.gate_proj.weight");
-
                 let key_down_scale = format!("{key_down}_scale_inv");
 
                 Ok(vec![

@@ -17,7 +17,7 @@ use super::{
     io::StateWriter,
     models::{self, NewExpert, NewInstance, NewModel, NewNode},
 };
-use diesel::{ExpressionMethods, SelectableHelper, upsert::excluded};
+use diesel::{ExpressionMethods, QueryDsl, SelectableHelper, upsert::excluded};
 use diesel_async::{AsyncConnection, RunQueryDsl};
 use ek_base::error::{EKError, EKResult};
 use models::{Expert, Instance, Model, Node};
@@ -165,6 +165,48 @@ impl StateWriterImpl {
         Ok(())
     }
 
+    pub async fn delete_experts_by_node(&self, node_id: i32) -> EKResult<usize> {
+        let mut conn = POOL.get().await?;
+        let count = diesel::delete(
+            schema::expert::table.filter(schema::expert::node_id.eq(node_id)),
+        )
+        .execute(&mut conn)
+        .await?;
+        Ok(count)
+    }
+
+    /// Delete a single expert assignment identified by (node_id, expert_id).
+    /// Used by evict-then-place recovery to free a slot for a unique expert.
+    pub async fn delete_expert_on_node(&self, node_id: i32, expert_id: &str) -> EKResult<usize> {
+        let mut conn = POOL.get().await?;
+        use schema::expert::dsl;
+        let count = diesel::delete(schema::expert::table)
+            .filter(dsl::node_id.eq(node_id))
+            .filter(dsl::expert_id.eq(expert_id))
+            .execute(&mut conn)
+            .await?;
+        Ok(count)
+    }
+
+    pub async fn delete_experts_by_node_hostname(&self, hostname: &str) -> EKResult<usize> {
+        let mut conn = POOL.get().await?;
+        let node_ids: Vec<i32> = schema::node::table
+            .filter(schema::node::hostname.eq(hostname))
+            .select(schema::node::id)
+            .load(&mut conn)
+            .await?;
+        if node_ids.is_empty() {
+            return Ok(0);
+        }
+        let count = diesel::delete(
+            schema::expert::table.filter(schema::expert::node_id.eq_any(&node_ids)),
+        )
+        .execute(&mut conn)
+        .await?;
+        log::info!("Cleaned {count} stale expert rows for node {hostname}");
+        Ok(count)
+    }
+
     pub async fn expert_upsert(&self, node: NewExpert) -> EKResult<()> {
         let mut conn = POOL.get().await?;
         diesel::insert_into(schema::expert::table)
@@ -179,6 +221,28 @@ impl StateWriterImpl {
             .execute(&mut conn)
             .await?;
         Ok(())
+    }
+
+    /// Batch upsert multiple expert assignments in a single query.
+    /// Used by recovery to insert thousands of experts at once instead of
+    /// one-by-one, reducing DB round-trips from O(n) to O(1).
+    pub async fn expert_upsert_batch(&self, experts: Vec<NewExpert>) -> EKResult<usize> {
+        if experts.is_empty() {
+            return Ok(0);
+        }
+        let mut conn = POOL.get().await?;
+        let count = diesel::insert_into(schema::expert::table)
+            .values(&experts)
+            .on_conflict((
+                schema::expert::node_id,
+                schema::expert::instance_id,
+                schema::expert::expert_id,
+            ))
+            .do_update()
+            .set(schema::expert::expert_id.eq(excluded(schema::expert::expert_id)))
+            .execute(&mut conn)
+            .await?;
+        Ok(count)
     }
 
     pub async fn instance_upsert(&self, node: NewInstance) -> EKResult<Instance> {
@@ -239,11 +303,39 @@ impl StateWriterImpl {
 
     pub async fn deactivate_node(&self, hostname: &str) -> EKResult<()> {
         let mut conn = POOL.get().await?;
+
+        // First, get the node_id for this hostname
+        let node_id: Option<i32> = schema::node::table
+            .filter(schema::node::hostname.eq(hostname))
+            .select(schema::node::id)
+            .first(&mut conn)
+            .await
+            .ok();
+
+        // Reset all experts on this node to "pending" state
+        // This ensures they're excluded from routing immediately
+        if let Some(nid) = node_id {
+            let pending_state = serde_json::json!({"status": "pending"});
+            let updated = diesel::update(schema::expert::table)
+                .filter(schema::expert::node_id.eq(nid))
+                .set(schema::expert::state.eq(pending_state))
+                .execute(&mut conn)
+                .await?;
+            log::info!(
+                "Deactivated node {}: reset {} experts to pending state",
+                hostname,
+                updated
+            );
+        }
+
+        // Set last seen to zero time and clear config
         use schema::node::dsl;
-        // Set last seen to zero time
         diesel::update(schema::node::table)
             .filter(dsl::hostname.eq(hostname))
-            .set((dsl::last_seen_at.eq(std::time::SystemTime::UNIX_EPOCH),))
+            .set((
+                dsl::last_seen_at.eq(std::time::SystemTime::UNIX_EPOCH),
+                dsl::config.eq(serde_json::json!({})),
+            ))
             .execute(&mut conn)
             .await?;
         Ok(())
@@ -279,6 +371,100 @@ impl StateWriterImpl {
             res.push(new_expert);
         }
         Ok(res)
+    }
+
+    pub async fn clear_node_config_by_hostname(&self, hostname: &str) -> EKResult<()> {
+        let mut conn = POOL.get().await?;
+        use schema::node::dsl;
+        diesel::update(schema::node::table)
+            .filter(dsl::hostname.eq(hostname))
+            .set(dsl::config.eq(serde_json::json!({})))
+            .execute(&mut conn)
+            .await?;
+        Ok(())
+    }
+
+    /// Promote a batch of experts from "scheduled" to "pending" state.
+    /// Used by progressive assignment to dispatch one stripe at a time.
+    pub async fn promote_experts_to_pending(
+        &self,
+        node_id: i32,
+        expert_ids: &[String],
+    ) -> EKResult<usize> {
+        if expert_ids.is_empty() {
+            return Ok(0);
+        }
+        let mut conn = POOL.get().await?;
+        let pending_state = serde_json::json!({"status": "pending"});
+
+        use schema::expert::dsl;
+        let count = diesel::update(schema::expert::table)
+            .filter(dsl::node_id.eq(node_id))
+            .filter(dsl::expert_id.eq_any(expert_ids))
+            .set(dsl::state.eq(&pending_state))
+            .execute(&mut conn)
+            .await?;
+        Ok(count)
+    }
+
+    /// Update expert load states based on worker heartbeat.
+    /// Experts in loaded_experts list → "loaded".
+    /// Other experts that are NOT "scheduled" → "pending".
+    /// Experts in "scheduled" state are left untouched (not yet dispatched).
+    pub async fn update_expert_load_states(
+        &self,
+        hostname: &str,
+        loaded_experts: &[String],
+    ) -> EKResult<usize> {
+        let mut conn = POOL.get().await?;
+        let reader = StateReaderImpl::new();
+
+        // Get node by hostname
+        let node = match reader.node_by_hostname(hostname).await? {
+            Some(n) => n,
+            None => {
+                log::warn!("Cannot update expert load states: node {} not found", hostname);
+                return Ok(0);
+            }
+        };
+
+        let loaded_state = serde_json::json!({"status": "loaded"});
+        let pending_state = serde_json::json!({"status": "pending"});
+        let scheduled_state = serde_json::json!({"status": "scheduled"});
+
+        use schema::expert::dsl;
+
+        // Mark loaded experts
+        let loaded_count = if !loaded_experts.is_empty() {
+            diesel::update(schema::expert::table)
+                .filter(dsl::node_id.eq(node.id))
+                .filter(dsl::expert_id.eq_any(loaded_experts))
+                .set(dsl::state.eq(&loaded_state))
+                .execute(&mut conn)
+                .await?
+        } else {
+            0
+        };
+
+        // Mark non-loaded, non-scheduled experts as pending.
+        // "scheduled" experts are not yet dispatched and must not be
+        // overwritten — they will be promoted to "pending" stripe by
+        // stripe during progressive loading.
+        let _pending_count = diesel::update(schema::expert::table)
+            .filter(dsl::node_id.eq(node.id))
+            .filter(diesel::dsl::not(dsl::expert_id.eq_any(loaded_experts)))
+            .filter(dsl::state.ne(&scheduled_state))
+            .set(dsl::state.eq(&pending_state))
+            .execute(&mut conn)
+            .await?;
+
+        log::debug!(
+            "Updated expert load states for node {}: {} loaded",
+            hostname,
+            loaded_count
+        );
+
+        Ok(loaded_count)
     }
 }
 pub fn get_state_writer() -> Arc<RwLock<dyn StateWriter + Send + Sync>> {

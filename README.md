@@ -46,7 +46,7 @@ Here are some tutorials to help you quickly start with Expert Kit.
 ## Repository Map
 
 - [ek-computation](./ek-agent): performs schedule(frontend) and computation(backend) task.
-- [ek-db](./ek-edb): supports registering and loading experts' weight in fine-grained granularity.
+- [ek-db](./ek-db): supports registering and loading experts' weight in fine-grained granularity.
 - [ek-benchmark](./ek-benchmark): contains several micro-benchmarks help you know the performance.
 - [ek-solution](./ek-solution): contains several recipes to quickly setup a running cluster.
 

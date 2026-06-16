@@ -1,0 +1,76 @@
+syntax = "proto3";
+package ek.control.v1;
+
+// RoutingService provides expert-to-worker routing information to frontends
+// This enables direct frontend→worker communication without controller forwarding
+service RoutingService {
+  // GetRouting returns the current routing table (expert_id → worker_addr)
+  rpc GetRouting(GetRoutingReq) returns (GetRoutingResp);
+
+  // SubscribeRoutingUpdates streams real-time routing changes to frontends
+  // Frontends should use this to stay synchronized with controller decisions
+  rpc SubscribeRoutingUpdates(SubscribeRoutingReq) returns (stream RoutingUpdate);
+}
+
+// Request for initial routing table
+message GetRoutingReq {
+  // Optional: filter to specific expert IDs (empty = all experts)
+  repeated string expert_ids = 1;
+}
+
+// Worker endpoint information including transport details
+message WorkerEndpoint {
+  // gRPC address (e.g., "http://10.0.0.5:5001")
+  string grpc_addr = 1;
+
+  // Transport channel type: "grpc", "rdma", or "shm"
+  string channel = 2;
+
+  // RDMA-specific: TCP port for RDMA endpoint exchange (0 if not RDMA)
+  uint32 rdma_tcp_port = 3;
+
+  // SHM-specific: Queue name prefix for shared memory (empty if not SHM)
+  string shm_queue_prefix = 4;
+
+  // Worker device type (e.g., "cuda:0", "cpu")
+  string device = 5;
+
+  // gRPC address of this worker's LocalWeightManager (e.g., "http://10.0.0.5:5004")
+  // Used by peer workers to fetch cached expert weights directly
+  string wm_addr = 6;
+}
+
+// List of worker endpoints for an expert (supports multi-worker routing)
+message WorkerEndpointList {
+  repeated WorkerEndpoint endpoints = 1;
+}
+
+// Response containing the routing table
+message GetRoutingResp {
+  // Map of expert_id → list of worker endpoints (supports multi-replica routing)
+  // Frontend performs load balancing across available workers
+  map<string, WorkerEndpointList> routing = 1;
+
+  // Version number for change tracking (incremented on every update)
+  uint64 version = 2;
+}
+
+// Request to subscribe to routing updates
+message SubscribeRoutingReq {
+  // Current version the frontend has (0 = send all)
+  uint64 current_version = 1;
+}
+
+// Incremental routing change notification
+message RoutingUpdate {
+  enum ChangeType {
+    ADDED = 0;     // New expert mapping added
+    REMOVED = 1;   // Expert mapping removed (worker offline)
+    MODIFIED = 2;  // Expert reassigned to different worker (rebalancing)
+  }
+
+  ChangeType type = 1;
+  string expert_id = 2;
+  WorkerEndpointList endpoints = 3;  // All endpoints for this expert (unset for REMOVED)
+  uint64 version = 4;                // New version after this change
+}

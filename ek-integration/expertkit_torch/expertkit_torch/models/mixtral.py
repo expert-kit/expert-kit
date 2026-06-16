@@ -11,12 +11,12 @@ from transformers import (
     AutoModelForCausalLM,
 )
 from transformers.utils.logging import set_verbosity_error
-from transformers.models.mixtral.modeling_mixtral import MixtralBlockSparseTop2MLP
 from transformers.models.mixtral import modeling_mixtral as mixtral
 from torch import nn
-from expertkit_torch.grpc_client import ExpertKitClient
+from expertkit_torch.grpc_client_new import ExpertKitClient
 
 from expertkit_torch.utils.profiler_manager import ProfilerManager
+from line_profiler import profile
 
 set_verbosity_error()
 
@@ -37,6 +37,7 @@ def intercept_moe(
     enable_ek=True,
     ek_addr: str = "localhost:5002",
     ek_model_name: str = "mixtral",
+    enable_direct_path: bool = True,
 ):
 
     class InterceptedMOE(nn.Module):
@@ -47,7 +48,11 @@ def intercept_moe(
             super().__init__()
             if enable_ek and InterceptedMOE.client is None:
                 InterceptedMOE.client = ExpertKitClient(
-                    ek_addr, DEFAULT_TIMEOUT_INTVAL)
+                    controller_addr=ek_addr,
+                    timeout_sec=DEFAULT_TIMEOUT_INTVAL,
+                )
+                print(
+                    f"[ExpertKit] Client initialized: controller={ek_addr}, direct_path={enable_direct_path}")
             self.hidden_dim = config.hidden_size
             self.ffn_dim = config.intermediate_size
             self.num_experts = config.num_local_experts
@@ -62,6 +67,7 @@ def intercept_moe(
                 self.hidden_dim, self.num_experts, bias=False)
 
             if not enable_ek:
+                from transformers.models.mixtral.modeling_mixtral import MixtralBlockSparseTop2MLP
                 self.experts = nn.ModuleList(
                     [MixtralBlockSparseTop2MLP(config)
                      for _ in range(self.num_experts)]
@@ -111,35 +117,46 @@ def intercept_moe(
 
         def normal_forward(
             self,
+            *,
             hidden_states: torch.Tensor,
-            expert_mask: torch.Tensor,
-            hidden_dim: int,
             routing_weights: torch.Tensor,
-            final_hidden_states: torch.Tensor,
+            selected_experts: torch.Tensor,
+            expert_mask: torch.Tensor,
+            batch_size: int,
+            sequence_length: int,
+            hidden_dim: int,
         ):
+            start_time = time.time()
+
+            final_hidden_states = torch.zeros(
+                (batch_size * sequence_length, hidden_dim),
+                dtype=hidden_states.dtype,
+                device=hidden_states.device,
+            )
             for expert_idx in range(self.num_experts):
                 expert_layer = self.experts[expert_idx]
                 idx, top_x = torch.where(expert_mask[expert_idx])
-
-                # Index the correct hidden states and compute the expert hidden state for
-                # the current expert. We need to make sure to multiply the output hidden
-                # states by `routing_weights` on the corresponding tokens (top-1 and top-2)
                 current_state = hidden_states[None,
                                               top_x].reshape(-1, hidden_dim)
                 current_hidden_states = (
                     expert_layer(current_state) *
                     routing_weights[top_x, idx, None]
                 )
-
-                # However `index_add_` only support torch tensors for indexing so we'll use
-                # the `top_x` tensor here.
                 final_hidden_states.index_add_(
                     0, top_x, current_hidden_states.to(hidden_states.dtype)
                 )
-            pass
+            final_hidden_states = final_hidden_states.reshape(
+                batch_size, sequence_length, hidden_dim
+            )
+
+            end_time = time.time()
+
+            return final_hidden_states
 
         def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
             """ """
+            forward_start = time.time()
+
             batch_size, sequence_length, hidden_dim = hidden_states.shape
             if self.training and self.jitter_noise > 0:
                 hidden_states *= torch.empty_like(hidden_states).uniform_(
@@ -158,30 +175,13 @@ def intercept_moe(
             # we cast back to the input dtype
             routing_weights = routing_weights.to(hidden_states.dtype)
 
-            final_hidden_states = torch.zeros(
-                (batch_size * sequence_length, hidden_dim),
-                dtype=hidden_states.dtype,
-                device=hidden_states.device,
-            )
             # One hot encode the selected experts to create an expert mask
             # this will be used to easily index which expert is going to be sollicitated
             expert_mask = torch.nn.functional.one_hot(
                 selected_experts, num_classes=self.num_experts
             ).permute(2, 1, 0)
 
-            if not enable_ek:
-                final = self.normal_forward(
-                    hidden_states=hidden_states,
-                    expert_mask=expert_mask,
-                    hidden_dim=hidden_dim,
-                    routing_weights=routing_weights,
-                    final_hidden_states=final_hidden_states,
-                )
-
-                final = final_hidden_states.reshape(
-                    batch_size, sequence_length, hidden_dim
-                )
-            else:
+            if enable_ek:
                 final = self.ek_forward(
                     hidden_states=hidden_states,
                     routing_weights=routing_weights,
@@ -190,6 +190,18 @@ def intercept_moe(
                     sequence_length=sequence_length,
                     hidden_dim=hidden_dim,
                 )
+            else:
+                final = self.normal_forward(
+                    hidden_states=hidden_states,
+                    routing_weights=routing_weights,
+                    selected_experts=selected_experts,
+                    expert_mask=expert_mask,
+                    batch_size=batch_size,
+                    sequence_length=sequence_length,
+                    hidden_dim=hidden_dim,
+                )
+
+            forward_end = time.time()
 
             return final, router_logits
 
@@ -208,7 +220,8 @@ def evaluate_batch(
     output_max_length=64,
     enable_ek=True,
     ek_addr="localhost:5002",
-    ek_model_name="mixtral"
+    ek_model_name="mixtral",
+    enable_direct_path=True,
 ) -> Dict[str, Any]:
     """
     Batch inference with performance profiling.
@@ -233,6 +246,7 @@ def evaluate_batch(
         enable_ek=enable_ek,
         ek_addr=ek_addr,
         ek_model_name=ek_model_name,
+        enable_direct_path=enable_direct_path,
     )
 
     # Load the tokenizer and the model only once
@@ -262,7 +276,6 @@ def evaluate_batch(
                 messages,
                 tokenize=False,
                 add_generation_prompt=True,
-                enable_thinking=True,
             )
             batch_messages.append(text)
 
@@ -293,28 +306,13 @@ def evaluate_batch(
                 output_ids = [
                     token_id for token_id in output_ids if token_id != tokenizer.pad_token_id]
 
-            # Extract thinking content
-            thinking_finish = False
-            try:
-                # Find </think> token (151668)
-                index = len(output_ids) - output_ids[::-1].index(151668)
-                thinking_finish = True
-            except ValueError:
-                # Thinking not finished
-                index = len(output_ids) - 1
-
-            thinking_content = tokenizer.decode(
-                output_ids[:index], skip_special_tokens=True
-            ).strip("\n")
-
             content = tokenizer.decode(
-                output_ids[index:],
+                output_ids,
                 skip_special_tokens=True
             ).strip("\n")
 
             results.append({
                 "prompt": prompts[i],
-                "thinking_content": thinking_content,
                 "content": content,
                 "input_tokens": len(model_inputs.input_ids[i]),
                 "output_tokens": len(output_ids),
@@ -327,7 +325,7 @@ def evaluate_batch(
         }
 
 
-def sharegpt(path):
+def sharegpt(path, max_prompt_len=None):
     if not os.path.exists(path):
         raise FileNotFoundError(f"File does not exist: {path}")
     if not os.path.isfile(path):
@@ -338,7 +336,10 @@ def sharegpt(path):
     for item in data:
         for conversation in item["conversations"]:
             if conversation["from"] == "human":
-                prompts.append(conversation["value"])
+                if max_prompt_len is not None:
+                    prompts.append(conversation["value"][:max_prompt_len])
+                else:
+                    prompts.append(conversation["value"])
     return prompts
 
 
@@ -366,7 +367,14 @@ def main():
         "--ek_addr",
         type=str,
         default="localhost:5002",
-        help="The address of the ExpertKit server.",
+        help="The address of the ExpertKit controller.",
+    )
+    parser.add_argument(
+        "--ek_direct_path",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Enable direct worker communication (bypasses controller forwarding). "
+             "Implements request decomposition to match worker's expected format.",
     )
     parser.add_argument(
         "--detail_profile",
@@ -395,6 +403,18 @@ def main():
         action="store_true",
         help="Print the response content.",
     )
+    parser.add_argument(
+        "--max_prompt_len",
+        type=int,
+        default=None,
+        help="Maximum length of each prompt (applicable for ShareGPT dataset).",
+    )
+    parser.add_argument(
+        "--prompt_num",
+        type=int,
+        default=512,
+        help="The number of prompts to use for evaluation.",
+    )
     args = parser.parse_args()
 
     if args.dataset == "none":
@@ -404,38 +424,43 @@ def main():
             "Explain the benefits of mixture of experts.",
             "How does MoE improve model efficiency?",
             "Compare MoE with dense models.",
-        ] * 512
+        ] * args.prompt_num
+        test_prompts = test_prompts[:args.prompt_num]
     elif args.dataset == "sharegpt":
         # Validate that dataset_path is provided
         if args.dataset_path is None:
             raise ValueError(
                 "You must provide --dataset_path when using the 'sharegpt' dataset.")
         # Load prompts from ShareGPT dataset
-        test_prompts = sharegpt(args.dataset_path)
-        if len(test_prompts) < 512:
-            test_prompts *= (512 // len(test_prompts)) + 1
-        test_prompts = test_prompts[:512]
+        test_prompts = sharegpt(
+            args.dataset_path, max_prompt_len=args.max_prompt_len)
+        if len(test_prompts) < args.prompt_num:
+            test_prompts *= (args.prompt_num // len(test_prompts)) + 1
+        test_prompts = test_prompts[:args.prompt_num]
     else:
         raise ValueError("Invalid dataset specified.")
 
     test_batch_sizes = [1, 2, 4, 8, 16, 32, 64, 128, 256]
     aggregated_results = []
     for batch_size in test_batch_sizes:
-        batch_result = evaluate_batch(
-            model_path=args.model_path,
-            prompts=test_prompts[:batch_size],
-            enable_ek=args.enable_ek,
-            ek_addr=args.ek_addr,
-            ek_model_name=args.ek_model_name,
-            output_max_length=args.output_max,
-        )
-        aggregated_results.extend(batch_result["results"])
+        for prompts in range(0, len(test_prompts), batch_size):
+            if prompts / batch_size >= 6:
+                break
+            batch_result = evaluate_batch(
+                model_path=args.model_path,
+                prompts=test_prompts[prompts:prompts + batch_size],
+                enable_ek=args.enable_ek,
+                ek_addr=args.ek_addr,
+                ek_model_name=args.ek_model_name,
+                enable_direct_path=args.ek_direct_path,
+                output_max_length=args.output_max,
+            )
+            aggregated_results.extend(batch_result["results"])
 
     if args.print_response:
-        for result in aggregated_results:
+        for result in aggregated_results[:5]:
             print()
             print(f"Prompt: {result['prompt']}")
-            print(f"Thinking Content: {result['thinking_content']}")
             print(f"Response: {result['content']}")
             print(
                 f"Input Tokens: {result['input_tokens']}, Output Tokens: {result['output_tokens']}")

@@ -82,11 +82,12 @@ impl ComputationProxyServiceImpl {
                         log::error!("executor error: {err:?}");
                         return Err(tonic::Status::internal(format!("executor error: {err:?}")))
                     }
-                    continue
+                    // err_tx dropped: exec task completed without error, wait for result
+                    break;
                 }
                 res = rx.recv() => {
-                    let elapsed_ms=  start.elapsed().as_millis();
-                    log::info!(elapsed_ms; "forward request in controller done" );
+                    let elapsed_ms = start.elapsed().as_millis();
+                    log::info!(elapsed_ms; "forward request in controller done");
                     if let Some(resp) = res {
                         return Ok(tonic::Response::new(resp.as_ref().clone()));
                     } else {
@@ -94,6 +95,12 @@ impl ComputationProxyServiceImpl {
                     }
                 }
             }
+        }
+        let elapsed_ms = start.elapsed().as_millis();
+        log::info!(elapsed_ms; "forward request in controller done");
+        match rx.recv().await {
+            Some(resp) => Ok(tonic::Response::new(resp.as_ref().clone())),
+            None => Err(tonic::Status::internal("forward error: no data")),
         }
     }
 }

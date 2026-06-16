@@ -1,7 +1,7 @@
 use crate::{proto::ek::object::v1::ExpertSlice, schema, state::pool::POOL};
 
 use super::models::{self, NewExpert, NewInstance, NewModel, NewNode};
-use diesel::{ExpressionMethods, QueryDsl, SelectableHelper};
+use diesel::{BoolExpressionMethods, ExpressionMethods, OptionalExtension, QueryDsl, SelectableHelper};
 use diesel_async::RunQueryDsl;
 use ek_base::error::EKResult;
 use models::{Expert, Instance, Model, Node};
@@ -55,10 +55,17 @@ impl StateReaderImpl {
         Ok(res)
     }
 
+    /// Nodes with a recent heartbeat.  Uses the same configurable threshold as
+    /// the poller (`fault_detection.node_active_threshold_secs`) so recovery
+    /// target selection and routing are consistent.
     pub async fn active_nodes(&self) -> EKResult<Vec<Node>> {
         let mut conn = POOL.get().await?;
         use schema::node::dsl;
-        let th = std::time::SystemTime::now() - std::time::Duration::from_secs(20);
+        let threshold_secs = ek_base::config::get_ek_settings()
+            .controller
+            .fault_detection
+            .node_active_threshold_secs;
+        let th = std::time::SystemTime::now() - std::time::Duration::from_secs(threshold_secs);
         let res = schema::node::table
             .filter(dsl::last_seen_at.gt(th))
             .select(models::Node::as_select())
@@ -74,8 +81,10 @@ impl StateReaderImpl {
             .filter(dsl::name.eq(name))
             .select(models::Model::as_select())
             .first(&mut conn)
-            .await?;
-        Ok(Some(res))
+            .await
+            .optional()
+            .map_err(ek_base::error::EKError::from)?;
+        Ok(res)
     }
 
     pub async fn instance_by_name(&self, name: &str) -> EKResult<Option<Instance>> {
@@ -85,8 +94,10 @@ impl StateReaderImpl {
             .filter(dsl::name.eq(name))
             .select(models::Instance::as_select())
             .first(&mut conn)
-            .await?;
-        Ok(Some(res))
+            .await
+            .optional()
+            .map_err(ek_base::error::EKError::from)?;
+        Ok(res)
     }
     async fn _node_by_expert(&self, expert_id: &str) -> EKResult<Vec<Node>> {
         let mut conn = POOL.get().await?;
@@ -94,6 +105,29 @@ impl StateReaderImpl {
         let res = schema::node::table
             .inner_join(schema::expert::table)
             .filter(schema::expert::dsl::expert_id.eq(expert_id))
+            .select(Node::as_select())
+            .distinct()
+            .load(&mut conn)
+            .await?;
+        Ok(res)
+    }
+
+    /// Like `node_by_expert` but only returns nodes where the expert
+    /// is in "loaded" state (or null for backwards compat).  Used by
+    /// the controller registry to avoid routing to nodes that haven't
+    /// finished loading the expert yet.
+    pub async fn node_by_expert_loaded(&self, expert_id: &str) -> EKResult<Vec<Node>> {
+        let mut conn = POOL.get().await?;
+        let loaded_state = serde_json::json!({"status": "loaded"});
+
+        let res = schema::node::table
+            .inner_join(schema::expert::table)
+            .filter(schema::expert::dsl::expert_id.eq(expert_id))
+            .filter(
+                schema::expert::dsl::state
+                    .eq(&loaded_state)
+                    .or(schema::expert::dsl::state.eq(serde_json::Value::Null)),
+            )
             .select(Node::as_select())
             .distinct()
             .load(&mut conn)
@@ -113,9 +147,11 @@ impl StateReader for StateReaderImpl {
         let res = schema::node::table
             .filter(dsl::hostname.eq(hostname))
             .select(models::Node::as_select())
-            .get_result(&mut conn)
-            .await?;
-        Ok(Some(res))
+            .first(&mut conn)
+            .await
+            .optional()
+            .map_err(ek_base::error::EKError::from)?;
+        Ok(res)
     }
 
     async fn instance_by_id(&self, id: i32) -> EKResult<Option<Instance>> {

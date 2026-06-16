@@ -1,4 +1,13 @@
-use std::time::Instant;
+use std::{
+    collections::HashMap,
+    sync::{
+        LazyLock,
+        atomic::{AtomicU64, Ordering},
+    },
+    time::Instant,
+};
+
+use dashmap::DashMap;
 
 use crate::{
     metrics::{METRIC_WORKER_EXPERT_ACTIVATION, METRIC_WORKER_FORWARD},
@@ -9,6 +18,22 @@ use crate::{
 use ek_base::utils::Defers;
 use tonic::{Request, Response, Status};
 use tracing::instrument;
+
+/// Per-expert request counters, reset after each heartbeat snapshot.
+static REQUEST_COUNTS: LazyLock<DashMap<String, AtomicU64>> = LazyLock::new(DashMap::new);
+
+/// Atomically snapshot all per-expert request counts and reset them to zero.
+/// Called once per heartbeat interval; returned map is included in the heartbeat.
+pub fn snapshot_and_reset() -> HashMap<String, u64> {
+    let mut result = HashMap::new();
+    for entry in REQUEST_COUNTS.iter() {
+        let count = entry.value().swap(0, Ordering::Relaxed);
+        if count > 0 {
+            result.insert(entry.key().clone(), count);
+        }
+    }
+    result
+}
 
 use super::core::{EKInstanceGateSync, get_instance_gate_sync};
 use tracing_opentelemetry::OpenTelemetrySpanExt;
@@ -58,6 +83,12 @@ impl BasicExpertImpl {
         );
         let exp_id = request.get_ref().sequences[0].experts[0].clone();
         let start = Instant::now();
+
+        // Increment per-expert counter (reset each heartbeat)
+        REQUEST_COUNTS
+            .entry(exp_id.clone())
+            .or_insert_with(|| AtomicU64::new(0))
+            .fetch_add(1, Ordering::Relaxed);
 
         let start_cloned = start;
         let settings = ek_base::config::get_ek_settings();
