@@ -329,16 +329,13 @@ async fn evict_and_place(
             if replica_counts.contains_key(&expert.expert_id) {
                 continue; // already counted
             }
-            match reader.node_by_expert(&expert.expert_id).await {
-                Ok(nodes) => {
-                    let count = nodes
-                        .iter()
-                        .filter(|n| n.hostname != dead_hostname)
-                        .filter(|n| active_hostnames.contains(&n.hostname))
-                        .count();
-                    replica_counts.insert(expert.expert_id.clone(), count);
-                }
-                Err(_) => {}
+            if let Ok(nodes) = reader.node_by_expert(&expert.expert_id).await {
+                let count = nodes
+                    .iter()
+                    .filter(|n| n.hostname != dead_hostname)
+                    .filter(|n| active_hostnames.contains(&n.hostname))
+                    .count();
+                replica_counts.insert(expert.expert_id.clone(), count);
             }
         }
         node_experts.insert(n.id, experts);

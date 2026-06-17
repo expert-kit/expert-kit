@@ -107,7 +107,7 @@ async fn create_rdma_queues_with_tcp_server(
 
     // Create TCP server for endpoint exchange
     let endpoint_server = RdmaEndpointServer::new(req_queue_arc, resp_queue_arc, poison)
-        .map_err(|e| ek_base::error::EKError::IoError(e))?;
+        .map_err(ek_base::error::EKError::IoError)?;
     let tcp_port = endpoint_server.port();
 
     // Store TCP port globally

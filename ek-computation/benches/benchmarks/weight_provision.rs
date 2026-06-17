@@ -745,7 +745,8 @@ fn measure_multi_fetch(
             let wm_clone = wm.clone();
             runtime().block_on(async move {
                 let mut jobs = JoinSet::new();
-                for key in keys.iter().cloned() {
+                for key in keys {
+                    let key = key.clone();
                     let wm = wm_clone.clone();
                     jobs.spawn(async move { wm.get_expert(&key).await.map(|bytes| bytes.len()) });
                 }

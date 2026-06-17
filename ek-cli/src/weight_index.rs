@@ -255,7 +255,7 @@ async fn bench(
     Ok(())
 }
 
-fn print_stats(label: &str, times: &mut Vec<f64>) {
+fn print_stats(label: &str, times: &mut [f64]) {
     if times.is_empty() {
         println!("{:<12} {:>10}", label, "n/a");
         return;

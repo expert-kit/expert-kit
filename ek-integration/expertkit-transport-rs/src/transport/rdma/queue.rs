@@ -52,7 +52,6 @@ struct RdmaQueueMeta {
 
 /// Trait for types that can be sent over RDMA queue
 /// Must be able to serialize to/from byte slices
-#[expect(clippy::len_without_is_empty)]
 pub trait GeneralShmQueueBytes {
     /// Maximum capacity in bytes (includes padding)
     const CAPACITY: usize;
@@ -207,7 +206,7 @@ impl<T: GeneralShmQueueBytes> RdmaQueue<T> {
 
     /// Get the local endpoint information for connection establishment
     pub fn endpoint(&self) -> io::Result<QueuePairEndpoint> {
-        Ok(self.endpoint.clone())
+        Ok(self.endpoint)
     }
 
     /// Get the local memory region information for sharing with remote peer

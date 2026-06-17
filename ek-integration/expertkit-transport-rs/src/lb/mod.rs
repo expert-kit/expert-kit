@@ -175,7 +175,7 @@ pub(crate) fn warm_start_tpm(
         .collect();
     if measured.is_empty() {
         device_hint
-            .map(|d| device_default_tpm(d))
+            .map(device_default_tpm)
             .unwrap_or(DEFAULT_THROUGHPUT_TPM)
     } else {
         measured.iter().sum::<f64>() / measured.len() as f64
@@ -195,7 +195,7 @@ pub(crate) fn warm_start_rtt(
         .collect();
     if measured.is_empty() {
         device_hint
-            .map(|d| device_default_rtt(d))
+            .map(device_default_rtt)
             .unwrap_or(DEFAULT_RTT)
     } else {
         measured.iter().sum::<f64>() / measured.len() as f64

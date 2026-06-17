@@ -140,6 +140,20 @@ impl Dispatcher for DispatcherImpl {
     }
 }
 
+impl DispatcherImpl {
+    /// Immediately send `experts` to a specific worker without waiting for the next
+    /// poller tick. Used by recovery to trigger loading on the target node right away.
+    pub async fn trigger_worker(&self, hostname: &str, experts: Vec<Expert>) {
+        if let Some(ch) = self.ch_store.get(hostname) {
+            if let Err(e) = ch.send(experts).await {
+                log::warn!("trigger_worker: failed to send to {hostname}: {e}");
+            }
+        } else {
+            log::warn!("trigger_worker: no active channel for {hostname}");
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -173,19 +187,5 @@ mod tests {
     #[test]
     fn fingerprint_empty() {
         assert_eq!(fingerprint(&[]), fingerprint(&[]));
-    }
-}
-
-impl DispatcherImpl {
-    /// Immediately send `experts` to a specific worker without waiting for the next
-    /// poller tick. Used by recovery to trigger loading on the target node right away.
-    pub async fn trigger_worker(&self, hostname: &str, experts: Vec<Expert>) {
-        if let Some(ch) = self.ch_store.get(hostname) {
-            if let Err(e) = ch.send(experts).await {
-                log::warn!("trigger_worker: failed to send to {hostname}: {e}");
-            }
-        } else {
-            log::warn!("trigger_worker: no active channel for {hostname}");
-        }
     }
 }

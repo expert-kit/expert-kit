@@ -14,6 +14,10 @@ const MAX_TENSOR_SIZE: usize = 64 * 1024 * 1024; // 64 MB
 const REQ_CAPACITY: usize = 8 + 64 + 8 + MAX_TENSOR_SIZE;
 const RESP_CAPACITY: usize = 8 + 8 + MAX_TENSOR_SIZE;
 
+type PendingResponses = HashMap<usize, ShmqWorkerResp>;
+type SharedPendingResponses = Arc<Mutex<PendingResponses>>;
+type PendingResponseCache = Arc<DashMap<String, SharedPendingResponses>>;
+
 /// Shared memory transport for local workers
 pub struct ShmTransport {
     /// Cache of request queues
@@ -22,7 +26,7 @@ pub struct ShmTransport {
     resp_connections: Arc<DashMap<String, Arc<Mutex<ShmQueue>>>>,
     /// Pending responses cache
     /// Maps worker endpoint -> (response_id -> response)
-    pending_responses: Arc<DashMap<String, Arc<Mutex<HashMap<usize, ShmqWorkerResp>>>>>,
+    pending_responses: PendingResponseCache,
     /// Timeout for operations
     timeout: std::time::Duration,
 }
@@ -38,7 +42,7 @@ impl ShmTransport {
     }
 
     /// Get or create pending response map for a worker
-    fn get_pending_map(&self, endpoint: &str) -> Arc<Mutex<HashMap<usize, ShmqWorkerResp>>> {
+    fn get_pending_map(&self, endpoint: &str) -> SharedPendingResponses {
         self.pending_responses
             .entry(endpoint.to_string())
             .or_insert_with(|| Arc::new(Mutex::new(HashMap::new())))

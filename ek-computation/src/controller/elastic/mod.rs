@@ -210,7 +210,7 @@ impl ElasticManager {
 
         let cooldown = std::time::Duration::from_secs(provisioning.cooldown_secs);
         let elapsed = self.last_provision_time.map(|t| t.elapsed());
-        if elapsed.map_or(false, |e| e < cooldown) {
+        if elapsed.is_some_and(|e| e < cooldown) {
             log::debug!("ElasticManager: provisioner cooldown active, skipping");
             return;
         }

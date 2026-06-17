@@ -200,11 +200,11 @@ pub async fn progressive_assign(new_hostname: &str) {
         // symmetric across layers since progressive_assign assigns the same
         // indices to every layer).
         let sample_layer = vital.moe_layers.0;
-        for idx in 0..vital.routed_experts {
+        for (idx, replica_count) in replica_counts.iter_mut().enumerate() {
             let key = ExpertKey::new(model_name.clone(), sample_layer, idx);
             let eid = key.as_object_key();
             if let Ok(nodes) = reader.node_by_expert(&eid).await {
-                replica_counts[idx] = nodes
+                *replica_count = nodes
                     .iter()
                     .filter(|n| active_node_ids.contains(&n.id))
                     .count();

@@ -85,13 +85,12 @@ impl RoutingService for RoutingServiceImpl {
         tokio::spawn(async move {
             while let Ok(update) = update_rx.recv().await {
                 // Only send updates newer than client's current version
-                if update.version > current_version {
-                    if tx.send(Ok(update)).await.is_err() {
+                if update.version > current_version
+                    && tx.send(Ok(update)).await.is_err() {
                         // Client disconnected
                         log::debug!("Frontend disconnected from routing updates");
                         break;
                     }
-                }
             }
         });
 

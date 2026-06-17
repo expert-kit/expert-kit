@@ -235,7 +235,7 @@ impl StatePollerImpl {
                 // Collect all workers hosting this expert (multi-replica support)
                 routing_updates
                     .entry(expert_id.clone())
-                    .or_insert_with(Vec::new)
+                    .or_default()
                     .push(endpoint.clone());
             }
         }
