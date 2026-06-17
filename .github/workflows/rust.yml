@@ -108,6 +108,11 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y build-essential libpq-dev pkg-config libprotobuf-dev protobuf-compiler jq libnl-3-dev libnl-route-3-dev
+      
+      - name: Install InfiniBand dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libibverbs-dev rdma-core
 
       - name: Set up Rust
         uses: actions-rs/toolchain@v1
