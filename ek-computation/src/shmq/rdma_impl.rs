@@ -174,7 +174,7 @@ impl<T: GeneralShmQueueBytes> RdmaQueue<T> {
 
     /// Get the local endpoint information for connection establishment
     pub fn endpoint(&self) -> io::Result<QueuePairEndpoint> {
-        Ok(self.endpoint.clone())
+        Ok(self.endpoint)
     }
 
     /// Get the local memory region information for sharing with remote peer

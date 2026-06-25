@@ -103,9 +103,9 @@ impl StateServerImpl {
             // Allow the registry to create channels to this node again
             get_registry().lock().await.reregister(&msg.id);
 
-            if let Ok(Some(node)) = reader.node_by_hostname(&msg.id).await {
-                if let Ok(old) = reader.experts_by_node(node.id).await {
-                    if !old.is_empty() {
+            if let Ok(Some(node)) = reader.node_by_hostname(&msg.id).await
+                && let Ok(old) = reader.experts_by_node(node.id).await
+                    && !old.is_empty() {
                         log::info!(
                             "Clearing {} stale expert rows for returning worker {}",
                             old.len(),
@@ -113,8 +113,6 @@ impl StateServerImpl {
                         );
                         let _ = w.delete_experts_by_node(node.id).await;
                     }
-                }
-            }
         }
 
         let err = w

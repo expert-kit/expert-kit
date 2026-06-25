@@ -57,11 +57,11 @@ impl ShmQueue {
     #[allow(unused)]
     pub fn new(name: &str, capacity: usize, slot_size: usize) -> Result<Self> {
         // Align slot size to 64 bytes
-        let slot_size = ((slot_size + 63) / 64) * 64;
+        let slot_size = slot_size.div_ceil(64) * 64;
 
         // Calculate layout
         let meta_size = std::mem::size_of::<ShmQueueMeta>();
-        let meta_slots = (meta_size + slot_size - 1) / slot_size;
+        let meta_slots = meta_size.div_ceil(slot_size);
         let data_offset = 1 + meta_slots;
         let total_slots = capacity + 1 + meta_slots;
         let total_size = total_slots * slot_size;
@@ -114,7 +114,7 @@ impl ShmQueue {
     /// Open an existing shared memory queue
     pub fn open(name: &str, _capacity: usize, slot_size: usize) -> Option<Self> {
         // Align slot size to 64 bytes
-        let slot_size = ((slot_size + 63) / 64) * 64;
+        let slot_size = slot_size.div_ceil(64) * 64;
 
         // Open shared memory
         let shm = mman::shm_open(name, OFlag::O_RDWR, Mode::S_IRUSR | Mode::S_IWUSR).ok()?;

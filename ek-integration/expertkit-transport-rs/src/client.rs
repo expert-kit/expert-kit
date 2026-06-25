@@ -464,7 +464,7 @@ impl ExpertKitClient {
     /// Used when direct worker requests fail
     async fn forward_via_controller(
         &self,
-        expert_ids: &Vec<Vec<String>>,
+        expert_ids: &[Vec<String>],
         hidden_state: &Tensor,
     ) -> Result<Tensor> {
         let channel = self.controller_channel.as_ref()

@@ -11,6 +11,10 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex as TokioMutex;
 
+type PendingResponses = HashMap<usize, ShmqWorkerResp>;
+type SharedPendingResponses = Arc<Mutex<PendingResponses>>;
+type PendingResponseCache = Arc<DashMap<String, SharedPendingResponses>>;
+
 /// RDMA transport for high-performance remote workers
 #[derive(Clone)]
 pub struct RdmaTransport {
@@ -19,7 +23,7 @@ pub struct RdmaTransport {
     /// Cache of response queues (endpoint -> queue)
     resp_connections: Arc<DashMap<String, Arc<Mutex<RdmaQueue<ShmqWorkerResp>>>>>,
     /// Pending responses cache (endpoint -> (response_id -> response))
-    pending_responses: Arc<DashMap<String, Arc<Mutex<HashMap<usize, ShmqWorkerResp>>>>>,
+    pending_responses: PendingResponseCache,
     /// Maps worker endpoint -> mutex that guards connection establishment
     connection_locks: Arc<DashMap<String, Arc<TokioMutex<()>>>>,
     /// Timeout for operations
@@ -39,7 +43,7 @@ impl RdmaTransport {
     }
 
     /// Get or create pending response map for a worker
-    fn get_pending_map(&self, endpoint: &str) -> Arc<Mutex<HashMap<usize, ShmqWorkerResp>>> {
+    fn get_pending_map(&self, endpoint: &str) -> SharedPendingResponses {
         self.pending_responses
             .entry(endpoint.to_string())
             .or_insert_with(|| Arc::new(Mutex::new(HashMap::new())))

@@ -403,7 +403,7 @@ impl ExpertRegistryImpl {
 
             RdmaEndpointClient::connect_and_exchange(worker_ip, tcp_port, req_queue, resp_queue)
                 .await
-                .map_err(|e| EKError::IoError(e))?;
+                .map_err(EKError::IoError)?;
 
             // Mark connection as established
             connection.connected = true;

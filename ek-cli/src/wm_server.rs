@@ -19,7 +19,7 @@ pub async fn wm_server_main() -> EKResult<()> {
 
     let server = peer_server::start_peer_server(wm, &addr)
         .await
-        .map_err(|e| ek_base::error::EKError::IoError(e))?;
+        .map_err(ek_base::error::EKError::IoError)?;
 
     server
         .await

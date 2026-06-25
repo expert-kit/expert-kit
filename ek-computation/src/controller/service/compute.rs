@@ -75,24 +75,21 @@ impl ComputationProxyServiceImpl {
             .in_current_span(),
         );
 
-        loop {
-            tokio::select! {
-                err = err_rx.recv() => {
-                    if let Some(err) = err {
-                        log::error!("executor error: {err:?}");
-                        return Err(tonic::Status::internal(format!("executor error: {err:?}")))
-                    }
-                    // err_tx dropped: exec task completed without error, wait for result
-                    break;
+        tokio::select! {
+            err = err_rx.recv() => {
+                if let Some(err) = err {
+                    log::error!("executor error: {err:?}");
+                    return Err(tonic::Status::internal(format!("executor error: {err:?}")));
                 }
-                res = rx.recv() => {
-                    let elapsed_ms = start.elapsed().as_millis();
-                    log::info!(elapsed_ms; "forward request in controller done");
-                    if let Some(resp) = res {
-                        return Ok(tonic::Response::new(resp.as_ref().clone()));
-                    } else {
-                        return Err(tonic::Status::internal("forward error: no data"));
-                    }
+                // err_tx dropped: exec task completed without error, wait for result
+            }
+            res = rx.recv() => {
+                let elapsed_ms = start.elapsed().as_millis();
+                log::info!(elapsed_ms; "forward request in controller done");
+                if let Some(resp) = res {
+                    return Ok(tonic::Response::new(resp.as_ref().clone()));
+                } else {
+                    return Err(tonic::Status::internal("forward error: no data"));
                 }
             }
         }
