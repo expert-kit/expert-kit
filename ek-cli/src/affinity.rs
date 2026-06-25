@@ -418,12 +418,32 @@ mod tests {
     fn test_set_cpu_affinity() {
         let ops = get_cpu_affinity_ops();
 
+        // Skip test if CPU affinity is not supported on this platform
+        if !ops.is_cpu_affinity_supported() {
+            return;
+        }
+
+        let cpu_count = ops.get_cpu_count();
+        if cpu_count == 0 {
+            return;
+        }
+
+        // Choose a valid set of cores based on availability
+        // Prefer original intent [0, 1, 4] when the machine has >=5 CPUs
+        let target: Vec<usize> = if cpu_count >= 5 {
+            vec![0, 1, 4]
+        } else if cpu_count >= 3 {
+            vec![0, 1, 2]
+        } else {
+            (0..cpu_count).collect()
+        };
+
         // Test setting CPU affinity with valid cores
-        let result = ops.set_cpu_affinity(&[0, 1, 4]);
+        let result = ops.set_cpu_affinity(&target);
         assert!(result.is_ok(), "Failed to set CPU affinity: {result:?}");
         // get real set CPU affinity
         let real_affinity = ops.get_cpu_affinity().unwrap();
-        assert_eq!(real_affinity, vec![0, 1, 4]);
+        assert_eq!(real_affinity, target);
 
         // Test setting CPU affinity with invalid core
         let result = ops.set_cpu_affinity(&[9999]);
@@ -438,8 +458,21 @@ mod tests {
     fn test_set_numa_affinity() {
         let ops = get_cpu_affinity_ops();
 
+        // Skip if NUMA is not supported on this platform
+        if !ops.is_numa_affinity_supported() {
+            return;
+        }
+
+        let numa_count = ops.get_numa_node_count();
+        if numa_count == 0 {
+            return;
+        }
+
+        // Choose valid nodes based on availability
+        let valid_nodes: Vec<usize> = if numa_count >= 2 { vec![0, 1] } else { vec![0] };
+
         // Test setting NUMA affinity with valid nodes
-        let result = ops.set_numa_affinity(&[0, 1]);
+        let result = ops.set_numa_affinity(&valid_nodes);
         assert!(result.is_ok(), "Failed to set NUMA affinity: {result:?}");
 
         // Test setting NUMA affinity with invalid node
