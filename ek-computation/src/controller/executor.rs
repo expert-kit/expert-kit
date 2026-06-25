@@ -12,7 +12,10 @@ use ek_base::{
 };
 use safetensors::SafeTensors;
 use tch::{IndexOp, Tensor};
-use tokio::sync::{Mutex, mpsc};
+use tokio::{
+    sync::{Mutex, mpsc},
+    task::JoinHandle,
+};
 use tracing::{Instrument, instrument, span};
 
 use crate::{
@@ -190,7 +193,7 @@ impl NaiveExecutor {
     #[instrument]
     pub async fn inner_execute(&mut self) -> EKResult<()> {
         let mut tit = PerfTimer::new("inner_execute");
-        let mut handles = vec![];
+        let mut handles: Vec<JoinHandle<Result<ForwardResponse, ()>>> = vec![];
         let mut chips: Vec<(ExpertId, Vec<EgressMeta>)> = vec![];
         let settings = get_ek_settings();
 
@@ -237,7 +240,24 @@ impl NaiveExecutor {
                              {MAX_ATTEMPTS} attempts: {:?}",
                             last_err
                         );
-                        continue; // skip this expert
+                        for handle in handles {
+                            handle.abort();
+                        }
+                        let failed_req_ids = egress_meta
+                            .iter()
+                            .map(|meta| meta.req_id)
+                            .collect::<Vec<_>>();
+                        self.pending_ingress
+                            .retain(|req_id, _| !failed_req_ids.contains(req_id));
+                        self.seq_mapping
+                            .retain(|_, (req_id, _)| !failed_req_ids.contains(req_id));
+                        for metas in self.pending_egress.values_mut() {
+                            metas.retain(|meta| !failed_req_ids.contains(&meta.req_id));
+                        }
+                        self.pending_egress.retain(|_, metas| !metas.is_empty());
+                        return Err(EKError::NotFound(format!(
+                            "no worker for expert {expert_id} after {MAX_ATTEMPTS} attempts: {last_err:?}"
+                        )));
                     }
                 }
             };
