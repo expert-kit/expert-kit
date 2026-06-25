@@ -1,4 +1,13 @@
-use std::time::Instant;
+use std::{
+    collections::HashMap,
+    sync::{
+        LazyLock,
+        atomic::{AtomicU64, Ordering},
+    },
+    time::Instant,
+};
+
+use dashmap::DashMap;
 
 use crate::{
     metrics::{METRIC_WORKER_EXPERT_ACTIVATION, METRIC_WORKER_FORWARD},
@@ -8,34 +17,83 @@ use crate::{
 };
 use ek_base::utils::Defers;
 use tonic::{Request, Response, Status};
+use tracing::instrument;
 
-use super::core::{GlobalEKInstanceGate, get_instance_gate};
+/// Per-expert request counters, reset after each heartbeat snapshot.
+static REQUEST_COUNTS: LazyLock<DashMap<String, AtomicU64>> = LazyLock::new(DashMap::new);
 
-// use ekproto::{FfnRequest, FfnResponse};
-
-#[derive(Debug, Default)]
-pub struct BasicExpertImpl {
-    gate: GlobalEKInstanceGate,
+/// Atomically snapshot all per-expert request counts and reset them to zero.
+/// Called once per heartbeat interval; returned map is included in the heartbeat.
+pub fn snapshot_and_reset() -> HashMap<String, u64> {
+    let mut result = HashMap::new();
+    for entry in REQUEST_COUNTS.iter() {
+        let count = entry.value().swap(0, Ordering::Relaxed);
+        if count > 0 {
+            result.insert(entry.key().clone(), count);
+        }
+    }
+    result
 }
+
+use super::core::{EKInstanceGateSync, get_instance_gate_sync};
+use tracing_opentelemetry::OpenTelemetrySpanExt;
+
+#[derive(Debug)]
+pub struct BasicExpertImpl {
+    gate_sync: &'static EKInstanceGateSync, // For compute operations
+}
+
+impl Default for BasicExpertImpl {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl BasicExpertImpl {
     pub fn new() -> Self {
-        let gate = get_instance_gate();
-        Self { gate }
+        Self {
+            gate_sync: get_instance_gate_sync(),
+        }
     }
 }
 
 #[tonic::async_trait]
 impl ComputationService for BasicExpertImpl {
+    #[instrument(skip(self, request))]
     async fn forward(&self, request: Request<ForwardReq>) -> Result<Response<ForwardResp>, Status> {
-        log::info!(
-            "forward request: seq={} exp={}",
+        let now = Instant::now();
+        let exp_id = request.get_ref().sequences[0].experts[0].clone();
+        tracing::debug!("[L1 {:?}] exp received!", &exp_id);
+        let res = self.inner_forward(request).await;
+        tracing::debug!("[L1 {:?}] completed in {:?}", &exp_id, now.elapsed());
+        res
+    }
+}
+
+impl BasicExpertImpl {
+    #[inline]
+    async fn inner_forward(
+        &self,
+        request: Request<ForwardReq>,
+    ) -> Result<Response<ForwardResp>, Status> {
+        tracing::debug!(
+            "[L2 {:?}] rpc.forward() request: seq={}",
+            request.get_ref().sequences[0].experts[0],
             request.get_ref().sequences.len(),
-            request.get_ref().sequences[0].experts[0]
         );
+        let exp_id = request.get_ref().sequences[0].experts[0].clone();
         let start = Instant::now();
+
+        // Increment per-expert counter (reset each heartbeat)
+        REQUEST_COUNTS
+            .entry(exp_id.clone())
+            .or_insert_with(|| AtomicU64::new(0))
+            .fetch_add(1, Ordering::Relaxed);
+
         let start_cloned = start;
         let settings = ek_base::config::get_ek_settings();
 
+        // Record metrics
         METRIC_WORKER_EXPERT_ACTIVATION
             .with_label_values(&[
                 settings.worker.id.as_str(),
@@ -44,14 +102,21 @@ impl ComputationService for BasicExpertImpl {
             ])
             .inc_by(request.get_ref().sequences.len() as u64);
 
-        log::info!(
-            "expert activation: worker_id={} model_name={} expert={} count={}",
-            settings.worker.id,
-            settings.inference.model_name,
-            request.get_ref().sequences[0].experts[0],
-            request.get_ref().sequences.len()
-        );
+        {
+            let worker_id = settings.worker.id.as_str();
+            let model = settings.inference.model_name.as_str();
+            let expert = request.get_ref().sequences[0].experts[0].as_str();
+            let count = request.get_ref().sequences.len();
+            log::info!(
+                worker_id:%,
+                model:%,
+                expert:%,
+                count:%
+                ; "expert activation record",
+            );
+        }
 
+        // Set up deferred metrics collection
         Defers::defer(Box::new(move || {
             let elapsed = start_cloned.elapsed();
             METRIC_WORKER_FORWARD
@@ -61,16 +126,50 @@ impl ComputationService for BasicExpertImpl {
                 ])
                 .observe(elapsed.as_micros() as f64);
         }));
-        let guard = self.gate.read().await;
-        let res = guard.forward(request.into_inner()).await.map_err(|e| {
-            log::error!("forward error {:?}", e);
+
+        tracing::debug!("[L2 {:?}] sync_gate.forward() start", &exp_id,);
+
+        let forward_now = Instant::now();
+        let req_inner = request.into_inner();
+
+        // Use sync gate for compute-intensive operations
+        let gate_sync = self.gate_sync;
+
+        // Capture current tracing context for the blocking task
+        let cx = tracing::Span::current().context();
+
+        let cx_clone = cx.clone();
+
+        // Run synchronous computation in blocking task
+        let res = tokio::task::spawn_blocking(move || {
+            let _guard = cx_clone.attach();
+
+            // Perform synchronous forward computation
+            gate_sync.forward_sync(req_inner)
+        })
+        .await
+        .map_err(|e| {
+            log::error!("blocking task join error {e:?}");
+            Status::internal("blocking task error")
+        })?
+        .map_err(|e| {
+            log::error!("forward error {e:?}");
             Status::internal("forward error")
         })?;
-        log::info!(
-            "forward request: elapsed_ms={:?}",
-            start.elapsed().as_millis()
+
+        tracing::debug!(
+            "[L2 {:?}] sync_gate.forward() end, elapsed {:?}",
+            &exp_id,
+            forward_now.elapsed(),
         );
 
-        Ok(Response::new(res))
+        let res = Ok(Response::new(res));
+        tracing::debug!(
+            "[L2 {:?}] rpc.forward() end with {:?}",
+            &exp_id,
+            start.elapsed(),
+        );
+
+        res
     }
 }

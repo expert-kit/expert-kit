@@ -1,8 +1,11 @@
-use std::{cell::UnsafeCell, collections::HashMap, sync::RwLock};
+use std::{
+    cell::UnsafeCell,
+    collections::HashMap,
+    sync::{OnceLock, RwLock},
+};
 
 use bytes::Bytes;
 use memmap2::Mmap;
-use once_cell::sync::OnceCell;
 use safetensors::SafeTensors;
 
 pub struct MemCache {
@@ -41,6 +44,12 @@ impl MemCache {
         let m = unsafe { &mut (*self.map.get()) };
         m.insert(key.to_owned(), value);
     }
+
+    pub fn remove(&self, key: &str) {
+        let _wg = self.mu.write().unwrap();
+        let m = unsafe { &mut (*self.map.get()) };
+        m.remove(key);
+    }
 }
 
 unsafe impl Send for MemCache {}
@@ -77,8 +86,8 @@ impl<'data> SafetensorCache<'data> {
         let _lg = self.lk.read().unwrap();
         let m = unsafe { &(*self.map.get()) };
         let v = m.get(key);
-        let k = v.map(|x| x.safetensors());
-        k
+
+        v.map(|x| x.safetensors())
     }
 
     pub fn contains_key(&self, key: &str) -> bool {
@@ -92,23 +101,22 @@ unsafe impl Sync for SafetensorCache<'_> {}
 
 #[derive(Debug)]
 pub struct SafeTensorWithData<'data> {
-    st: OnceCell<SafeTensors<'data>>,
+    st: OnceLock<SafeTensors<'data>>,
     mmap: Mmap,
 }
 
 impl<'data> SafeTensorWithData<'data> {
     pub fn new(mmap: Mmap) -> Self {
         Self {
-            st: OnceCell::new(),
+            st: OnceLock::new(),
             mmap,
         }
     }
     pub fn safetensors(&'data self) -> &'data SafeTensors<'data> {
-        let st = self.st.get_or_init(|| {
-            let st = safetensors::SafeTensors::deserialize(&self.mmap).unwrap();
-            st
-        });
-        st
+        (self
+            .st
+            .get_or_init(|| safetensors::SafeTensors::deserialize(&self.mmap).unwrap()))
+            as _
     }
 }
 impl Drop for SafeTensorWithData<'_> {

@@ -98,31 +98,31 @@ huggingface-cli download unsloth/DeepSeek-R1-BF16 --local-dir ${DEEPSEEK_R1_ROOT
 docker-compose -f dev/meta-db.docker-compose.yaml up -d
 
 # Terminal 1: Run the weight server (keep this terminal open)
-cargo run --bin ek-cli weight-server --model "${DEEPSEEK_R1_ROOT}"
+cargo run --release --bin ek-cli weight-server --model "${DEEPSEEK_R1_ROOT}"
 ```
 
 ### 3. Initialize the Metadata
 
 ```bash
 # Terminal 2: Prepare the database
-cargo run --bin ek-cli db migrate
+cargo run --release --bin ek-cli db migrate
 
 # Register the model
 ## ⚠ Warning: Current version, model name parameter must match the last segment of the model path
-cargo run --bin ek-cli model upsert --name deepseek-r1
+cargo run --release --bin ek-cli model upsert --name deepseek-r1
 
 # Schedule the experts (extract expert info from weight, and assign to worker)
-cargo run --bin ek-cli schedule static --inventory ./dev/local.inventory.yaml
+cargo run --release --bin ek-cli schedule static --inventory ./dev/local.inventory.yaml
 ```
 
 ### 3. Launch the Controller and Worker
 
 ```bash
 # Terminal 2: Start the controller (keep this terminal open)
-cargo run --bin ek-cli controller
+cargo run --release --bin ek-cli controller
 
 # Terminal 3: Start the worker (keep this terminal open)
-cargo run --bin ek-cli worker
+cargo run --release --bin ek-cli worker
 # Note: After starting the worker, the terminal will display weight loading information
 ```
 

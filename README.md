@@ -21,6 +21,8 @@ By decoupling expert modules and deploying them across distributed GPUs and CPUs
   <img alt="arch-illustration-light" src="./doc/assets/arch-illustration.svg">
 </picture>
 
+https://github.com/user-attachments/assets/9f1f5b23-28fe-44cf-b592-2f6ad0ad4dad
+
 ## Quick Start
 
 Here are some tutorials to help you quickly start with Expert Kit.
@@ -44,7 +46,7 @@ Here are some tutorials to help you quickly start with Expert Kit.
 ## Repository Map
 
 - [ek-computation](./ek-agent): performs schedule(frontend) and computation(backend) task.
-- [ek-db](./ek-edb): supports registering and loading experts' weight in fine-grained granularity.
+- [ek-db](./ek-db): supports registering and loading experts' weight in fine-grained granularity.
 - [ek-benchmark](./ek-benchmark): contains several micro-benchmarks help you know the performance.
 - [ek-solution](./ek-solution): contains several recipes to quickly setup a running cluster.
 
@@ -80,7 +82,6 @@ If you have any questions, please join our discussion at https://expert-kit.zuli
 
   - Licenses and copyright notices for third-party components are located alongside the component code directory.
   - The following components are included:
-    - **DeepSeek-V3 (Code/Complementary Material)**: Located in `ek-integration/expertkit-torch/expertkit-torch/models/deepseek_v3/`. This code is licensed under the [DeepSeek License Agreement v1.0](ek-integration/expertkit_torch/expertkit_torch/models/deepseek_v3/LICENSE-DEEPSEEK) and the [MIT License](ek-integration/expertkit_torch/expertkit_torch/models/deepseek_v3/LICENSE-MIT). Please be aware that use of the associated DeepSeek Model is subject to the **use restrictions** detailed in **Attachment A** of the DeepSeek License Agreement v1.0.
     - **Qwen3-MoE**: Located in `ek-integration/expertkit-torch/expertkit-torch/models/`. This code is licensed under [Apache License Version 2.0](http://www.apache.org/licenses/LICENSE-2.0).
 
 - **Compliance**: All third-party components are used in compliance with their original license terms.

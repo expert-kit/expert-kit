@@ -5,7 +5,7 @@ use ort::{tensor::PrimitiveTensorElementType, value::Value};
 use rand_distr::num_traits;
 use safetensors::tensor::TensorView;
 
-use super::{EkTensor, FromSafeTensor};
+use super::{Device, EkTensor, FromSafeTensor};
 
 pub trait OrtDType:
     PrimitiveTensorElementType + num_traits::Num + Clone + Debug + Copy + 'static
@@ -49,7 +49,11 @@ impl<D> FromSafeTensor for NDArrayTensor<D>
 where
     D: OrtDType,
 {
-    fn lookup_suffix(_st: &safetensors::SafeTensors, _name: &[&str]) -> Option<Self> {
+    fn lookup_suffix(
+        _st: &safetensors::SafeTensors,
+        _name: &[&str],
+        _device: Device,
+    ) -> Option<Self> {
         todo!()
     }
 }
@@ -61,15 +65,6 @@ where
     fn rand(shape: Vec<usize>, _dtype: super::DType, _dev: super::Device) -> Self {
         let res = ArrayD::zeros(shape);
         Self(res)
-    }
-
-    fn stack(tensors: &[Self], dim: usize) -> Self {
-        let views = tensors.iter().map(|x| x.0.view()).collect::<Vec<_>>();
-        let res = ndarray::stack(ndarray::Axis(dim), &views)
-            .unwrap()
-            .into_dimensionality::<IxDyn>()
-            .unwrap();
-        NDArrayTensor(res)
     }
 
     fn shape(&self) -> Vec<usize> {
@@ -99,6 +94,14 @@ where
         let raw = tv.data();
         Self::from_raw(raw, tv.shape(), tv.dtype().into())
     }
+
+    fn device(&self) -> super::Device {
+        todo!()
+    }
+
+    fn to_device(&self, _dev: super::Device) -> Self {
+        todo!()
+    }
 }
 
 impl<D> From<NDArrayTensor<D>> for Value
@@ -106,9 +109,8 @@ where
     D: OrtDType,
 {
     fn from(val: NDArrayTensor<D>) -> Self {
-        let v = ort::value::Tensor::from_array(val.0.view())
+        ort::value::Tensor::from_array(val.0.view())
             .unwrap()
-            .into_dyn();
-        v
+            .into_dyn()
     }
 }

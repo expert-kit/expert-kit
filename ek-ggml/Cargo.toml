@@ -1,0 +1,17 @@
+[package]
+name = "ek-ggml"
+version = { workspace = true }
+edition = { workspace = true }
+authors = { workspace = true }
+license = { workspace = true }
+readme = { workspace = true }
+repository = { workspace = true }
+
+[dependencies]
+
+[build-dependencies]
+bindgen = { workspace = true }
+cmake = { workspace = true }
+
+[dev-dependencies]
+rand = { workspace = true }

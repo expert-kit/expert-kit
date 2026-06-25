@@ -29,6 +29,7 @@ impl From<DType> for tch::Kind {
             DType::Uint8 => tch::Kind::Uint8,
             DType::Int16 => tch::Kind::Int16,
             DType::Int8 => tch::Kind::Int8,
+            DType::Float16 => tch::Kind::Half,
             DType::BFloat16 => tch::Kind::BFloat16,
             DType::Float8e4m3fn => tch::Kind::Float8e4m3fn,
             DType::Float8e4m3fnuz => tch::Kind::Float8e4m3fnuz,
@@ -41,10 +42,23 @@ impl From<Device> for tch::Device {
     fn from(val: Device) -> Self {
         match val {
             Device::CPU => tch::Device::Cpu,
+            Device::CUDA(idx) => tch::Device::Cuda(idx),
+            // _ => panic!("Unsupported device"),
         }
     }
 }
 
+impl From<tch::Device> for Device {
+    fn from(val: tch::Device) -> Self {
+        match val {
+            tch::Device::Cpu => Device::CPU,
+            tch::Device::Cuda(idx) => Device::CUDA(idx),
+            _ => panic!("Unsupported device"),
+        }
+    }
+}
+
+#[expect(dead_code)]
 struct TchSafeView<'a> {
     tensor: &'a tch::Tensor,
     shape: Vec<usize>,
@@ -59,7 +73,7 @@ impl safetensors::View for TchSafeView<'_> {
         &self.shape
     }
 
-    fn data(&self) -> std::borrow::Cow<[u8]> {
+    fn data(&self) -> std::borrow::Cow<'_, [u8]> {
         let mut data = vec![0; self.data_len()];
         let numel = self.tensor.numel();
         self.tensor.f_copy_data_u8(&mut data, numel).unwrap();
@@ -104,10 +118,6 @@ impl EkTensor for TchTensor {
         TchTensor(rand)
     }
 
-    fn stack(tensors: &[Self], dim: usize) -> Self {
-        TchTensor(tch::Tensor::stack(tensors, dim as i64))
-    }
-
     fn shape(&self) -> Vec<usize> {
         self.0.size().iter().map(|&x| x as usize).collect()
     }
@@ -132,10 +142,23 @@ impl EkTensor for TchTensor {
     fn from_tensor_view(tv: &TensorView<'_>) -> Self {
         tv.into()
     }
+
+    fn device(&self) -> Device {
+        match self.0.device() {
+            tch::Device::Cpu => Device::CPU,
+            tch::Device::Cuda(idx) => Device::CUDA(idx),
+            _ => panic!("Unsupported device"),
+        }
+    }
+
+    fn to_device(&self, device: Device) -> Self {
+        let dev: tch::Device = device.into();
+        TchTensor(self.0.to_device(dev))
+    }
 }
 
 impl FromSafeTensor for TchTensor {
-    fn lookup_suffix(st: &safetensors::SafeTensors, name: &[&str]) -> Option<Self> {
+    fn lookup_suffix(st: &safetensors::SafeTensors, name: &[&str], device: Device) -> Option<Self> {
         let idx = st
             .names()
             .iter()
@@ -145,7 +168,7 @@ impl FromSafeTensor for TchTensor {
             let (_name, view) = tensors.get(x).unwrap();
             let size: Vec<usize> = view.shape().to_vec();
             let kind: DType = DType::from(dtype_to_tch_kind(view.dtype()).unwrap());
-            Some(Self::from_raw(view.data(), &size, kind))
+            Some(Self::from_raw(view.data(), &size, kind).to_device(device))
         } else {
             None
         }

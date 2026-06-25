@@ -1,7 +1,8 @@
-use std::sync::Arc;
+use std::{fmt::Debug, sync::Arc};
 
 use ek_base::{config::get_ek_settings, utils::Defers};
 use tokio::sync::{Mutex, mpsc};
+use tracing::Instrument;
 
 use crate::{
     controller::{
@@ -14,6 +15,11 @@ use crate::{
 pub struct ComputationProxyServiceImpl {
     executor: Arc<Mutex<dyn Executor + Send>>,
 }
+impl Debug for ComputationProxyServiceImpl {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ComputationProxyServiceImpl").finish()
+    }
+}
 
 #[async_trait::async_trait]
 impl ComputationService for ComputationProxyServiceImpl {
@@ -21,7 +27,22 @@ impl ComputationService for ComputationProxyServiceImpl {
         &self,
         request: tonic::Request<v1::ForwardReq>,
     ) -> Result<tonic::Response<v1::ForwardResp>, tonic::Status> {
-        log::info!("forward request: seq={}", request.get_ref().sequences.len());
+        self.inner_controller_forward(request).await
+    }
+}
+
+impl ComputationProxyServiceImpl {
+    #[tracing::instrument(
+        skip(self, request),
+        level = "info",
+        fields(method = "ComputationProxyServiceImpl::forward",)
+    )]
+    async fn inner_controller_forward(
+        &self,
+        request: tonic::Request<v1::ForwardReq>,
+    ) -> Result<tonic::Response<v1::ForwardResp>, tonic::Status> {
+        let seq_len = request.get_ref().sequences.len();
+        log::info!(seq_len; "forward request in controller start");
         let start = std::time::Instant::now();
         let settings = get_ek_settings();
 
@@ -38,34 +59,45 @@ impl ComputationService for ComputationProxyServiceImpl {
             let mut lg = self.executor.lock().await;
             lg.submit(request.get_ref()).await?
         };
+
         let exec_bg = self.executor.clone();
         let (err_tx, mut err_rx) = mpsc::channel(1);
-        tokio::spawn(async move {
-            let mut lg = exec_bg.lock().await;
-            let res = lg.exec().await;
-            if let Err(err) = res {
-                log::error!("executor error: {}", err);
-                err_tx.send(err).await.unwrap();
-            }
-        });
-        loop {
-            tokio::select! {
-                err = err_rx.recv() => {
-                    if let Some(err) = err {
-                        log::error!("executor error: {:?}", err);
-                        return Err(tonic::Status::internal(format!("executor error: {:?}", err)))
-                    }
-                    continue
-                }
-                res = rx.recv() => {
-                    log::info!("forward request: elapsed_ms={:?}", start.elapsed().as_millis());
-                    if let Some(resp) = res {
-                        return Ok(tonic::Response::new(resp.as_ref().clone()));
-                    } else {
-                        return Err(tonic::Status::internal("forward error: no data"));
-                    }
+
+        tokio::spawn(
+            async move {
+                let mut lg = exec_bg.lock().await;
+                let res = lg.exec().await;
+                if let Err(err) = res {
+                    log::error!("executor error: {err}");
+                    err_tx.send(err).await.unwrap();
                 }
             }
+            .in_current_span(),
+        );
+
+        tokio::select! {
+            err = err_rx.recv() => {
+                if let Some(err) = err {
+                    log::error!("executor error: {err:?}");
+                    return Err(tonic::Status::internal(format!("executor error: {err:?}")));
+                }
+                // err_tx dropped: exec task completed without error, wait for result
+            }
+            res = rx.recv() => {
+                let elapsed_ms = start.elapsed().as_millis();
+                log::info!(elapsed_ms; "forward request in controller done");
+                if let Some(resp) = res {
+                    return Ok(tonic::Response::new(resp.as_ref().clone()));
+                } else {
+                    return Err(tonic::Status::internal("forward error: no data"));
+                }
+            }
+        }
+        let elapsed_ms = start.elapsed().as_millis();
+        log::info!(elapsed_ms; "forward request in controller done");
+        match rx.recv().await {
+            Some(resp) => Ok(tonic::Response::new(resp.as_ref().clone())),
+            None => Err(tonic::Status::internal("forward error: no data")),
         }
     }
 }

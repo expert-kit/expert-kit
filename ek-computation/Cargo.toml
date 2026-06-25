@@ -1,55 +1,61 @@
 [package]
-name = "ek_computation"
-version = "0.1.0"
-edition = "2024"
+name = "ek-computation"
+version = { workspace = true }
+edition = { workspace = true }
+authors = { workspace = true }
+license = { workspace = true }
+readme = { workspace = true }
+repository = { workspace = true }
 
 [dependencies]
-
-serde = { workspace = true }
-tonic = { workspace = true }
-prost = { workspace = true }
-tokio = { workspace = true }
-rmp-serde = { workspace = true }
-tch = { workspace = true }
+ek-base = { workspace = true }
+ek-db = { workspace = true }
+ek-ggml = { workspace = true }
+actix-web = { workspace = true }
+async-trait = { workspace = true }
+clap = { workspace = true }
+dashmap = { workspace = true }
+diesel = { workspace = true }
+diesel-async = { workspace = true }
+env_logger = { workspace = true }
+half = { workspace = true }
+ibverbs = { workspace = true }
+lazy_static = { workspace = true }
+log = { workspace = true }
+memoffset = { workspace = true }
+mime = { workspace = true }
 ndarray = { workspace = true }
 ndarray-rand = { workspace = true }
+nix = { workspace = true }
 ort = { workspace = true }
-polars = { workspace = true }
-polars-io = { workspace = true }
-clap = { workspace = true }
-pretty_env_logger = { workspace = true }
-log = { workspace = true }
-env_logger = { workspace = true }
-safetensors.workspace = true
-async-trait = { workspace = true }
-opendal = { workspace = true }
-sysinfo = { workspace = true }
-bytes = { workspace = true }
-ek_base = { path = "../ek-base" }
-ek_db = { path = "../ek-db" }
-diesel = { workspace = true }
-serde_json = { workspace = true }
-tokio-stream = { workspace = true }
-async-channel = { workspace = true }
-diesel-async = { workspace = true }
-once_cell = { workspace = true }
-tokio-util = { workspace = true }
-object_store = "0.12.0"
-object_store_opendal = "0.51.0"
-float8 = "0.2.1"
-half = { workspace = true }
-rand_distr = { workspace = true }
+ort-sys = { workspace = true }
 prometheus = { workspace = true }
+prost = { workspace = true }
 rand = { workspace = true }
-lazy_static = { workspace = true }
-actix-web = { workspace = true }
-actix-http = { workspace = true }
-mime = { workspace = true }
-
+rand_distr = { workspace = true }
+safetensors = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_arrays = { workspace = true }
+tch = { workspace = true }
+tokio = { workspace = true }
+tokio-stream = { workspace = true }
+tokio-util = { workspace = true }
+tonic = { workspace = true }
+tower = { workspace = true }
+tracing = { workspace = true }
+tracing-opentelemetry = { workspace = true }
+url = { workspace = true }
 
 [build-dependencies]
-tonic-build = "*"
+tonic-build = { workspace = true }
 
+[dev-dependencies]
+criterion = { workspace = true }
 
 [lib]
 crate-type = ["cdylib", "staticlib", "rlib"]
+
+[[bench]]
+name = "main"
+harness = false

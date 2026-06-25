@@ -26,10 +26,8 @@ async fn load_expert(
     let model = req.match_info().get("model").unwrap();
     let layer = req.match_info().get("layer").unwrap().parse::<usize>()?;
     let expert = req.match_info().get("expert").unwrap().parse::<usize>()?;
-    log::info!("load expert {} {} {}", model, layer, expert);
-    let pretrained = wm.load_pretrained(model.to_owned()).await?;
-    let tv = pretrained.read().await.get_expert(layer, expert).await?;
-    Ok(tv)
+    log::info!("load expert {model} {layer} {expert}");
+    wm.get_expert_bytes(model, layer, expert).await
 }
 
 #[get("/weight/{model}/{key}")]
@@ -44,20 +42,27 @@ async fn load_layer(
     Ok(tv)
 }
 
-async fn load_manager(roots: &'static [PathBuf]) -> &'static WeightManager<'static> {
+async fn load_manager(
+    roots: &'static [PathBuf],
+    cache_dir: Option<PathBuf>,
+) -> &'static WeightManager<'static> {
     static WM_CELL: OnceCell<WeightManager<'static>> = OnceCell::const_new();
 
     (WM_CELL
-        .get_or_init(|| async { WeightManager::new(roots).await.unwrap() })
+        .get_or_init(|| async { WeightManager::new(roots, cache_dir).await.unwrap() })
         .await) as _
 }
 
-pub async fn listen<A: ToSocketAddrs>(roots: &'static [PathBuf], addr: A) -> EKResult<()> {
-    let wm = load_manager(roots).await;
+pub async fn listen<A: ToSocketAddrs>(
+    roots: &'static [PathBuf],
+    cache_dir: Option<PathBuf>,
+    addr: A,
+) -> EKResult<()> {
+    let wm = load_manager(roots, cache_dir).await;
     let addr = addr.to_socket_addrs().unwrap().collect::<Vec<_>>();
     log::info!("starting weight server.");
     for a in addr.iter() {
-        log::info!("listening on {}", a);
+        log::info!("listening on {a}");
     }
     HttpServer::new(move || {
         App::new()
@@ -83,13 +88,17 @@ mod test {
     use actix_web::{App, body::to_bytes, http::header::ContentType, test};
     use ek_base::utils::workspace_root;
 
-    #[actix_web::test]
-    async fn test_index_get() {
+    async fn test_wm() -> &'static WeightManager<'static> {
         let root = workspace_root();
         let test_model: PathBuf = root.join("ek-db").join("resources").join("ds-tiny");
         let tm = vec![test_model.clone()];
         let tm: &'static [PathBuf] = unsafe { transmute(tm.as_slice()) };
-        let wm = load_manager(tm).await;
+        load_manager(tm, None).await
+    }
+
+    #[actix_web::test]
+    async fn test_index_get() {
+        let wm = test_wm().await;
         let app =
             test::init_service(App::new().app_data(web::Data::new(wm)).service(load_layer)).await;
         let req = test::TestRequest::default()
@@ -109,11 +118,7 @@ mod test {
 
     #[actix_web::test]
     async fn test_load_expert() {
-        let root = workspace_root();
-        let test_model: PathBuf = root.join("ek-db").join("resources").join("ds-tiny");
-        let tm = vec![test_model.clone()];
-        let tm: &'static [PathBuf] = unsafe { transmute(tm.as_slice()) };
-        let wm = load_manager(tm).await;
+        let wm = test_wm().await;
         let app =
             test::init_service(App::new().app_data(web::Data::new(wm)).service(load_expert)).await;
         let req = test::TestRequest::default()
@@ -146,11 +151,7 @@ mod test {
 
     #[actix_web::test]
     async fn test_load_meta_vital() {
-        let root = workspace_root();
-        let test_model: PathBuf = root.join("ek-db").join("resources").join("ds-tiny");
-        let tm = vec![test_model.clone()];
-        let tm: &'static [PathBuf] = unsafe { transmute(tm.as_slice()) };
-        let wm = load_manager(tm).await;
+        let wm = test_wm().await;
         let app = test::init_service(
             App::new()
                 .app_data(web::Data::new(wm))

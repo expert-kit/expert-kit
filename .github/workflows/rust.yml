@@ -1,30 +1,235 @@
 name: Rust Test and Clippy on PR
 
 on:
+  workflow_dispatch:
   pull_request:
-    branches: [ "dev" ]
+    branches: ["dev"]
+    types: [opened, synchronize, reopened, closed]
 
 env:
   CARGO_TERM_COLOR: always
+  TORCH_VERSION: 2.7.0
+  ONNXRUNTIME_VERSION: 1.20.1
+  LIBTORCH_BASE_DIR: ${{ github.workspace }}/opt/torch
+  ONNXRUNTIME_BASE_DIR: ${{ github.workspace }}/opt/onnxruntime
+  LFS_BASE_URL: https://media.githubusercontent.com/media/expert-kit/expert-kit/refs/heads/dev
 
 jobs:
   rust-check:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     name: Run Rust Tests and Clippy
 
     steps:
-    - name: Checkout code
-    - uses: actions/checkout@v4
-    
-    - name: Set up Rust
-      uses: actions-rs/toolchain@v1
-      with:
-        toolchain: stable
-        override: true
-    
-    - name: Run cargo test
-      run: cargo test --verbose
-    - name: Install Clippy
-      run: rustup component add clippy
-    - name: Run cargo clippy
-      run: cargo clippy --all-targets --all-features -- -D warnings
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install git-lfs
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y git-lfs
+          git lfs install
+
+      - name: Compute LFS cache key
+        id: lfs
+        run: |
+          mapfile -t FILES < <(git lfs ls-files | awk '$2 == "-" {print $3}')
+          if [ ${#FILES[@]} -eq 0 ]; then
+            echo "need=false" >> $GITHUB_OUTPUT
+            echo "key=${{ runner.os }}-lfs-empty" >> $GITHUB_OUTPUT
+            echo 'paths=' >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          HASH=$(printf '%s\n' "${FILES[@]}" | sort | sha256sum | cut -d' ' -f1)
+          echo "need=true" >> $GITHUB_OUTPUT
+          echo "key=${{ runner.os }}-lfs-${HASH}" >> $GITHUB_OUTPUT
+          {
+            echo 'paths<<EOF'
+            printf '%s\n' "${FILES[@]}"
+            echo 'EOF'
+          } >> $GITHUB_OUTPUT
+
+      - name: Cache LFS files
+        id: cache-lfs
+        uses: actions/cache@v4
+        with:
+          path: ${{ steps.lfs.outputs.paths }}
+          key: ${{ steps.lfs.outputs.key }}
+          restore-keys: |
+            ${{ runner.os }}-lfs-
+
+      - name: Download LFS files (if cache miss)
+        if: steps.lfs.outputs.need == 'true' && steps.cache-lfs.outputs.cache-hit != 'true'
+        run: |
+          set -e
+          while IFS= read -r f; do
+            [ -z "$f" ] && continue
+            mkdir -p "$(dirname "$f")"
+            curl -fL "${LFS_BASE_URL}/$f?download=true" -o "$f"
+            test -s "$f" || { echo "empty/bad: $f"; exit 1; }
+          done <<< "${{ steps.lfs.outputs.paths }}"
+
+      - name: Verify LFS files
+        run: |
+          set -e
+          while IFS= read -r f; do
+            [ -z "$f" ] && continue
+            test -s "$f" || { echo "Missing: $f"; exit 1; }
+            if grep -q "^version https://git-lfs.github.com" "$f" 2>/dev/null; then
+              echo "LFS pointer detected: $f"; exit 1
+            fi
+          done <<< "${{ steps.lfs.outputs.paths }}"
+
+      - name: Rust cache (registry, git, target)
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: . -> target
+          cache-on-failure: true
+
+      - name: Cache libtorch
+        id: cache-libtorch
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.LIBTORCH_BASE_DIR }}/libtorch
+          key: ${{ runner.os }}-libtorch-${{ env.TORCH_VERSION }}
+          restore-keys: |
+            ${{ runner.os }}-libtorch-
+
+      - name: Cache onnxruntime
+        id: cache-onnxruntime
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.ONNXRUNTIME_BASE_DIR }}/onnxruntime-linux-x64-${{ env.ONNXRUNTIME_VERSION }}
+          key: ${{ runner.os }}-onnxruntime-${{ env.ONNXRUNTIME_VERSION }}
+          restore-keys: |
+            ${{ runner.os }}-onnxruntime-
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential libpq-dev pkg-config libprotobuf-dev protobuf-compiler jq libnl-3-dev libnl-route-3-dev
+
+      - name: Install InfiniBand dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libibverbs-dev rdma-core
+
+      - name: Set up Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          override: true
+          components: rustfmt, clippy
+
+      - name: Download and extract LibTorch (if cache miss)
+        if: steps.cache-libtorch.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p ${{ env.LIBTORCH_BASE_DIR }}
+          curl -sSL https://download.pytorch.org/libtorch/cpu/libtorch-cxx11-abi-shared-with-deps-${{ env.TORCH_VERSION }}%2Bcpu.zip  --output libtorch.zip
+          unzip -q libtorch.zip -d ${{ env.LIBTORCH_BASE_DIR }}
+          rm libtorch.zip
+
+      - name: Download and extract onnxruntime (if cache miss)
+        if: steps.cache-onnxruntime.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p ${{ env.ONNXRUNTIME_BASE_DIR }}
+          curl -sSL https://github.com/microsoft/onnxruntime/releases/download/v${{ env.ONNXRUNTIME_VERSION }}/onnxruntime-linux-x64-${{ env.ONNXRUNTIME_VERSION }}.tgz --output onnxruntime.tgz
+          tar -xzf onnxruntime.tgz -C ${{ env.ONNXRUNTIME_BASE_DIR }}
+          rm onnxruntime.tgz
+
+      - name: Set up environment variables
+        run: |
+          echo "LIBTORCH=${{ env.LIBTORCH_BASE_DIR }}/libtorch" >> $GITHUB_ENV
+          echo "LD_LIBRARY_PATH=${{ env.LIBTORCH_BASE_DIR }}/libtorch/lib:$LD_LIBRARY_PATH" >> $GITHUB_ENV
+          echo "ONNXRUNTIME_HOME=${{ env.ONNXRUNTIME_BASE_DIR }}/onnxruntime-linux-x64-${{ env.ONNXRUNTIME_VERSION }}" >> $GITHUB_ENV
+          echo "CPATH=${{ env.ONNXRUNTIME_BASE_DIR }}/onnxruntime-linux-x64-${{ env.ONNXRUNTIME_VERSION }}/include:$CPATH" >> $GITHUB_ENV
+          echo "LIBRARY_PATH=${{ env.ONNXRUNTIME_BASE_DIR }}/onnxruntime-linux-x64-${{ env.ONNXRUNTIME_VERSION }}/lib:$LIBRARY_PATH" >> $GITHUB_ENV
+          echo "ORT_DYLIB_PATH=${{ env.ONNXRUNTIME_BASE_DIR }}/onnxruntime-linux-x64-${{ env.ONNXRUNTIME_VERSION }}/lib/libonnxruntime.so" >> $GITHUB_ENV
+
+      - name: Configure Cargo features
+        run: |
+          mkdir -p .cargo
+          cat > .cargo/config.toml << 'EOF'
+          [features]
+          default = [
+              "polars/sql",
+              "polars/ndarray",
+              "polars/lazy",
+              "polars/serde",
+              "polars/json",
+              "polars/parquet",
+          ]
+          EOF
+
+      - name: Run cargo test
+        run: cargo test --verbose
+
+      - name: Run cargo clippy
+        run: cargo clippy --all-targets
+
+  # docker-publish:
+  #   runs-on: ubuntu-24.04
+  #   name: Build and push Docker image (dev)
+  #   needs: rust-check
+  #   if: github.event_name == 'pull_request' && github.event.action == 'synchronize'
+  #   # if: github.event_name == 'pull_request' && github.event.action ==
+  #   # 'closed' && github.event.pull_request.merged == true && github.event.
+  #   # pull_request.base.ref == 'dev'
+  #   env:
+  #     ONNXRUNTIME_VERSION: 1.20.1
+  #     ONNXRUNTIME_BASE_DIR: ${{ github.workspace }}/opt/onnxruntime
+
+  #   steps:
+  #     - name: Checkout merged commit
+  #       uses: actions/checkout@v4
+  #       # with:
+  #       #   ref: ${{ github.event.pull_request.merge_commit_sha }}
+
+  #     - name: Download and extract onnxruntime for build
+  #       run: |
+  #         mkdir -p ${{ env.ONNXRUNTIME_BASE_DIR }}
+  #         curl -sSL https://github.com/microsoft/onnxruntime/releases/download/v${{ env.ONNXRUNTIME_VERSION }}/onnxruntime-linux-x64-${{ env.ONNXRUNTIME_VERSION }}.tgz --output onnxruntime.tgz
+  #         tar -xzf onnxruntime.tgz -C ${{ env.ONNXRUNTIME_BASE_DIR }}
+  #         rm onnxruntime.tgz
+
+  #     - name: Set up QEMU
+  #       uses: docker/setup-qemu-action@v3
+
+  #     - name: Set up Docker Buildx
+  #       uses: docker/setup-buildx-action@v3
+  #       with:
+  #         driver-opts: |
+  #           image=moby/buildkit:v0.12.0
+  #           network=host
+
+  #     - name: Login to GitHub Container Registry
+  #       uses: docker/login-action@v3
+  #       with:
+  #         registry: ghcr.io
+  #         username: ${{ github.actor }}
+  #         password: ${{ secrets.GITHUB_TOKEN }}
+
+  #     - name: Check if Docker build is needed
+  #       id: check-docker
+  #       run: |
+  #         if git diff --name-only ${{ github.event.before }} ${{ github.event.after }} | grep -E '^(container/|Cargo\.toml|Cargo\.lock|ek-.*/src/)'; then
+  #           echo "need-build=true" >> $GITHUB_OUTPUT
+  #         else
+  #           echo "need-build=false" >> $GITHUB_OUTPUT
+  #         fi
+
+  #     - name: Build and push (CPU image)
+  #       if: steps.check-docker.outputs.need-build == 'true'
+  #       uses: docker/build-push-action@v5
+  #       with:
+  #         context: .
+  #         file: container/Dockerfile.cpu
+  #         push: true
+  #         tags: ghcr.io/${{ github.repository }}:dev,ghcr.io/${{ github.repository }}:dev-${{ github.sha }}
+  #         cache-from: type=gha  # 使用 GitHub Actions 缓存
+  #         cache-to: type=gha,mode=max
+  #         platforms: linux/amd64  # 只构建一个平台，减少时间
+  #         build-args: |
+  #           ONNXRUNTIME_VERSION=${{ env.ONNXRUNTIME_VERSION }}
+  #           ONNXRUNTIME_BASE_DIR=${{ env.ONNXRUNTIME_BASE_DIR }}
