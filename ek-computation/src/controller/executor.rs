@@ -44,7 +44,7 @@ type LocalSeqIdx = usize;
 struct IngressMeta {
     tensor: Tensor,
     sender: mpsc::Sender<Arc<v1::ForwardResp>>,
-    result: Vec<Vec<Option<Tensor>>>,
+    result: Vec<Vec<ExpertResult>>,
 }
 
 unsafe impl Sync for IngressMeta {}
@@ -54,6 +54,47 @@ struct EgressMeta {
     req_id: ReqId,
     seq_gid: GlobalSeqId,
     expert_idx: usize,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone)]
+enum ExpertError {
+    NoWorker { expert_id: String, message: String },
+    Timeout { expert_id: String, message: String },
+    Transport { expert_id: String, message: String },
+    Compute { expert_id: String, message: String },
+}
+
+impl fmt::Display for ExpertError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ExpertError::NoWorker { expert_id, message } => {
+                write!(f, "no worker for expert {expert_id}: {message}")
+            }
+            ExpertError::Timeout { expert_id, message } => {
+                write!(f, "timeout for expert {expert_id}: {message}")
+            }
+            ExpertError::Transport { expert_id, message } => {
+                write!(f, "transport error for expert {expert_id}: {message}")
+            }
+            ExpertError::Compute { expert_id, message } => {
+                write!(f, "compute error for expert {expert_id}: {message}")
+            }
+        }
+    }
+}
+
+enum ExpertResult {
+    Pending,
+    Running,
+    Success(Tensor),
+    Failed(ExpertError),
+}
+
+impl ExpertResult {
+    fn is_terminal(&self) -> bool {
+        matches!(self, ExpertResult::Success(_) | ExpertResult::Failed(_))
+    }
 }
 
 enum ForwardResponse {
@@ -148,7 +189,7 @@ impl NaiveExecutor {
         for i in &req.sequences {
             let mut experts = Vec::new();
             for _ in &i.experts {
-                experts.push(None);
+                experts.push(ExpertResult::Pending);
             }
             result.push(experts);
         }
@@ -190,10 +231,55 @@ impl NaiveExecutor {
         Ok(out)
     }
 
+    fn mark_egress_running(&mut self, egress_meta: &[EgressMeta]) -> EKResult<()> {
+        for meta in egress_meta {
+            let (_, lid) = self
+                .seq_mapping
+                .get(&meta.seq_gid)
+                .ok_or(EKError::NotFound("no seq mapping".into()))?;
+            let ingress_meta = self
+                .pending_ingress
+                .get_mut(&meta.req_id)
+                .ok_or(EKError::NotFound("no ingress req found".into()))?;
+            ingress_meta.result[*lid][meta.expert_idx] = ExpertResult::Running;
+        }
+        Ok(())
+    }
+
+    fn mark_egress_failed(&mut self, egress_meta: &[EgressMeta], err: ExpertError) -> EKResult<()> {
+        for meta in egress_meta {
+            let (_, lid) = self
+                .seq_mapping
+                .get(&meta.seq_gid)
+                .ok_or(EKError::NotFound("no seq mapping".into()))?;
+            let ingress_meta = self
+                .pending_ingress
+                .get_mut(&meta.req_id)
+                .ok_or(EKError::NotFound("no ingress req found".into()))?;
+            ingress_meta.result[*lid][meta.expert_idx] = ExpertResult::Failed(err.clone());
+        }
+        Ok(())
+    }
+
+    fn cleanup_egress_requests(&mut self, egress_meta: &[EgressMeta]) {
+        let failed_req_ids = egress_meta
+            .iter()
+            .map(|meta| meta.req_id)
+            .collect::<Vec<_>>();
+        self.pending_ingress
+            .retain(|req_id, _| !failed_req_ids.contains(req_id));
+        self.seq_mapping
+            .retain(|_, (req_id, _)| !failed_req_ids.contains(req_id));
+        for metas in self.pending_egress.values_mut() {
+            metas.retain(|meta| !failed_req_ids.contains(&meta.req_id));
+        }
+        self.pending_egress.retain(|_, metas| !metas.is_empty());
+    }
+
     #[instrument]
     pub async fn inner_execute(&mut self) -> EKResult<()> {
         let mut tit = PerfTimer::new("inner_execute");
-        let mut handles: Vec<JoinHandle<Result<ForwardResponse, ()>>> = vec![];
+        let mut handles: Vec<JoinHandle<Result<ForwardResponse, ExpertError>>> = vec![];
         let mut chips: Vec<(ExpertId, Vec<EgressMeta>)> = vec![];
         let settings = get_ek_settings();
 
@@ -235,32 +321,23 @@ impl NaiveExecutor {
                 match found {
                     Some(c) => c,
                     None => {
-                        log::error!(
-                            "controller executor: no worker for {expert_id} after \
-                             {MAX_ATTEMPTS} attempts: {:?}",
-                            last_err
-                        );
+                        let err = ExpertError::NoWorker {
+                            expert_id: expert_id.to_owned(),
+                            message: format!(
+                                "no worker after {MAX_ATTEMPTS} attempts: {last_err:?}"
+                            ),
+                        };
+                        log::error!("controller executor: {err}");
+                        self.mark_egress_failed(&egress_meta, err.clone())?;
                         for handle in handles {
                             handle.abort();
                         }
-                        let failed_req_ids = egress_meta
-                            .iter()
-                            .map(|meta| meta.req_id)
-                            .collect::<Vec<_>>();
-                        self.pending_ingress
-                            .retain(|req_id, _| !failed_req_ids.contains(req_id));
-                        self.seq_mapping
-                            .retain(|_, (req_id, _)| !failed_req_ids.contains(req_id));
-                        for metas in self.pending_egress.values_mut() {
-                            metas.retain(|meta| !failed_req_ids.contains(&meta.req_id));
-                        }
-                        self.pending_egress.retain(|_, metas| !metas.is_empty());
-                        return Err(EKError::NotFound(format!(
-                            "no worker for expert {expert_id} after {MAX_ATTEMPTS} attempts: {last_err:?}"
-                        )));
+                        self.cleanup_egress_requests(&egress_meta);
+                        return Err(EKError::NotFound(err.to_string()));
                     }
                 }
             };
+            self.mark_egress_running(&egress_meta)?;
             chips.push((expert_id.to_owned(), egress_meta.to_owned()));
 
             let seq_gids = egress_meta
@@ -307,7 +384,14 @@ impl NaiveExecutor {
                             cli.forward(req)
                                 .await
                                 .map(|resp| ForwardResponse::Grpc(resp.into_inner()))
-                                .map_err(|e| log::error!("forward error: {e}"))
+                                .map_err(|e| {
+                                    let message = format!("gRPC forward error: {e}");
+                                    if e.code() == tonic::Code::Internal {
+                                        ExpertError::Compute { expert_id, message }
+                                    } else {
+                                        ExpertError::Transport { expert_id, message }
+                                    }
+                                })
                         }
                         .in_current_span(),
                     );
@@ -430,16 +514,49 @@ impl NaiveExecutor {
         tit.stop("egress_req_sent");
 
         for (egress_idx, handle) in handles.into_iter().enumerate() {
-            let egress = &chips[egress_idx];
-            let Ok(res) = handle.await? else {
-                return Err(EKError::RuntimeError(format!(
-                    "failed to receive response for expert {}",
-                    egress.0
-                )));
+            let egress = chips[egress_idx].clone();
+            let res = match handle.await {
+                Ok(Ok(res)) => res,
+                Ok(Err(err)) => {
+                    self.mark_egress_failed(&egress.1, err.clone())?;
+                    self.cleanup_egress_requests(&egress.1);
+                    return Err(EKError::RuntimeError(err.to_string()));
+                }
+                Err(e) => {
+                    let err = ExpertError::Transport {
+                        expert_id: egress.0.clone(),
+                        message: format!("worker task join error: {e}"),
+                    };
+                    self.mark_egress_failed(&egress.1, err.clone())?;
+                    self.cleanup_egress_requests(&egress.1);
+                    return Err(EKError::RuntimeError(err.to_string()));
+                }
             };
-            let res_safetensor = SafeTensors::deserialize(res.output_tensor())?;
+            let res_safetensor = match SafeTensors::deserialize(res.output_tensor()) {
+                Ok(res) => res,
+                Err(e) => {
+                    let err = ExpertError::Compute {
+                        expert_id: egress.0.clone(),
+                        message: format!("invalid output tensor: {e}"),
+                    };
+                    self.mark_egress_failed(&egress.1, err.clone())?;
+                    self.cleanup_egress_requests(&egress.1);
+                    return Err(EKError::RuntimeError(err.to_string()));
+                }
+            };
             // TODO: hardcode safe tensor name
-            let view = res_safetensor.tensor("data")?;
+            let view = match res_safetensor.tensor("data") {
+                Ok(view) => view,
+                Err(e) => {
+                    let err = ExpertError::Compute {
+                        expert_id: egress.0.clone(),
+                        message: format!("missing output tensor data: {e}"),
+                    };
+                    self.mark_egress_failed(&egress.1, err.clone())?;
+                    self.cleanup_egress_requests(&egress.1);
+                    return Err(EKError::RuntimeError(err.to_string()));
+                }
+            };
             let res_tensor = TchTensor::from(&view).inner();
 
             log::debug!("received tensor shape={:?}", res_tensor.size());
@@ -455,29 +572,50 @@ impl NaiveExecutor {
                     .get_mut(&egress_meta.req_id)
                     .ok_or(EKError::NotFound("no ingress req found".into()))?;
                 let seq_completion = &mut meta.result[lid];
-                seq_completion[egress_meta.expert_idx] = Some(res_tensor.i(seq_idx as i64));
+                seq_completion[egress_meta.expert_idx] =
+                    ExpertResult::Success(res_tensor.i(seq_idx as i64));
             }
         }
 
         tit.stop("remote resp joined");
-        self.output().await;
+        self.output().await?;
         tit.stop("output generated");
 
         Ok(())
     }
 
-    async fn output(&mut self) {
+    async fn output(&mut self) -> EKResult<()> {
         let mut removed = vec![];
+        let mut failed = None;
         for (req_id, meta) in self.pending_ingress.iter() {
-            let completed = meta.result.iter().all(|x| x.iter().all(|v| v.is_some()));
+            let completed = meta
+                .result
+                .iter()
+                .all(|x| x.iter().all(ExpertResult::is_terminal));
             if !completed {
+                continue;
+            }
+            if let Some(err) = meta.result.iter().flatten().find_map(|v| match v {
+                ExpertResult::Failed(err) => Some(err.clone()),
+                _ => None,
+            }) {
+                failed = Some(EKError::RuntimeError(err.to_string()));
+                removed.push(*req_id);
                 continue;
             }
             let res_tensors = meta
                 .result
                 .iter()
                 .map(|x| {
-                    let must_tensor = x.iter().map(|x| x.as_ref().unwrap()).collect::<Vec<_>>();
+                    let must_tensor = x
+                        .iter()
+                        .map(|x| match x {
+                            ExpertResult::Success(tensor) => tensor,
+                            _ => unreachable!(
+                                "completed request without failed slots must be all success"
+                            ),
+                        })
+                        .collect::<Vec<_>>();
                     Tensor::stack(&must_tensor, 0)
                 })
                 .collect::<Vec<_>>();
@@ -512,6 +650,10 @@ impl NaiveExecutor {
                 self.seq_mapping.remove(&key);
             }
         }
+        if let Some(err) = failed {
+            return Err(err);
+        }
+        Ok(())
     }
 
     #[instrument(skip(self, req))]
