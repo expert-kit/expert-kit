@@ -1,13 +1,14 @@
 use std::{
     collections::HashMap,
     sync::{
-        Arc, OnceLock,
         atomic::{AtomicUsize, Ordering},
+        Arc, OnceLock,
     },
+    time::Duration,
 };
 
 use crate::{
-    shmq::{GeneralShmQueueBytes, RdmaEndpointClient, ShmQueue, rdma_impl::RdmaQueue},
+    shmq::{rdma_impl::RdmaQueue, GeneralShmQueueBytes, RdmaEndpointClient, ShmQueue},
     state::io::StateReaderImpl,
 };
 use ek_base::{
@@ -23,6 +24,9 @@ use url::Url;
 
 const MAX_RETRIES: u32 = 3;
 const BASE_DELAY_MS: u64 = 1000;
+const GRPC_CONNECT_TIMEOUT_SECS: u64 = 10;
+const GRPC_KEEPALIVE_INTERVAL_SECS: u64 = 30;
+const GRPC_KEEPALIVE_TIMEOUT_SECS: u64 = 5;
 
 /// When true, force controller to use gRPC for all worker connections.
 /// Set to false to respect each worker's configured channel (shm/rdma/grpc).
@@ -130,6 +134,12 @@ enum ChannelMeta {
     Rdma(RdmaChannelMeta),
 }
 
+struct WorkerGrpcChannelPool {
+    channel: Channel,
+    addr: String,
+    worker_id: String,
+}
+
 /// RDMA connection state for a worker node
 #[derive(Clone)]
 struct RdmaNodeConnection {
@@ -140,6 +150,11 @@ struct RdmaNodeConnection {
 
 pub struct ExpertRegistryImpl {
     eid2channels: HashMap<ExpertId, Vec<ChannelMeta>>,
+    /// Per-worker-endpoint gRPC channels, keyed by endpoint address.
+    ///
+    /// A physical host can run multiple workers, so `addr` is the stable
+    /// connection key while `worker_id` tracks lifecycle cleanup.
+    worker_grpc_pools: HashMap<String, WorkerGrpcChannelPool>,
     all_shm_channels: HashMap<String, LocalShmChannel>,
     all_rdma_connections: HashMap<String, RdmaNodeConnection>,
     /// Hostnames that have been explicitly deregistered.  Checked in
@@ -177,6 +192,7 @@ impl ExpertRegistry for ExpertRegistryImpl {
 impl ExpertRegistryImpl {
     async fn inner_reset(&mut self) -> EKResult<()> {
         self.eid2channels.clear();
+        self.worker_grpc_pools.clear();
         Ok(())
     }
 
@@ -210,9 +226,7 @@ impl ExpertRegistryImpl {
         // not "scheduled" or "pending" (still being loaded by progressive
         // assignment).  This prevents routing to workers that just
         // reconnected and haven't loaded the expert yet.
-        let nodes = StateReaderImpl::new()
-            .node_by_expert_loaded(eid)
-            .await?;
+        let nodes = StateReaderImpl::new().node_by_expert_loaded(eid).await?;
 
         for node in nodes {
             // Skip nodes that have been explicitly deregistered — instant
@@ -239,9 +253,9 @@ impl ExpertRegistryImpl {
 
             match channel.as_str() {
                 "grpc" => {
-                    let end = Channel::from_shared(addr)
-                        .map_err(|e| EKError::InvalidInput(format!("invalid url for gRPC: {e}")))?;
-                    let channel = end.connect().await?;
+                    let channel = self
+                        .get_or_create_worker_grpc_channel(&addr, &node.hostname)
+                        .await?;
                     let meta = GrpcChannelMeta {
                         ch: channel,
                         host_id: node.hostname.clone(),
@@ -492,6 +506,12 @@ impl ExpertRegistryImpl {
             });
         }
 
+        // Remove gRPC channel pools for this worker. Pools are keyed by endpoint
+        // address, so match on worker_id to avoid confusing multiple workers on
+        // the same physical host.
+        self.worker_grpc_pools
+            .retain(|_, pool| pool.worker_id != host_id);
+
         // Remove SHM channels
         self.all_shm_channels
             .retain(|hostname, _| hostname != host_id);
@@ -503,7 +523,6 @@ impl ExpertRegistryImpl {
 
         log::info!("Deregistered worker: {}", host_id);
     }
-
 }
 
 impl Default for ExpertRegistryImpl {
@@ -516,10 +535,67 @@ impl ExpertRegistryImpl {
     pub fn new() -> Self {
         Self {
             eid2channels: HashMap::new(),
+            worker_grpc_pools: HashMap::new(),
             all_shm_channels: HashMap::new(),
             all_rdma_connections: HashMap::new(),
             deregistered: std::collections::HashSet::new(),
         }
+    }
+}
+
+// ── gRPC
+impl ExpertRegistryImpl {
+    async fn get_or_create_worker_grpc_channel(
+        &mut self,
+        addr: &str,
+        worker_id: &str,
+    ) -> EKResult<Channel> {
+        let mut stale_worker_id = None;
+        if let Some(pool) = self.worker_grpc_pools.get_mut(addr) {
+            if pool.worker_id == worker_id && pool.addr == addr {
+                log::debug!("reusing gRPC channel for worker {worker_id} (addr={addr})");
+                return Ok(pool.channel.clone());
+            }
+
+            stale_worker_id = Some(pool.worker_id.clone());
+        }
+
+        if let Some(old_worker_id) = stale_worker_id {
+            log::info!(
+                "rebuilding gRPC channel for addr={addr}; worker changed from {} to {worker_id}",
+                old_worker_id
+            );
+            self.worker_grpc_pools.remove(addr);
+        }
+
+        log::info!("creating gRPC channel for worker {worker_id} (addr={addr})");
+        let channel = Self::build_grpc_channel(addr).await?;
+        self.worker_grpc_pools.insert(
+            addr.to_owned(),
+            WorkerGrpcChannelPool {
+                channel: channel.clone(),
+                addr: addr.to_owned(),
+                worker_id: worker_id.to_owned(),
+            },
+        );
+        Ok(channel)
+    }
+
+    async fn build_grpc_channel(addr: &str) -> EKResult<Channel> {
+        Channel::from_shared(addr.to_owned())
+            .map_err(|e| EKError::InvalidInput(format!("invalid url for gRPC: {e}")))?
+            .connect_timeout(Duration::from_secs(GRPC_CONNECT_TIMEOUT_SECS))
+            .tcp_keepalive(Some(Duration::from_secs(GRPC_KEEPALIVE_INTERVAL_SECS)))
+            .http2_keep_alive_interval(Duration::from_secs(GRPC_KEEPALIVE_INTERVAL_SECS))
+            .keep_alive_timeout(Duration::from_secs(GRPC_KEEPALIVE_TIMEOUT_SECS))
+            .keep_alive_while_idle(true)
+            .connect()
+            .await
+            .map_err(|e| {
+                EKError::IoError(std::io::Error::other(format!(
+                    "gRPC connect failed ({addr}): {e}"
+                )))
+            })
     }
 }
 
