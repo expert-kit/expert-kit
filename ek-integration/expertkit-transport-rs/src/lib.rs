@@ -6,6 +6,7 @@ use pyo3::prelude::*;
 
 mod client;
 mod lb;
+mod observability;
 mod python;
 mod routing;
 mod transport;
