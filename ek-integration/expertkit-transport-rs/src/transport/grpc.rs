@@ -29,6 +29,8 @@ pub mod proto {
 
 use proto::ek::worker::v1::{ForwardReq, computation_service_client::ComputationServiceClient};
 
+use crate::observability::inject_current_trace_context;
+
 /// Connect timeout for establishing new gRPC connections (3 seconds)
 const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
 
@@ -92,7 +94,10 @@ impl GrpcTransport {
     async fn invalidate_channel(&self, endpoint: &str) {
         let mut channels = self.channels.write().await;
         if channels.remove(endpoint).is_some() {
-            warn!("[GrpcTransport] Invalidated cached channel for {}", endpoint);
+            warn!(
+                "[GrpcTransport] Invalidated cached channel for {}",
+                endpoint
+            );
         }
     }
 }
@@ -148,6 +153,8 @@ impl Transport for GrpcTransport {
             );
 
             // Send with timeout
+            let mut grpc_req = tonic::Request::new(grpc_req);
+            inject_current_trace_context(grpc_req.metadata_mut());
             let result = tokio::time::timeout(self.timeout, client.forward(grpc_req)).await;
 
             match result {
