@@ -2,6 +2,7 @@ use pyo3::prelude::*;
 use pyo3::types::PyAny;
 
 use crate::client::ExpertKitClient as RustExpertKitClient;
+use crate::observability::init_tracing;
 use crate::utils::{TensorMetadata, pytorch_to_tch_tensor, tch_to_pytorch_tensor};
 
 const DEFAULT_THREAD_NUM: usize = 16;
@@ -39,6 +40,10 @@ impl PyExpertKitClient {
                     e
                 ))
             })?;
+        {
+            let _entered = runtime.enter();
+            init_tracing();
+        }
 
         Ok(Self {
             client: Some(RustExpertKitClient::new(controller_addr, timeout)),
@@ -109,7 +114,9 @@ impl PyExpertKitClient {
                 .block_on(async {
                     if use_fallback {
                         // Use fallback version for maximum resilience
-                        client.forward_expert_tensor_with_fallback(expert_ids, input_tensor).await
+                        client
+                            .forward_expert_tensor_with_fallback(expert_ids, input_tensor)
+                            .await
                     } else {
                         // Direct path only (still has retry logic)
                         client.forward_expert_tensor(expert_ids, input_tensor).await

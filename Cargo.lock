@@ -1495,6 +1495,7 @@ dependencies = [
  "ndarray",
  "ndarray-rand",
  "nix 0.30.1",
+ "opentelemetry",
  "ort",
  "ort-sys",
  "prometheus",
@@ -1630,6 +1631,10 @@ dependencies = [
  "log",
  "ndarray",
  "nix 0.29.0",
+ "opentelemetry",
+ "opentelemetry-otlp",
+ "opentelemetry-semantic-conventions",
+ "opentelemetry_sdk",
  "parking_lot",
  "prost 0.12.6",
  "pyo3",
@@ -1644,6 +1649,9 @@ dependencies = [
  "tonic 0.11.0",
  "tonic-build 0.11.0",
  "tower 0.4.13",
+ "tracing",
+ "tracing-opentelemetry",
+ "tracing-subscriber",
 ]
 
 [[package]]

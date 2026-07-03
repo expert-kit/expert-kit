@@ -45,6 +45,7 @@ tonic = { workspace = true }
 tower = { workspace = true }
 tracing = { workspace = true }
 tracing-opentelemetry = { workspace = true }
+opentelemetry = { workspace = true }
 url = { workspace = true }
 
 [build-dependencies]
