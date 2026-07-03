@@ -11,6 +11,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .build();
 
     println!("cargo:rustc-link-search=native={}/lib", dst.display());
+    println!("cargo:rustc-link-search=native={}/lib64", dst.display());
     println!("cargo:rustc-link-lib=static=ggml");
     println!("cargo:rustc-link-lib=static=ggml-base");
     println!("cargo:rustc-link-lib=static=ggml-cpu");
