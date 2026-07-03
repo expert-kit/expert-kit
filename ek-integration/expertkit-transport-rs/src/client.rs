@@ -4,15 +4,71 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tonic::transport::Channel;
+use tracing::{Instrument, Span};
 
-use crate::routing::RoutingClient;
-use crate::transport::{ExpertRequest, Transport, auto::AutoTransport};
-use crate::transport::grpc::proto::ek::worker::v1::{
-    ForwardReq, forward_req::SequenceInfo, computation_service_client::ComputationServiceClient,
+use crate::observability::{
+    StageTimer, TraceLabels, infer_layer_id, inject_current_trace_context, next_expert_call_id,
+    next_layer_id, next_request_id,
 };
+use crate::routing::RoutingClient;
+use crate::transport::grpc::proto::ek::worker::v1::{
+    ForwardReq, computation_service_client::ComputationServiceClient, forward_req::SequenceInfo,
+};
+use crate::transport::{ExpertRequest, Transport, auto::AutoTransport};
 use crate::utils::{deserialize_safetensor_2_tch_tensor, serialize_tch_tensor_2_safetensor};
 
 use tch::Tensor;
+
+struct ForwardTrace {
+    request_id: u64,
+    layer_id: u64,
+    layer_span: Span,
+    _request_timer: StageTimer,
+    _layer_timer: StageTimer,
+}
+
+impl ForwardTrace {
+    fn start(
+        expert_ids: &[Vec<String>],
+        batch_size: usize,
+        hidden_dim: usize,
+        path: &'static str,
+    ) -> Self {
+        let request_id = next_request_id();
+        let inferred_layer_id = infer_layer_id(expert_ids, next_layer_id());
+        let request_timer = StageTimer::start(
+            TraceLabels::new("frontend", "frontend.request")
+                .path(path)
+                .request_id(request_id)
+                .layer_id(inferred_layer_id)
+                .num_tokens(batch_size),
+        );
+        let request_span = request_timer.span();
+        let layer_timer = {
+            let _entered = request_span.enter();
+            StageTimer::start(
+                TraceLabels::new("frontend", "frontend.layer")
+                    .path(path)
+                    .request_id(request_id)
+                    .layer_id(inferred_layer_id)
+                    .num_tokens(batch_size),
+            )
+        };
+        let _ = hidden_dim;
+        Self {
+            request_id,
+            layer_id: inferred_layer_id,
+            layer_span: layer_timer.span(),
+            _request_timer: request_timer,
+            _layer_timer: layer_timer,
+        }
+    }
+
+    fn child_timer(&self, labels: TraceLabels) -> StageTimer {
+        let _entered = self.layer_span.enter();
+        StageTimer::start(labels.request_id(self.request_id).layer_id(self.layer_id))
+    }
+}
 
 /// Result of a single expert task execution
 enum ExpertTaskResult {
@@ -54,7 +110,9 @@ impl ExpertKitClient {
         routing.fetch_routing(None).await?;
 
         // Establish controller channel for fallback requests
-        let uri = if self.controller_addr.starts_with("http://") || self.controller_addr.starts_with("https://") {
+        let uri = if self.controller_addr.starts_with("http://")
+            || self.controller_addr.starts_with("https://")
+        {
             self.controller_addr.clone()
         } else {
             format!("http://{}", self.controller_addr)
@@ -86,6 +144,9 @@ impl ExpertKitClient {
         routing: Arc<RoutingClient>,
         pre_assigned_worker: crate::transport::grpc::proto::ek::control::v1::WorkerEndpoint,
         task_create_t: std::time::Instant,
+        request_id: u64,
+        layer_id: u64,
+        expert_call_id: u64,
     ) -> ExpertTaskResult {
         let sub_task_t = std::time::Instant::now();
 
@@ -107,19 +168,51 @@ impl ExpertKitClient {
             .collect();
 
         // Create index tensor and slice
-        let index_tensor = Tensor::from_slice(&seq_indices);
-        let expert_input = hidden_state.index_select(0, &index_tensor);
+        let expert_input = {
+            let timer = StageTimer::start(
+                TraceLabels::new("frontend", "frontend.tensor_slice")
+                    .path("direct_worker")
+                    .request_id(request_id)
+                    .layer_id(layer_id)
+                    .expert_call_id(expert_call_id)
+                    .expert_id(expert_id.as_str())
+                    .worker(worker_endpoint.grpc_addr.as_str())
+                    .num_tokens(seq_indices.len()),
+            );
+            let span = timer.span();
+            let _entered = span.enter();
+            let index_tensor = Tensor::from_slice(&seq_indices);
+            let tensor = hidden_state.index_select(0, &index_tensor);
+            drop(timer);
+            tensor
+        };
 
         // Serialize for network transfer
-        let tensor_bytes = match serialize_tch_tensor_2_safetensor(&expert_input) {
-            Ok(bytes) => bytes,
-            Err(e) => {
-                return ExpertTaskResult::Failed(
-                    expert_id,
-                    format!("Failed to serialize tensor: {}", e),
-                    Some(worker_endpoint.grpc_addr.clone()),
-                );
-            }
+        let tensor_bytes = {
+            let timer = StageTimer::start(
+                TraceLabels::new("frontend", "frontend.serialize")
+                    .path("direct_worker")
+                    .request_id(request_id)
+                    .layer_id(layer_id)
+                    .expert_call_id(expert_call_id)
+                    .expert_id(expert_id.as_str())
+                    .worker(worker_endpoint.grpc_addr.as_str())
+                    .num_tokens(seq_indices.len()),
+            );
+            let span = timer.span();
+            let _entered = span.enter();
+            let result = match serialize_tch_tensor_2_safetensor(&expert_input) {
+                Ok(bytes) => bytes,
+                Err(e) => {
+                    return ExpertTaskResult::Failed(
+                        expert_id,
+                        format!("Failed to serialize tensor: {}", e),
+                        Some(worker_endpoint.grpc_addr.clone()),
+                    );
+                }
+            };
+            drop(timer);
+            result
         };
         let num_sequences = seq_indices.len();
 
@@ -133,23 +226,52 @@ impl ExpertKitClient {
         );
 
         // Create request
-        let request = ExpertRequest::new(expert_id.clone(), tensor_bytes, num_sequences);
+        let request = ExpertRequest::new(expert_id.clone(), tensor_bytes, num_sequences)
+            .with_trace_context(request_id, layer_id, expert_call_id);
 
         let send_t = std::time::Instant::now();
+        let send_timer = StageTimer::start(
+            TraceLabels::new("frontend", "frontend.send_worker")
+                .path("direct_worker")
+                .request_id(request_id)
+                .layer_id(layer_id)
+                .expert_call_id(expert_call_id)
+                .expert_id(expert_id.as_str())
+                .worker(worker_endpoint.grpc_addr.as_str())
+                .num_tokens(num_sequences),
+        );
+        let send_span = send_timer.span();
         let result = transport
             .send_batch(&worker_endpoint, vec![request])
+            .instrument(send_span)
             .await;
+        drop(send_timer);
         let rtt_ms = send_t.elapsed().as_secs_f64() * 1000.0;
 
         // Track request completion (decrement inflight, update RTT and throughput)
-        routing.on_request_complete(&worker_endpoint, rtt_ms, num_sequences).await;
+        routing
+            .on_request_complete(&worker_endpoint, rtt_ms, num_sequences)
+            .await;
 
         let addr = worker_endpoint.grpc_addr.clone();
         match result {
             Ok(responses) => {
                 if let Some(response) = responses.into_iter().next() {
+                    let timer = StageTimer::start(
+                        TraceLabels::new("frontend", "frontend.deserialize")
+                            .path("direct_worker")
+                            .request_id(request_id)
+                            .layer_id(layer_id)
+                            .expert_call_id(expert_call_id)
+                            .expert_id(expert_id.as_str())
+                            .worker(addr.as_str())
+                            .num_tokens(num_sequences),
+                    );
+                    let span = timer.span();
+                    let _entered = span.enter();
                     match deserialize_safetensor_2_tch_tensor(&response.tensor_data) {
                         Ok(tensor) => {
+                            drop(timer);
                             debug!(
                                 "[Client-Time] 🔚 Sub-task for expert {} on worker {} completed in {:?} μs, send_batch took {:?} μs (RTT={:.2}ms), cost from task create time {:?} μs",
                                 expert_id,
@@ -161,14 +283,21 @@ impl ExpertKitClient {
                             );
                             ExpertTaskResult::Success(expert_id, tensor)
                         }
-                        Err(e) => ExpertTaskResult::Failed(
-                            expert_id,
-                            format!("Failed to deserialize response: {}", e),
-                            Some(addr),
-                        ),
+                        Err(e) => {
+                            drop(timer);
+                            ExpertTaskResult::Failed(
+                                expert_id,
+                                format!("Failed to deserialize response: {}", e),
+                                Some(addr),
+                            )
+                        }
                     }
                 } else {
-                    ExpertTaskResult::Failed(expert_id, "Empty response from worker".to_string(), Some(addr))
+                    ExpertTaskResult::Failed(
+                        expert_id,
+                        "Empty response from worker".to_string(),
+                        Some(addr),
+                    )
                 }
             }
             Err(e) => {
@@ -176,7 +305,11 @@ impl ExpertKitClient {
                     "[Client] Expert {} failed on worker {}: {}",
                     expert_id, addr, e
                 );
-                ExpertTaskResult::Failed(expert_id, format!("Worker request failed: {}", e), Some(addr))
+                ExpertTaskResult::Failed(
+                    expert_id,
+                    format!("Worker request failed: {}", e),
+                    Some(addr),
+                )
             }
         }
     }
@@ -190,6 +323,19 @@ impl ExpertKitClient {
     ) -> Result<Tensor> {
         let batch_size = hidden_state.size()[0] as usize;
         let hidden_dim = hidden_state.size()[1] as usize;
+        let trace = ForwardTrace::start(&expert_ids, batch_size, hidden_dim, "direct_worker");
+        self.forward_expert_tensor_direct(expert_ids, hidden_state, &trace)
+            .await
+    }
+
+    async fn forward_expert_tensor_direct(
+        &self,
+        expert_ids: Vec<Vec<String>>,
+        hidden_state: Tensor,
+        trace: &ForwardTrace,
+    ) -> Result<Tensor> {
+        let batch_size = hidden_state.size()[0] as usize;
+        let hidden_dim = hidden_state.size()[1] as usize;
 
         debug!(
             "[Client] forward_expert_tensor: batch_size={}, hidden_dim={}, device={:?}",
@@ -199,16 +345,26 @@ impl ExpertKitClient {
         );
 
         // Decompose by expert
-        let mut expert_to_sequences: HashMap<String, Vec<(usize, usize)>> = HashMap::new();
-
-        for (seq_idx, experts) in expert_ids.iter().enumerate() {
-            for (expert_idx, expert_id) in experts.iter().enumerate() {
-                expert_to_sequences
-                    .entry(expert_id.clone())
-                    .or_default()
-                    .push((seq_idx, expert_idx));
+        let expert_to_sequences: HashMap<String, Vec<(usize, usize)>> = {
+            let timer = trace.child_timer(
+                TraceLabels::new("frontend", "frontend.decompose")
+                    .path("direct_worker")
+                    .num_tokens(expert_ids.len()),
+            );
+            let span = timer.span();
+            let _entered = span.enter();
+            let mut expert_to_sequences: HashMap<String, Vec<(usize, usize)>> = HashMap::new();
+            for (seq_idx, experts) in expert_ids.iter().enumerate() {
+                for (expert_idx, expert_id) in experts.iter().enumerate() {
+                    expert_to_sequences
+                        .entry(expert_id.clone())
+                        .or_default()
+                        .push((seq_idx, expert_idx));
+                }
             }
-        }
+            drop(timer);
+            expert_to_sequences
+        };
 
         info!(
             "[Client] Decomposed {} sequences into {} unique experts",
@@ -250,7 +406,18 @@ impl ExpertKitClient {
             .iter()
             .map(|(eid, positions)| (eid.clone(), positions.len()))
             .collect();
-        let mut assignments = self.routing.assign_layer_batch(&expert_calls).await;
+        let routing_timer = trace.child_timer(
+            TraceLabels::new("frontend", "frontend.route")
+                .path("direct_worker")
+                .num_tokens(expert_calls.len()),
+        );
+        let routing_span = routing_timer.span();
+        let mut assignments = self
+            .routing
+            .assign_layer_batch(&expert_calls)
+            .instrument(routing_span)
+            .await;
+        drop(routing_timer);
 
         // Build requests: slice tensor directly and spawn tasks immediately
         let mut jobs: tokio::task::JoinSet<ExpertTaskResult> = tokio::task::JoinSet::new();
@@ -267,13 +434,24 @@ impl ExpertKitClient {
             let worker = match assignments.remove(expert_id) {
                 Some(w) => w,
                 None => {
-                    warn!("[Client] Expert {} missing from LPT assignment, falling back to dynamic selection", expert_id);
-                    match self.routing.select_worker_and_mark_inflight(expert_id).await {
+                    warn!(
+                        "[Client] Expert {} missing from LPT assignment, falling back to dynamic selection",
+                        expert_id
+                    );
+                    match self
+                        .routing
+                        .select_worker_and_mark_inflight(expert_id)
+                        .await
+                    {
                         Some(w) => w,
                         None => {
                             let eid = expert_id.clone();
                             jobs.spawn(async move {
-                                ExpertTaskResult::Failed(eid, "No worker available".to_string(), None)
+                                ExpertTaskResult::Failed(
+                                    eid,
+                                    "No worker available".to_string(),
+                                    None,
+                                )
                             });
                             continue;
                         }
@@ -286,8 +464,26 @@ impl ExpertKitClient {
             let seq_positions_clone = seq_positions.clone();
             let transport = self.transport.clone();
             let routing = self.routing.clone();
+            let request_id = trace.request_id;
+            let layer_id = trace.layer_id;
+            let expert_call_id = next_expert_call_id();
+            let expert_timer = {
+                let _entered = trace.layer_span.enter();
+                StageTimer::start(
+                    TraceLabels::new("frontend", "frontend.expert_call")
+                        .path("direct_worker")
+                        .request_id(request_id)
+                        .layer_id(layer_id)
+                        .expert_call_id(expert_call_id)
+                        .expert_id(expert_id.as_str())
+                        .worker(worker.grpc_addr.as_str())
+                        .num_tokens(seq_positions.len()),
+                )
+            };
+            let expert_span = expert_timer.span();
 
             jobs.spawn(async move {
+                let _expert_timer = expert_timer;
                 Self::execute_expert_task(
                     expert_id_clone,
                     seq_positions_clone,
@@ -296,7 +492,11 @@ impl ExpertKitClient {
                     routing,
                     worker,
                     task_create_t,
+                    request_id,
+                    layer_id,
+                    expert_call_id,
                 )
+                .instrument(expert_span)
                 .await
             });
         }
@@ -339,10 +539,7 @@ impl ExpertKitClient {
         // a worker loads the expert.  Retrying on the frontend is wasteful
         // because it re-selects from a potentially stale routing table.
         if !failed_experts.is_empty() {
-            let failed_ids: Vec<String> = failed_experts
-                .into_iter()
-                .map(|(id, _)| id)
-                .collect();
+            let failed_ids: Vec<String> = failed_experts.into_iter().map(|(id, _)| id).collect();
             warn!(
                 "[Client] {} expert tasks failed on direct path, deferring to controller fallback: {:?}",
                 failed_ids.len(),
@@ -376,6 +573,13 @@ impl ExpertKitClient {
         );
 
         let t = std::time::Instant::now();
+        let merge_timer = trace.child_timer(
+            TraceLabels::new("frontend", "frontend.merge")
+                .path("direct_worker")
+                .num_tokens(batch_size),
+        );
+        let merge_span = merge_timer.span();
+        let _merge_entered = merge_span.enter();
         for (expert_id_resp, resp_tensor) in successful_results.iter() {
             let seq_positions = expert_metadata
                 .get(expert_id_resp)
@@ -420,6 +624,7 @@ impl ExpertKitClient {
             "[Client-Time] 🧩 Completed stacking of final output tensors in {:?} μs",
             t.elapsed().as_micros()
         );
+        drop(merge_timer);
 
         Ok(final_output)
     }
@@ -466,12 +671,24 @@ impl ExpertKitClient {
         &self,
         expert_ids: &[Vec<String>],
         hidden_state: &Tensor,
+        trace: &ForwardTrace,
     ) -> Result<Tensor> {
-        let channel = self.controller_channel.as_ref()
+        let channel = self
+            .controller_channel
+            .as_ref()
             .ok_or_else(|| anyhow::anyhow!("Controller channel not established"))?;
 
         // Serialize the hidden state tensor
-        let tensor_bytes = serialize_tch_tensor_2_safetensor(hidden_state)?;
+        let serialize_timer = trace.child_timer(
+            TraceLabels::new("frontend", "frontend.serialize")
+                .path("fallback_controller")
+                .num_tokens(expert_ids.len()),
+        );
+        let serialize_span = serialize_timer.span();
+        let tensor_bytes = async { serialize_tch_tensor_2_safetensor(hidden_state) }
+            .instrument(serialize_span)
+            .await?;
+        drop(serialize_timer);
 
         // Build sequences info for the request
         let sequences: Vec<SequenceInfo> = expert_ids
@@ -499,13 +716,37 @@ impl ExpertKitClient {
             .max_encoding_message_size(max_message_size);
 
         // Send with timeout
-        let response = tokio::time::timeout(self.timeout, client.forward(req))
-            .await
-            .map_err(|_| anyhow::anyhow!("Controller fallback timeout after {:?}", self.timeout))?
-            .map_err(|e| anyhow::anyhow!("Controller fallback gRPC error: {}", e))?;
+        let send_timer = trace.child_timer(
+            TraceLabels::new("frontend", "frontend.send_controller")
+                .path("fallback_controller")
+                .num_tokens(expert_ids.len()),
+        );
+        let send_span = send_timer.span();
+        let response = tokio::time::timeout(
+            self.timeout,
+            async {
+                let mut req = tonic::Request::new(req);
+                inject_current_trace_context(req.metadata_mut());
+                client.forward(req).await
+            }
+            .instrument(send_span),
+        )
+        .await
+        .map_err(|_| anyhow::anyhow!("Controller fallback timeout after {:?}", self.timeout))?
+        .map_err(|e| anyhow::anyhow!("Controller fallback gRPC error: {}", e))?;
+        drop(send_timer);
 
         let output_tensor = response.into_inner().output_tensor;
-        let result = deserialize_safetensor_2_tch_tensor(&output_tensor)?;
+        let deserialize_timer = trace.child_timer(
+            TraceLabels::new("frontend", "frontend.deserialize")
+                .path("fallback_controller")
+                .num_tokens(expert_ids.len()),
+        );
+        let deserialize_span = deserialize_timer.span();
+        let result = async { deserialize_safetensor_2_tch_tensor(&output_tensor) }
+            .instrument(deserialize_span)
+            .await?;
+        drop(deserialize_timer);
 
         info!("[Client] Controller fallback completed successfully");
 
@@ -519,8 +760,14 @@ impl ExpertKitClient {
         expert_ids: Vec<Vec<String>>,
         hidden_state: Tensor,
     ) -> Result<Tensor> {
+        let batch_size = hidden_state.size()[0] as usize;
+        let hidden_dim = hidden_state.size()[1] as usize;
+        let trace = ForwardTrace::start(&expert_ids, batch_size, hidden_dim, "direct_or_fallback");
         // Try direct worker path first (it already has retry logic)
-        match self.forward_expert_tensor(expert_ids.clone(), hidden_state.shallow_clone()).await {
+        match self
+            .forward_expert_tensor_direct(expert_ids.clone(), hidden_state.shallow_clone(), &trace)
+            .await
+        {
             Ok(result) => Ok(result),
             Err(e) => {
                 warn!(
@@ -537,16 +784,16 @@ impl ExpertKitClient {
                 }
 
                 // Fallback to controller as last resort
-                match self.forward_via_controller(&expert_ids, &hidden_state).await {
+                match self
+                    .forward_via_controller(&expert_ids, &hidden_state, &trace)
+                    .await
+                {
                     Ok(result) => {
                         info!("[Client] Controller fallback succeeded");
                         Ok(result)
                     }
                     Err(fallback_err) => {
-                        error!(
-                            "[Client] Controller fallback also failed: {}",
-                            fallback_err
-                        );
+                        error!("[Client] Controller fallback also failed: {}", fallback_err);
                         Err(anyhow::anyhow!(
                             "All paths failed. Direct: {}. Controller: {}",
                             e,

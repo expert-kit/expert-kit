@@ -11,13 +11,13 @@ use dashmap::DashMap;
 
 use crate::{
     metrics::{METRIC_WORKER_EXPERT_ACTIVATION, METRIC_WORKER_FORWARD},
+    observability::{StageTimer, TraceLabels, child_span_from_traceparent, extract_traceparent},
     proto::ek::worker::v1::{
         ForwardReq, ForwardResp, computation_service_server::ComputationService,
     },
 };
 use ek_base::utils::Defers;
 use tonic::{Request, Response, Status};
-use tracing::instrument;
 
 /// Per-expert request counters, reset after each heartbeat snapshot.
 static REQUEST_COUNTS: LazyLock<DashMap<String, AtomicU64>> = LazyLock::new(DashMap::new);
@@ -36,7 +36,6 @@ pub fn snapshot_and_reset() -> HashMap<String, u64> {
 }
 
 use super::core::{EKInstanceGateSync, get_instance_gate_sync};
-use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 #[derive(Debug)]
 pub struct BasicExpertImpl {
@@ -59,7 +58,6 @@ impl BasicExpertImpl {
 
 #[tonic::async_trait]
 impl ComputationService for BasicExpertImpl {
-    #[instrument(skip(self, request))]
     async fn forward(&self, request: Request<ForwardReq>) -> Result<Response<ForwardResp>, Status> {
         let now = Instant::now();
         let exp_id = request.get_ref().sequences[0].experts[0].clone();
@@ -83,6 +81,16 @@ impl BasicExpertImpl {
         );
         let exp_id = request.get_ref().sequences[0].experts[0].clone();
         let start = Instant::now();
+        let settings = ek_base::config::get_ek_settings();
+        let num_tokens = request.get_ref().sequences.len();
+        let traceparent = extract_traceparent(request.metadata());
+        let forward_labels = TraceLabels::new("worker", "worker.forward")
+            .path("worker")
+            .worker(settings.worker.id.as_str())
+            .expert_id(exp_id.as_str())
+            .num_tokens(num_tokens);
+        let forward_span = child_span_from_traceparent(&forward_labels, traceparent.as_str());
+        let _forward_timer = StageTimer::start_with_span(forward_labels, forward_span.clone());
 
         // Increment per-expert counter (reset each heartbeat)
         REQUEST_COUNTS
@@ -91,7 +99,6 @@ impl BasicExpertImpl {
             .fetch_add(1, Ordering::Relaxed);
 
         let start_cloned = start;
-        let settings = ek_base::config::get_ek_settings();
 
         // Record metrics
         METRIC_WORKER_EXPERT_ACTIVATION
@@ -135,15 +142,22 @@ impl BasicExpertImpl {
         // Use sync gate for compute-intensive operations
         let gate_sync = self.gate_sync;
 
-        // Capture current tracing context for the blocking task
-        let cx = tracing::Span::current().context();
-
-        let cx_clone = cx.clone();
+        let forward_span_for_task = forward_span.clone();
+        let queue_wait_timer = {
+            let _entered = forward_span.enter();
+            StageTimer::start(
+                TraceLabels::new("worker", "worker.queue_wait")
+                    .path("worker")
+                    .worker(settings.worker.id.as_str())
+                    .expert_id(exp_id.as_str())
+                    .num_tokens(num_tokens),
+            )
+        };
 
         // Run synchronous computation in blocking task
         let res = tokio::task::spawn_blocking(move || {
-            let _guard = cx_clone.attach();
-
+            drop(queue_wait_timer);
+            let _entered = forward_span_for_task.enter();
             // Perform synchronous forward computation
             gate_sync.forward_sync(req_inner)
         })

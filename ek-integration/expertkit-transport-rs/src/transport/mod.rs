@@ -25,6 +25,9 @@ pub struct ExpertRequest {
     pub expert_id: String,
     pub tensor_data: Vec<u8>, // Safetensors blob containing batched sequences
     pub num_sequences: usize, // Number of sequences in this batch
+    pub request_id: u64,
+    pub layer_id: u64,
+    pub expert_call_id: u64,
 }
 
 impl ExpertRequest {
@@ -34,7 +37,22 @@ impl ExpertRequest {
             expert_id,
             tensor_data,
             num_sequences,
+            request_id: 0,
+            layer_id: 0,
+            expert_call_id: 0,
         }
+    }
+
+    pub fn with_trace_context(
+        mut self,
+        request_id: u64,
+        layer_id: u64,
+        expert_call_id: u64,
+    ) -> Self {
+        self.request_id = request_id;
+        self.layer_id = layer_id;
+        self.expert_call_id = expert_call_id;
+        self
     }
 }
 

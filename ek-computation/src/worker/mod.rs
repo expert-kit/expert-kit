@@ -32,8 +32,7 @@ use ek_base::{config::get_ek_settings, error::EKResult};
 
 /// Set to true on SIGTERM; the heartbeat stream reads this and sets last_will=true
 /// in all subsequent heartbeats so the controller can start proactive migration.
-static LAST_WILL: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
+static LAST_WILL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 pub fn get_last_will() -> bool {
     LAST_WILL.load(Ordering::Relaxed)
@@ -158,9 +157,8 @@ pub async fn worker_main() -> EKResult<()> {
     {
         let wm_listen = settings.weight.wm_listen.clone();
         let wm_clone = wm.clone();
-        let wm_addr: std::net::SocketAddr = wm_listen
-            .parse()
-            .expect("invalid weight.wm_listen address");
+        let wm_addr: std::net::SocketAddr =
+            wm_listen.parse().expect("invalid weight.wm_listen address");
         tokio::spawn(async move {
             log::info!("Peer weight HTTP server listening on {wm_addr}");
             match peer_server::start_peer_server(wm_clone, &wm_addr).await {
@@ -201,12 +199,8 @@ pub async fn worker_main() -> EKResult<()> {
         log::info!("ek hostname: {worker_id:}");
         let control_endpoint = x::get_controller_addr();
         log::info!("control endpoint {:}", control_endpoint.uri());
-        let mut state_client = StateClient::new_with_rdma_tcp_port(
-            control_endpoint,
-            &worker_id,
-            rdma_tcp_port,
-            wm,
-        );
+        let mut state_client =
+            StateClient::new_with_rdma_tcp_port(control_endpoint, &worker_id, rdma_tcp_port, wm);
         state_client.set_preemption_notifier(preemption_tx);
         if let Err(e) = state_client.run(cli_cancel).await {
             log::error!("state client error {e:}");
@@ -433,9 +427,9 @@ pub async fn worker_main() -> EKResult<()> {
     tokio::spawn(async move {
         #[cfg(unix)]
         {
-            if let Ok(mut sig) = tokio::signal::unix::signal(
-                tokio::signal::unix::SignalKind::terminate(),
-            ) {
+            if let Ok(mut sig) =
+                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            {
                 sig.recv().await;
                 let _ = sigterm_tx.send(());
                 return;
@@ -471,7 +465,9 @@ pub async fn worker_main() -> EKResult<()> {
         match tokio::time::timeout(
             Duration::from_secs(settings.worker.shutdown_grace_secs),
             preemption_rx,
-        ).await {
+        )
+        .await
+        {
             Ok(Ok(())) => {
                 log::info!("Controller confirmed preemption complete");
             }
