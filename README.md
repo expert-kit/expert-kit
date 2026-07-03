@@ -85,3 +85,7 @@ If you have any questions, please join our discussion at https://expert-kit.zuli
     - **Qwen3-MoE**: Located in `ek-integration/expertkit-torch/expertkit-torch/models/`. This code is licensed under [Apache License Version 2.0](http://www.apache.org/licenses/LICENSE-2.0).
 
 - **Compliance**: All third-party components are used in compliance with their original license terms.
+
+## Issue Submission Rules
+
+Please read the [Issue Submission Guidelines](./doc/community/issue-submission-guidelines.md) before opening a new issue.
