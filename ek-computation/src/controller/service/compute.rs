@@ -9,6 +9,7 @@ use crate::{
         executor::{Executor, get_executor},
         metrics::METRIC_CONTROLLER_LAYER,
     },
+    observability::{StageTimer, TraceLabels, child_span_from_traceparent, extract_traceparent},
     proto::ek::worker::v1::{self, computation_service_server::ComputationService},
 };
 
@@ -32,11 +33,6 @@ impl ComputationService for ComputationProxyServiceImpl {
 }
 
 impl ComputationProxyServiceImpl {
-    #[tracing::instrument(
-        skip(self, request),
-        level = "info",
-        fields(method = "ComputationProxyServiceImpl::forward",)
-    )]
     async fn inner_controller_forward(
         &self,
         request: tonic::Request<v1::ForwardReq>,
@@ -45,6 +41,12 @@ impl ComputationProxyServiceImpl {
         log::info!(seq_len; "forward request in controller start");
         let start = std::time::Instant::now();
         let settings = get_ek_settings();
+        let traceparent = extract_traceparent(request.metadata());
+        let forward_labels = TraceLabels::new("controller", "controller.forward")
+            .path("fallback_controller")
+            .num_tokens(seq_len);
+        let forward_span = child_span_from_traceparent(&forward_labels, traceparent.as_str());
+        let _forward_timer = StageTimer::start_with_span(forward_labels, forward_span.clone());
 
         let cloned_start = start;
         let _d = Defers::defer(Box::new(move || {
@@ -55,10 +57,22 @@ impl ComputationProxyServiceImpl {
                 .observe(elapsed.as_micros() as f64);
         }));
 
-        let mut rx = {
-            let mut lg = self.executor.lock().await;
-            lg.submit(request.get_ref()).await?
+        let submit_timer = {
+            let _entered = forward_span.enter();
+            StageTimer::start(
+                TraceLabels::new("controller", "controller.submit")
+                    .path("fallback_controller")
+                    .num_tokens(seq_len),
+            )
         };
+        let submit_span = submit_timer.span();
+        let mut rx = async {
+            let mut lg = self.executor.lock().await;
+            lg.submit(request.get_ref()).await
+        }
+        .instrument(submit_span)
+        .await?;
+        drop(submit_timer);
 
         let exec_bg = self.executor.clone();
         let (err_tx, mut err_rx) = mpsc::channel(1);
@@ -72,18 +86,28 @@ impl ComputationProxyServiceImpl {
                     err_tx.send(err).await.unwrap();
                 }
             }
-            .in_current_span(),
+            .instrument(forward_span.clone()),
         );
 
+        let wait_timer = {
+            let _entered = forward_span.enter();
+            StageTimer::start(
+                TraceLabels::new("controller", "controller.wait_result")
+                    .path("fallback_controller")
+                    .num_tokens(seq_len),
+            )
+        };
+        let wait_span = wait_timer.span();
         tokio::select! {
-            err = err_rx.recv() => {
+            err = err_rx.recv().instrument(wait_span.clone()) => {
                 if let Some(err) = err {
                     log::error!("executor error: {err:?}");
                     return Err(tonic::Status::internal(format!("executor error: {err:?}")));
                 }
                 // err_tx dropped: exec task completed without error, wait for result
             }
-            res = rx.recv() => {
+            res = rx.recv().instrument(wait_span) => {
+                drop(wait_timer);
                 let elapsed_ms = start.elapsed().as_millis();
                 log::info!(elapsed_ms; "forward request in controller done");
                 if let Some(resp) = res {
@@ -93,6 +117,7 @@ impl ComputationProxyServiceImpl {
                 }
             }
         }
+        drop(wait_timer);
         let elapsed_ms = start.elapsed().as_millis();
         log::info!(elapsed_ms; "forward request in controller done");
         match rx.recv().await {
