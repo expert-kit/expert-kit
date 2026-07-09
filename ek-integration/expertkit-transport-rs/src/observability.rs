@@ -1,6 +1,6 @@
 use std::{
     sync::{
-        Once,
+        Mutex, Once,
         atomic::{AtomicU64, Ordering},
     },
     time::Instant,
@@ -12,6 +12,7 @@ use opentelemetry::{
 };
 use opentelemetry_sdk::{
     Resource,
+    error::OTelSdkError,
     propagation::{BaggagePropagator, TraceContextPropagator},
     trace::{RandomIdGenerator, Sampler, SdkTracerProvider},
 };
@@ -25,6 +26,7 @@ use tracing_opentelemetry::OpenTelemetrySpanExt;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 static INIT: Once = Once::new();
+static TRACER_PROVIDER: Mutex<Option<SdkTracerProvider>> = Mutex::new(None);
 static REQUEST_ID: AtomicU64 = AtomicU64::new(1);
 static EXPERT_CALL_ID: AtomicU64 = AtomicU64::new(1);
 static LAYER_ID: AtomicU64 = AtomicU64::new(1);
@@ -166,6 +168,11 @@ pub fn init_tracing() {
             .with_batch_exporter(exporter)
             .build();
         let tracer = provider.tracer("expertkit-transport-rs");
+        if let Ok(mut tracer_provider) = TRACER_PROVIDER.lock() {
+            *tracer_provider = Some(provider.clone());
+        } else {
+            log::warn!("[Tracing] failed to store tracer provider for shutdown");
+        }
         let propagator = TextMapCompositePropagator::new(vec![
             Box::new(BaggagePropagator::new()),
             Box::new(TraceContextPropagator::new()),
@@ -183,6 +190,38 @@ pub fn init_tracing() {
             log::debug!("[Tracing] tracing subscriber already initialized");
         }
     });
+}
+
+pub fn flush_tracing() -> Result<(), String> {
+    let provider = TRACER_PROVIDER
+        .lock()
+        .map_err(|err| format!("failed to lock tracer provider: {err}"))?
+        .clone();
+
+    if let Some(provider) = provider {
+        match provider.force_flush() {
+            Ok(()) | Err(OTelSdkError::AlreadyShutdown) => Ok(()),
+            Err(err) => Err(format!("failed to flush tracing spans: {err}")),
+        }
+    } else {
+        Ok(())
+    }
+}
+
+pub fn shutdown_tracing() -> Result<(), String> {
+    let provider = TRACER_PROVIDER
+        .lock()
+        .map_err(|err| format!("failed to lock tracer provider: {err}"))?
+        .take();
+
+    if let Some(provider) = provider {
+        match provider.shutdown() {
+            Ok(()) | Err(OTelSdkError::AlreadyShutdown) => Ok(()),
+            Err(err) => Err(format!("failed to shutdown tracing: {err}")),
+        }
+    } else {
+        Ok(())
+    }
 }
 
 pub fn next_request_id() -> u64 {
