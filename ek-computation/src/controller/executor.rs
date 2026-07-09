@@ -16,12 +16,13 @@ use tokio::{
     sync::{Mutex, mpsc},
     task::JoinHandle,
 };
-use tracing::{Instrument, instrument, span};
+use tracing::{Instrument, Span, span};
 
 use crate::{
     backend::{EkTensor, torch::TchTensor},
     controller::registry::{ExpertClient, ExpertId, ExpertIdRef, ShmqWorkerReq, ShmqWorkerResp},
     metrics::METRIC_CONTROLLER_INTRA_REQ,
+    observability::{StageTimer, TraceLabels, inject_current_trace_context, next_expert_call_id},
     proto::ek::worker::v1::{self},
 };
 
@@ -276,78 +277,141 @@ impl NaiveExecutor {
         self.pending_egress.retain(|_, metas| !metas.is_empty());
     }
 
-    #[instrument]
     pub async fn inner_execute(&mut self) -> EKResult<()> {
         let mut tit = PerfTimer::new("inner_execute");
         let mut handles: Vec<JoinHandle<Result<ForwardResponse, ExpertError>>> = vec![];
-        let mut chips: Vec<(ExpertId, Vec<EgressMeta>)> = vec![];
+        let mut chips: Vec<(ExpertId, Vec<EgressMeta>, StageTimer, Span)> = vec![];
         let settings = get_ek_settings();
 
         while let Some((expert_id, egress_meta)) = self.pending_egress.pop_first() {
             let expert_id: ExpertIdRef = expert_id.as_ref();
+            let expert_call_id = next_expert_call_id();
+            let num_tokens = egress_meta.len();
+            let expert_timer = StageTimer::start(
+                TraceLabels::new("controller", "controller.expert_call")
+                    .path("fallback_controller")
+                    .expert_call_id(expert_call_id)
+                    .expert_id(expert_id)
+                    .num_tokens(num_tokens),
+            );
+            let expert_span = expert_timer.span();
 
             // Retry selecting a worker — the expert may be in recovery
             // (recently assigned to a surviving worker but not yet loaded).
             // Wait up to ~62 s for it to become available before giving up.
             const MAX_ATTEMPTS: u32 = 6;
             let client = {
-                let mut last_err = None;
-                let mut found = None;
-                for attempt in 0..MAX_ATTEMPTS {
-                    match self.registry.lock().await.select(expert_id).await {
-                        Ok(c) => {
-                            if attempt > 0 {
-                                log::info!(
-                                    "controller executor: worker found for {expert_id} on attempt {}",
-                                    attempt + 1
-                                );
+                let schedule_timer = {
+                    let _entered = expert_span.enter();
+                    StageTimer::start(
+                        TraceLabels::new("controller", "controller.schedule")
+                            .path("fallback_controller")
+                            .expert_call_id(expert_call_id)
+                            .expert_id(expert_id)
+                            .num_tokens(num_tokens),
+                    )
+                };
+                let schedule_span = schedule_timer.span();
+                let selected = async {
+                    let mut last_err = None;
+                    let mut found = None;
+                    for attempt in 0..MAX_ATTEMPTS {
+                        match self.registry.lock().await.select(expert_id).await {
+                            Ok(c) => {
+                                if attempt > 0 {
+                                    log::info!(
+                                        "controller executor: worker found for {expert_id} on attempt {}",
+                                        attempt + 1
+                                    );
+                                }
+                                found = Some(c);
+                                break;
                             }
-                            found = Some(c);
-                            break;
-                        }
-                        Err(e) => {
-                            let backoff = std::time::Duration::from_secs(1u64 << attempt.min(4));
-                            log::info!(
-                                "controller executor: no worker for {expert_id} \
-                                 (attempt {}/{MAX_ATTEMPTS}), retrying in {:?}: {e}",
-                                attempt + 1,
-                                backoff
-                            );
-                            last_err = Some(e);
-                            tokio::time::sleep(backoff).await;
+                            Err(e) => {
+                                let backoff =
+                                    std::time::Duration::from_secs(1u64 << attempt.min(4));
+                                log::info!(
+                                    "controller executor: no worker for {expert_id} \
+                                     (attempt {}/{MAX_ATTEMPTS}), retrying in {:?}: {e}",
+                                    attempt + 1,
+                                    backoff
+                                );
+                                last_err = Some(e);
+                                tokio::time::sleep(backoff).await;
+                            }
                         }
                     }
-                }
-                match found {
-                    Some(c) => c,
-                    None => {
-                        let err = ExpertError::NoWorker {
-                            expert_id: expert_id.to_owned(),
-                            message: format!(
-                                "no worker after {MAX_ATTEMPTS} attempts: {last_err:?}"
-                            ),
-                        };
-                        log::error!("controller executor: {err}");
-                        self.mark_egress_failed(&egress_meta, err.clone())?;
-                        for handle in handles {
-                            handle.abort();
+                    match found {
+                        Some(c) => Ok(c),
+                        None => {
+                            let err = ExpertError::NoWorker {
+                                expert_id: expert_id.to_owned(),
+                                message: format!(
+                                    "no worker after {MAX_ATTEMPTS} attempts: {last_err:?}"
+                                ),
+                            };
+                            log::error!("controller executor: {err}");
+                            self.mark_egress_failed(&egress_meta, err.clone())?;
+                            for handle in handles.iter() {
+                                handle.abort();
+                            }
+                            self.cleanup_egress_requests(&egress_meta);
+                            Err(EKError::NotFound(err.to_string()))
                         }
-                        self.cleanup_egress_requests(&egress_meta);
-                        return Err(EKError::NotFound(err.to_string()));
                     }
-                }
+                };
+                let selected = selected.instrument(schedule_span).await;
+                drop(schedule_timer);
+                selected?
             };
             self.mark_egress_running(&egress_meta)?;
-            chips.push((expert_id.to_owned(), egress_meta.to_owned()));
+            chips.push((
+                expert_id.to_owned(),
+                egress_meta.to_owned(),
+                expert_timer,
+                expert_span.clone(),
+            ));
 
             let seq_gids = egress_meta
                 .iter()
                 .map(|e| e.seq_gid)
                 .collect::<Vec<GlobalSeqId>>();
 
-            let egress_tensor = self.assemble_seq_tensors(seq_gids)?;
+            let egress_tensor = {
+                let timer = {
+                    let _entered = expert_span.enter();
+                    StageTimer::start(
+                        TraceLabels::new("controller", "controller.assemble")
+                            .path("fallback_controller")
+                            .expert_call_id(expert_call_id)
+                            .expert_id(expert_id)
+                            .num_tokens(num_tokens),
+                    )
+                };
+                let span = timer.span();
+                let _entered = span.enter();
+                let tensor = self.assemble_seq_tensors(seq_gids)?;
+                drop(timer);
+                tensor
+            };
             log::debug!("egress tensor shape={:?}", egress_tensor.size());
-            let serialized_tensor = TchTensor::from(egress_tensor).serialize();
+            let serialized_tensor = {
+                let timer = {
+                    let _entered = expert_span.enter();
+                    StageTimer::start(
+                        TraceLabels::new("controller", "controller.serialize")
+                            .path("fallback_controller")
+                            .expert_call_id(expert_call_id)
+                            .expert_id(expert_id)
+                            .num_tokens(num_tokens),
+                    )
+                };
+                let span = timer.span();
+                let _entered = span.enter();
+                let tensor = TchTensor::from(egress_tensor).serialize();
+                drop(timer);
+                tensor
+            };
             let seqs = egress_meta
                 .iter()
                 .map(|_e| v1::forward_req::SequenceInfo {
@@ -372,6 +436,14 @@ impl NaiveExecutor {
                                 tensor: serialized_tensor,
                                 sequences: seqs,
                             };
+                            let send_timer = StageTimer::start(
+                                TraceLabels::new("controller", "controller.send_worker")
+                                    .path("fallback_controller")
+                                    .expert_call_id(expert_call_id)
+                                    .expert_id(expert_id.as_str())
+                                    .num_tokens(num_tokens),
+                            );
+                            let send_span = send_timer.span();
 
                             let start = time::Instant::now();
                             let _d = Defers::defer(Box::new(move || {
@@ -381,19 +453,26 @@ impl NaiveExecutor {
                                     .with_label_values(&[settings.inference.model_name.as_str()])
                                     .observe(elapsed.as_micros() as f64);
                             }));
-                            cli.forward(req)
-                                .await
-                                .map(|resp| ForwardResponse::Grpc(resp.into_inner()))
-                                .map_err(|e| {
-                                    let message = format!("gRPC forward error: {e}");
-                                    if e.code() == tonic::Code::Internal {
-                                        ExpertError::Compute { expert_id, message }
-                                    } else {
-                                        ExpertError::Transport { expert_id, message }
-                                    }
-                                })
+                            let result = async {
+                                let mut req = tonic::Request::new(req);
+                                inject_current_trace_context(req.metadata_mut());
+                                cli.forward(req).await
+                            }
+                            .instrument(send_span)
+                            .await
+                            .map(|resp| ForwardResponse::Grpc(resp.into_inner()))
+                            .map_err(|e| {
+                                let message = format!("gRPC forward error: {e}");
+                                if e.code() == tonic::Code::Internal {
+                                    ExpertError::Compute { expert_id, message }
+                                } else {
+                                    ExpertError::Transport { expert_id, message }
+                                }
+                            });
+                            drop(send_timer);
+                            result
                         }
-                        .in_current_span(),
+                        .instrument(expert_span.clone()),
                     );
                     handles.push(f);
                 }
@@ -514,7 +593,9 @@ impl NaiveExecutor {
         tit.stop("egress_req_sent");
 
         for (egress_idx, handle) in handles.into_iter().enumerate() {
-            let egress = chips[egress_idx].clone();
+            let (expert_id_for_chip, egress_meta_for_chip, _expert_timer, expert_span) =
+                &chips[egress_idx];
+            let egress = (expert_id_for_chip.clone(), egress_meta_for_chip.clone());
             let res = match handle.await {
                 Ok(Ok(res)) => res,
                 Ok(Err(err)) => {
@@ -532,16 +613,31 @@ impl NaiveExecutor {
                     return Err(EKError::RuntimeError(err.to_string()));
                 }
             };
-            let res_safetensor = match SafeTensors::deserialize(res.output_tensor()) {
-                Ok(res) => res,
-                Err(e) => {
-                    let err = ExpertError::Compute {
-                        expert_id: egress.0.clone(),
-                        message: format!("invalid output tensor: {e}"),
-                    };
-                    self.mark_egress_failed(&egress.1, err.clone())?;
-                    self.cleanup_egress_requests(&egress.1);
-                    return Err(EKError::RuntimeError(err.to_string()));
+            let res_safetensor = {
+                let timer = {
+                    let _entered = expert_span.enter();
+                    StageTimer::start(
+                        TraceLabels::new("controller", "controller.deserialize")
+                            .path("fallback_controller")
+                            .expert_id(egress.0.as_str())
+                            .num_tokens(egress.1.len()),
+                    )
+                };
+                let span = timer.span();
+                let _entered = span.enter();
+                let parsed = SafeTensors::deserialize(res.output_tensor());
+                drop(timer);
+                match parsed {
+                    Ok(res) => res,
+                    Err(e) => {
+                        let err = ExpertError::Compute {
+                            expert_id: egress.0.clone(),
+                            message: format!("invalid output tensor: {e}"),
+                        };
+                        self.mark_egress_failed(&egress.1, err.clone())?;
+                        self.cleanup_egress_requests(&egress.1);
+                        return Err(EKError::RuntimeError(err.to_string()));
+                    }
                 }
             };
             // TODO: hardcode safe tensor name
@@ -557,7 +653,22 @@ impl NaiveExecutor {
                     return Err(EKError::RuntimeError(err.to_string()));
                 }
             };
-            let res_tensor = TchTensor::from(&view).inner();
+            let res_tensor = {
+                let timer = {
+                    let _entered = expert_span.enter();
+                    StageTimer::start(
+                        TraceLabels::new("controller", "controller.merge")
+                            .path("fallback_controller")
+                            .expert_id(egress.0.as_str())
+                            .num_tokens(egress.1.len()),
+                    )
+                };
+                let span = timer.span();
+                let _entered = span.enter();
+                let tensor = TchTensor::from(&view).inner();
+                drop(timer);
+                tensor
+            };
 
             log::debug!("received tensor shape={:?}", res_tensor.size());
             for (seq_idx, egress_meta) in egress.1.iter().enumerate() {
@@ -656,7 +767,6 @@ impl NaiveExecutor {
         Ok(())
     }
 
-    #[instrument(skip(self, req))]
     fn break_down_to_egress(&mut self, req: &v1::ForwardReq, req_id: ReqId) {
         for (idx, seq) in req.sequences.iter().enumerate() {
             // update pending_seq

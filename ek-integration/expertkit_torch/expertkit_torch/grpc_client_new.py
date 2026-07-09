@@ -6,9 +6,14 @@ import safetensors.torch
 logger = logging.getLogger(__name__)
 
 try:
-    from expertkit_transport import ExpertKitClient as RustExpertKitClient
+    from expertkit_transport import (
+        ExpertKitClient as RustExpertKitClient,
+        flush_tracing as _flush_tracing,
+    )
     RUST_CLIENT_AVAILABLE = True
 except ImportError:
+    RustExpertKitClient = None
+    _flush_tracing = None
     RUST_CLIENT_AVAILABLE = False
     logger.warning("Rust client not available - ExpertKitClient will not work")
 
@@ -37,6 +42,7 @@ class ExpertKitClient:
 
         # Create Rust client and connect immediately
         self.rust_client = RustExpertKitClient(controller_addr, timeout_sec)
+        self._closed = False
         self.rust_client.connect()
 
         logger.info(
@@ -60,6 +66,8 @@ class ExpertKitClient:
         logger.debug(
             f"Sending batch_size={len(expert_ids)}"
         )
+        if self._closed or self.rust_client is None:
+            raise RuntimeError("ExpertKitClient is closed")
 
         # Pass tensor directly to Rust
         # Rust accesses tensor memory directly via pointer
@@ -68,3 +76,24 @@ class ExpertKitClient:
         logger.debug(f"Received output shape: {output.shape}")
 
         return output
+
+    def close(self) -> None:
+        """Flush frontend tracing spans before releasing the Rust client."""
+        if getattr(self, "_closed", True):
+            return
+
+        try:
+            rust_client = getattr(self, "rust_client", None)
+            if rust_client is not None and hasattr(rust_client, "close"):
+                rust_client.close()
+            elif _flush_tracing is not None:
+                _flush_tracing()
+        finally:
+            self.rust_client = None
+            self._closed = True
+
+    def __del__(self):
+        try:
+            self.close()
+        except Exception:
+            pass

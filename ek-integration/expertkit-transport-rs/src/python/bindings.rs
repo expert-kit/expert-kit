@@ -2,6 +2,7 @@ use pyo3::prelude::*;
 use pyo3::types::PyAny;
 
 use crate::client::ExpertKitClient as RustExpertKitClient;
+use crate::observability::{flush_tracing, init_tracing};
 use crate::utils::{TensorMetadata, pytorch_to_tch_tensor, tch_to_pytorch_tensor};
 
 const DEFAULT_THREAD_NUM: usize = 16;
@@ -22,10 +23,6 @@ pub struct PyExpertKitClient {
 impl PyExpertKitClient {
     #[new]
     fn new(controller_addr: String, timeout_sec: Option<f64>) -> PyResult<Self> {
-        if env_logger::try_init().is_ok() {
-            log::info!("Logger initialized");
-        }
-
         let timeout = timeout_sec.unwrap_or(DEFAULT_TIMEOUT_SEC);
 
         // Create ONE shared Tokio runtime for all requests
@@ -39,6 +36,13 @@ impl PyExpertKitClient {
                     e
                 ))
             })?;
+        {
+            let _entered = runtime.enter();
+            init_tracing();
+        }
+        if env_logger::try_init().is_ok() {
+            log::info!("Logger initialized");
+        }
 
         Ok(Self {
             client: Some(RustExpertKitClient::new(controller_addr, timeout)),
@@ -109,7 +113,9 @@ impl PyExpertKitClient {
                 .block_on(async {
                     if use_fallback {
                         // Use fallback version for maximum resilience
-                        client.forward_expert_tensor_with_fallback(expert_ids, input_tensor).await
+                        client
+                            .forward_expert_tensor_with_fallback(expert_ids, input_tensor)
+                            .await
                     } else {
                         // Direct path only (still has retry logic)
                         client.forward_expert_tensor(expert_ids, input_tensor).await
@@ -169,5 +175,20 @@ impl PyExpertKitClient {
                 .block_on(async { client.refresh_routing().await })
                 .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
         })
+    }
+
+    fn close(&mut self) -> PyResult<()> {
+        flush_tracing().map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+        self.client = None;
+        self.runtime = None;
+        Ok(())
+    }
+}
+
+impl Drop for PyExpertKitClient {
+    fn drop(&mut self) {
+        if let Err(err) = flush_tracing() {
+            log::warn!("[Tracing] failed to flush tracing during client drop: {err}");
+        }
     }
 }

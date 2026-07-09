@@ -16,6 +16,7 @@ use crate::{
     state::io::StateReaderImpl,
 };
 use ek_base::error::EKResult;
+use ek_base::tracing::grpc::OTelGrpcServerMiddleware;
 use metrics::spawn_metrics_server;
 use service::control::PlanServiceImpl;
 use std::sync::Arc;
@@ -48,8 +49,7 @@ pub async fn controller_main() -> EKResult<()> {
 
     let state_srv = tokio::task::spawn(async move {
         let srv = controller::service::state::StateServerImpl::new();
-        let routing_srv =
-            controller::service::routing::RoutingServiceImpl::new(broadcaster_intra);
+        let routing_srv = controller::service::routing::RoutingServiceImpl::new(broadcaster_intra);
         let intra_addr = format!(
             "{}:{}",
             settings.controller.listen, settings.controller.ports.intra
@@ -76,16 +76,15 @@ pub async fn controller_main() -> EKResult<()> {
         .parse()
         .unwrap();
 
-        // let layer = tower::ServiceBuilder::new()
-        //     .layer_fn(OTelGrpcServerMiddleware::new)
-        //     .into_inner();
+        let layer = tower::ServiceBuilder::new()
+            .layer_fn(OTelGrpcServerMiddleware::new)
+            .into_inner();
 
         log::info!("computation server listening on {inter_addr}");
         let plan_srv = PlanServiceImpl::new();
-        let routing_srv =
-            controller::service::routing::RoutingServiceImpl::new(broadcaster_clone);
+        let routing_srv = controller::service::routing::RoutingServiceImpl::new(broadcaster_clone);
         let err = tonic::transport::Server::builder()
-            // .layer(layer)
+            .layer(layer)
             .add_service(
                 ComputationServiceServer::new(srv)
                     .max_decoding_message_size(1024 * 1024 * 1024)

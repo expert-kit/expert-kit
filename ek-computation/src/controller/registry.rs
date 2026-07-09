@@ -1,14 +1,14 @@
 use std::{
     collections::HashMap,
     sync::{
-        atomic::{AtomicUsize, Ordering},
         Arc, OnceLock,
+        atomic::{AtomicUsize, Ordering},
     },
     time::Duration,
 };
 
 use crate::{
-    shmq::{rdma_impl::RdmaQueue, GeneralShmQueueBytes, RdmaEndpointClient, ShmQueue},
+    shmq::{GeneralShmQueueBytes, RdmaEndpointClient, ShmQueue, rdma_impl::RdmaQueue},
     state::io::StateReaderImpl,
 };
 use ek_base::{
