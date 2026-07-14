@@ -261,6 +261,15 @@ pub fn inject_current_trace_context(metadata: &mut MetadataMap) {
     });
 }
 
+pub fn current_traceparent() -> String {
+    let ctx = Span::current().context();
+    let mut injector = StringMapInjector(std::collections::HashMap::new());
+    opentelemetry::global::get_text_map_propagator(|propagator| {
+        propagator.inject_context(&ctx, &mut injector);
+    });
+    injector.0.remove("traceparent").unwrap_or_default()
+}
+
 pub fn infer_layer_id(expert_ids: &[Vec<String>], fallback: u64) -> u64 {
     expert_ids
         .iter()
@@ -275,6 +284,14 @@ pub fn infer_layer_id(expert_ids: &[Vec<String>], fallback: u64) -> u64 {
 }
 
 struct MetadataInjector<'a>(&'a mut MetadataMap);
+
+struct StringMapInjector(std::collections::HashMap<String, String>);
+
+impl Injector for StringMapInjector {
+    fn set(&mut self, key: &str, value: String) {
+        self.0.insert(key.to_string(), value);
+    }
+}
 
 impl Injector for MetadataInjector<'_> {
     fn set(&mut self, key: &str, value: String) {

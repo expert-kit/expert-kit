@@ -178,6 +178,15 @@ pub fn inject_current_trace_context(metadata: &mut MetadataMap) {
     });
 }
 
+pub fn current_traceparent() -> String {
+    let ctx = Span::current().context();
+    let mut injector = StringMapInjector(HashMap::new());
+    opentelemetry::global::get_text_map_propagator(|propagator| {
+        propagator.inject_context(&ctx, &mut injector);
+    });
+    injector.0.remove("traceparent").unwrap_or_default()
+}
+
 struct MetadataInjector<'a>(&'a mut MetadataMap);
 
 impl Injector for MetadataInjector<'_> {
@@ -191,6 +200,14 @@ impl Injector for MetadataInjector<'_> {
 }
 
 struct StringMapExtractor(HashMap<String, String>);
+
+struct StringMapInjector(HashMap<String, String>);
+
+impl Injector for StringMapInjector {
+    fn set(&mut self, key: &str, value: String) {
+        self.0.insert(key.to_string(), value);
+    }
+}
 
 impl Extractor for StringMapExtractor {
     fn get(&self, key: &str) -> Option<&str> {

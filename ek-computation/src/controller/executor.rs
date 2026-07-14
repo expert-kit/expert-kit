@@ -22,7 +22,10 @@ use crate::{
     backend::{EkTensor, torch::TchTensor},
     controller::registry::{ExpertClient, ExpertId, ExpertIdRef, ShmqWorkerReq, ShmqWorkerResp},
     metrics::METRIC_CONTROLLER_INTRA_REQ,
-    observability::{StageTimer, TraceLabels, inject_current_trace_context, next_expert_call_id},
+    observability::{
+        StageTimer, TraceLabels, current_traceparent, inject_current_trace_context,
+        next_expert_call_id,
+    },
     proto::ek::worker::v1::{self},
 };
 
@@ -478,7 +481,23 @@ impl NaiveExecutor {
                 }
                 ExpertClient::Shm((send_channel, recv_channel)) => {
                     let fu = async move {
-                        let req = ShmqWorkerReq::new(expert_id.as_ref(), &serialized_tensor);
+                        let send_timer = StageTimer::start(
+                            TraceLabels::new("controller", "controller.send_worker")
+                                .path("fallback_controller")
+                                .expert_call_id(expert_call_id)
+                                .expert_id(expert_id.as_str())
+                                .num_tokens(num_tokens),
+                        );
+                        let send_span = send_timer.span();
+                        let traceparent = {
+                            let _entered = send_span.enter();
+                            current_traceparent()
+                        };
+                        let req = ShmqWorkerReq::new(
+                            expert_id.as_ref(),
+                            &serialized_tensor,
+                            &traceparent,
+                        );
 
                         let start = time::Instant::now();
                         let _d = Defers::defer(Box::new(move || {
@@ -525,14 +544,28 @@ impl NaiveExecutor {
                                 }
                             }
                         };
+                        drop(send_timer);
                         Ok(ForwardResponse::Shm(resp))
                     }
-                    .in_current_span();
+                    .instrument(expert_span.clone());
                     handles.push(tokio::spawn(fu));
                 }
                 ExpertClient::Rdma((send_channel, recv_channel)) => {
                     let fu = async move {
-                        let req = ShmqWorkerReq::new(expert_id.as_ref(), &serialized_tensor);
+                        let send_timer = StageTimer::start(
+                            TraceLabels::new("controller", "controller.send_worker")
+                                .path("fallback_controller")
+                                .expert_call_id(expert_call_id)
+                                .expert_id(expert_id.as_str())
+                                .num_tokens(num_tokens),
+                        );
+                        let send_span = send_timer.span();
+                        let traceparent = {
+                            let _entered = send_span.enter();
+                            current_traceparent()
+                        };
+                        let req =
+                            ShmqWorkerReq::new(expert_id.as_ref(), &serialized_tensor, &traceparent);
 
                         let start = time::Instant::now();
                         let _d = Defers::defer(Box::new(move || {
@@ -582,9 +615,10 @@ impl NaiveExecutor {
                                 }
                             }
                         };
+                        drop(send_timer);
                         Ok(ForwardResponse::Rdma(resp))
                     }
-                    .in_current_span();
+                    .instrument(expert_span.clone());
                     handles.push(tokio::spawn(fu));
                 }
             }

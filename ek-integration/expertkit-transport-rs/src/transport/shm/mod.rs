@@ -5,13 +5,16 @@ pub use queue::{ShmQueue, ShmQueueError, ShmqWorkerReq, ShmqWorkerResp};
 use super::*;
 use dashmap::DashMap;
 use log::debug;
+use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
-use parking_lot::Mutex;
+
+use crate::observability::current_traceparent;
 
 const MAX_TENSOR_SIZE: usize = 64 * 1024 * 1024; // 64 MB
-const REQ_CAPACITY: usize = 8 + 64 + 8 + MAX_TENSOR_SIZE;
+const TRACEPARENT_SIZE: usize = 128;
+const REQ_CAPACITY: usize = 8 + 64 + TRACEPARENT_SIZE + 8 + MAX_TENSOR_SIZE;
 const RESP_CAPACITY: usize = 8 + 8 + MAX_TENSOR_SIZE;
 
 type PendingResponses = HashMap<usize, ShmqWorkerResp>;
@@ -174,7 +177,8 @@ impl Transport for ShmTransport {
         {
             let mut req_queue = req_queue_arc.lock();
             for req in &requests {
-                let shm_req = ShmqWorkerReq::new(&req.expert_id, &req.tensor_data);
+                let traceparent = current_traceparent();
+                let shm_req = ShmqWorkerReq::new(&req.expert_id, &req.tensor_data, &traceparent);
                 let req_id = shm_req.id;
 
                 // Send request

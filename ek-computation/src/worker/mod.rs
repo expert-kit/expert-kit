@@ -21,6 +21,7 @@ pub mod x;
 
 use crate::controller::registry::{ShmqWorkerReq, ShmqWorkerResp};
 use crate::metrics::spawn_metrics_server;
+use crate::observability::{StageTimer, TraceLabels, child_span_from_traceparent};
 use crate::proto::ek::worker::v1::computation_service_server::ComputationServiceServer;
 use crate::shmq::{RdmaEndpointServer, ShmQueue, rdma_impl::RdmaQueue};
 use crate::worker::core::EKInstanceGateSync;
@@ -288,6 +289,18 @@ pub async fn worker_main() -> EKResult<()> {
                         );
                         let now = time::Instant::now();
                         let expert_id = req.expert_id();
+                        let settings = get_ek_settings();
+                        let forward_labels = TraceLabels::new("worker", "worker.forward")
+                            .path("worker")
+                            .worker(settings.worker.id.as_str())
+                            .expert_id(expert_id.as_str());
+                        let traceparent = req.traceparent();
+                        let forward_span =
+                            child_span_from_traceparent(&forward_labels, traceparent.as_str());
+                        let forward_timer =
+                            StageTimer::start_with_span(forward_labels, forward_span);
+                        let span = forward_timer.span();
+                        let _entered = span.enter();
                         let input_tensor = req.input_tensor();
                         let output_tensor = loop {
                             match gate.forward_sync_core(&expert_id, input_tensor) {
@@ -374,6 +387,18 @@ pub async fn worker_main() -> EKResult<()> {
                         );
                         let now = time::Instant::now();
                         let expert_id = req.expert_id();
+                        let settings = get_ek_settings();
+                        let forward_labels = TraceLabels::new("worker", "worker.forward")
+                            .path("worker")
+                            .worker(settings.worker.id.as_str())
+                            .expert_id(expert_id.as_str());
+                        let traceparent = req.traceparent();
+                        let forward_span =
+                            child_span_from_traceparent(&forward_labels, traceparent.as_str());
+                        let forward_timer =
+                            StageTimer::start_with_span(forward_labels, forward_span);
+                        let span = forward_timer.span();
+                        let _entered = span.enter();
                         let input_tensor = req.input_tensor();
                         let output_tensor = loop {
                             match gate.forward_sync_core(&expert_id, input_tensor) {

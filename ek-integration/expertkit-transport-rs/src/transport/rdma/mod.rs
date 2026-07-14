@@ -11,6 +11,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex as TokioMutex;
 
+use crate::observability::current_traceparent;
+
 type PendingResponses = HashMap<usize, ShmqWorkerResp>;
 type SharedPendingResponses = Arc<Mutex<PendingResponses>>;
 type PendingResponseCache = Arc<DashMap<String, SharedPendingResponses>>;
@@ -255,7 +257,8 @@ impl Transport for RdmaTransport {
         // Send all requests - only locks req_queue
         let mut request_ids = Vec::new();
         for req in &requests {
-            let shm_req = ShmqWorkerReq::new(&req.expert_id, &req.tensor_data);
+            let traceparent = current_traceparent();
+            let shm_req = ShmqWorkerReq::new(&req.expert_id, &req.tensor_data, &traceparent);
             let req_id = shm_req.id();
 
             // Send request via RDMA
