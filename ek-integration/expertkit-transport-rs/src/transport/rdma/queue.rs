@@ -9,6 +9,7 @@ use ibverbs::{
 
 /// Maximum tensor size (64 MB) - must match worker expectations
 const MAX_TENSOR_SIZE: usize = 64 * 1024 * 1024;
+const TRACEPARENT_SIZE: usize = 128;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RdmaQueueError {
@@ -470,14 +471,16 @@ impl<T> Drop for RdmaQueue<T> {
 pub struct ShmqWorkerReq {
     id: usize,
     expert_id: [u8; 64], // Fixed-size null-terminated string
+    traceparent: [u8; TRACEPARENT_SIZE],
     input_tensor: Vec<u8>,
 }
 
 impl ShmqWorkerReq {
-    pub fn new(expert_id: &str, input_tensor: &[u8]) -> Self {
+    pub fn new(expert_id: &str, input_tensor: &[u8], traceparent: &str) -> Self {
         static ID: AtomicUsize = AtomicUsize::new(1);
 
         assert!(expert_id.len() < 64, "expert_id too long");
+        assert!(traceparent.len() < TRACEPARENT_SIZE, "traceparent too long");
         assert!(
             input_tensor.len() <= MAX_TENSOR_SIZE,
             "input_tensor too large"
@@ -488,9 +491,15 @@ impl ShmqWorkerReq {
         let copy_len = std::cmp::min(expert_id_bytes.len(), 63);
         expert_id_array[..copy_len].copy_from_slice(&expert_id_bytes[..copy_len]);
 
+        let mut traceparent_array = [0u8; TRACEPARENT_SIZE];
+        let traceparent_bytes = traceparent.as_bytes();
+        let traceparent_len = std::cmp::min(traceparent_bytes.len(), TRACEPARENT_SIZE - 1);
+        traceparent_array[..traceparent_len].copy_from_slice(&traceparent_bytes[..traceparent_len]);
+
         Self {
             id: ID.fetch_add(1, Ordering::SeqCst),
             expert_id: expert_id_array,
+            traceparent: traceparent_array,
             input_tensor: input_tensor.to_vec(),
         }
     }
@@ -509,11 +518,24 @@ impl ShmqWorkerReq {
     pub fn input_tensor(&self) -> &[u8] {
         &self.input_tensor
     }
+
+    #[allow(unused)]
+    pub fn traceparent(&self) -> String {
+        let end = self
+            .traceparent
+            .iter()
+            .position(|&b| b == 0)
+            .unwrap_or(TRACEPARENT_SIZE);
+        String::from_utf8(self.traceparent[..end].to_vec()).unwrap()
+    }
 }
 
 impl GeneralShmQueueBytes for ShmqWorkerReq {
-    const CAPACITY: usize =
-        std::mem::size_of::<usize>() + 64 + std::mem::size_of::<usize>() + MAX_TENSOR_SIZE;
+    const CAPACITY: usize = std::mem::size_of::<usize>()
+        + 64
+        + TRACEPARENT_SIZE
+        + std::mem::size_of::<usize>()
+        + MAX_TENSOR_SIZE;
 
     fn write_to_slice(&self, slice: &mut [u8]) {
         let mut offset = 0;
@@ -525,6 +547,10 @@ impl GeneralShmQueueBytes for ShmqWorkerReq {
         // Write expert_id (64 bytes)
         slice[offset..offset + 64].copy_from_slice(&self.expert_id);
         offset += 64;
+
+        // Write traceparent (128 bytes)
+        slice[offset..offset + TRACEPARENT_SIZE].copy_from_slice(&self.traceparent);
+        offset += TRACEPARENT_SIZE;
 
         // Write input_tensor length (8 bytes)
         slice[offset..offset + 8].copy_from_slice(&self.input_tensor.len().to_le_bytes());
@@ -540,26 +566,35 @@ impl GeneralShmQueueBytes for ShmqWorkerReq {
         let expert_id = bytes[std::mem::size_of::<usize>()..std::mem::size_of::<usize>() + 64]
             .try_into()
             .unwrap();
+        let traceparent_start = std::mem::size_of::<usize>() + 64;
+        let traceparent = bytes[traceparent_start..traceparent_start + TRACEPARENT_SIZE]
+            .try_into()
+            .unwrap();
         let input_tensor_len = usize::from_le_bytes(
-            bytes[std::mem::size_of::<usize>() + 64
-                ..std::mem::size_of::<usize>() + 64 + std::mem::size_of::<usize>()]
+            bytes[traceparent_start + TRACEPARENT_SIZE
+                ..traceparent_start + TRACEPARENT_SIZE + std::mem::size_of::<usize>()]
                 .try_into()
                 .unwrap(),
         );
         let input_tensor = bytes
-            [std::mem::size_of::<usize>() + 64 + std::mem::size_of::<usize>()..]
+            [traceparent_start + TRACEPARENT_SIZE + std::mem::size_of::<usize>()..]
             [..input_tensor_len]
             .to_vec();
 
         Self {
             id,
             expert_id,
+            traceparent,
             input_tensor,
         }
     }
 
     fn len(&self) -> usize {
-        std::mem::size_of::<usize>() + 64 + std::mem::size_of::<usize>() + self.input_tensor.len()
+        std::mem::size_of::<usize>()
+            + 64
+            + TRACEPARENT_SIZE
+            + std::mem::size_of::<usize>()
+            + self.input_tensor.len()
     }
 }
 

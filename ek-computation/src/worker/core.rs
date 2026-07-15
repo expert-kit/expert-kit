@@ -1,10 +1,13 @@
 use super::manager::{ExpertDB, ExpertDBSync, get_expert_db, get_expert_db_sync};
-use crate::{controller::registry::ExpertIdRef, proto::ek};
+use crate::{
+    controller::registry::ExpertIdRef,
+    observability::{StageTimer, TraceLabels},
+    proto::ek,
+};
 use core::fmt;
 use ek_base::error::EKResult;
 use std::sync::{Arc, OnceLock};
 use tokio;
-use tracing::instrument;
 
 /// Async version of EKInstanceGate for non-compute operations
 pub struct EKInstanceGateAsync {
@@ -73,7 +76,6 @@ impl EKInstanceGateSync {
     }
 
     /// Synchronous forward computation - optimized for compute-intensive tasks
-    #[instrument(skip(self, req))]
     pub fn forward_sync(
         &self,
         req: ek::worker::v1::ForwardReq,
@@ -91,17 +93,52 @@ impl EKInstanceGateSync {
         assert!(!req.sequences.is_empty());
         assert!(req.sequences[0].experts.len() == 1);
         let exp_id = &req.sequences[0].experts[0];
+        let settings = ek_base::config::get_ek_settings();
+        let num_tokens = req.sequences.len();
 
         // Load expert synchronously from shared database
-        let exp = self.experts.load(exp_id)?;
+        let exp = {
+            let timer = StageTimer::start(
+                TraceLabels::new("worker", "worker.load_expert")
+                    .path("worker")
+                    .worker(settings.worker.id.as_str())
+                    .expert_id(exp_id)
+                    .num_tokens(num_tokens),
+            );
+            let span = timer.span();
+            let _entered = span.enter();
+            self.experts.load(exp_id)?
+        };
 
         let now = std::time::Instant::now();
         tracing::debug!("[L3 {:?}] exp_backend.forward_sync() started", exp_id,);
 
         // Perform synchronous computation
-        let st = safetensors::SafeTensors::deserialize(&input_tensor).unwrap();
+        let st = {
+            let timer = StageTimer::start(
+                TraceLabels::new("worker", "worker.deserialize")
+                    .path("worker")
+                    .worker(settings.worker.id.as_str())
+                    .expert_id(exp_id)
+                    .num_tokens(num_tokens),
+            );
+            let span = timer.span();
+            let _entered = span.enter();
+            safetensors::SafeTensors::deserialize(&input_tensor)?
+        };
         let tv = st.tensor("data")?;
-        let res = exp.forward(&tv)?;
+        let res = {
+            let timer = StageTimer::start(
+                TraceLabels::new("worker", "worker.compute")
+                    .path("worker")
+                    .worker(settings.worker.id.as_str())
+                    .expert_id(exp_id)
+                    .num_tokens(num_tokens),
+            );
+            let span = timer.span();
+            let _entered = span.enter();
+            exp.forward(&tv)?
+        };
 
         tracing::debug!(
             "[L3 {:?}] exp_backend.forward_sync() completed in {:?}",
@@ -113,8 +150,19 @@ impl EKInstanceGateSync {
 
         tracing::debug!("output bytes_len={}", output_bytes.len());
 
-        let resp = ek::worker::v1::ForwardResp {
-            output_tensor: output_bytes,
+        let resp = {
+            let timer = StageTimer::start(
+                TraceLabels::new("worker", "worker.serialize")
+                    .path("worker")
+                    .worker(settings.worker.id.as_str())
+                    .expert_id(exp_id)
+                    .num_tokens(num_tokens),
+            );
+            let span = timer.span();
+            let _entered = span.enter();
+            ek::worker::v1::ForwardResp {
+                output_tensor: output_bytes,
+            }
         };
 
         tracing::debug!(
@@ -131,10 +179,49 @@ impl EKInstanceGateSync {
         expert_id: ExpertIdRef<'_>,
         input_tensor: &[u8],
     ) -> EKResult<Vec<u8>> {
-        let exp = self.experts.load(expert_id)?;
-        let st = safetensors::SafeTensors::deserialize(input_tensor)?;
+        let settings = ek_base::config::get_ek_settings();
+        let exp = {
+            let timer = StageTimer::start(
+                TraceLabels::new("worker", "worker.load_expert")
+                    .path("worker")
+                    .worker(settings.worker.id.as_str())
+                    .expert_id(expert_id),
+            );
+            let span = timer.span();
+            let _entered = span.enter();
+            self.experts.load(expert_id)?
+        };
+        let st = {
+            let timer = StageTimer::start(
+                TraceLabels::new("worker", "worker.deserialize")
+                    .path("worker")
+                    .worker(settings.worker.id.as_str())
+                    .expert_id(expert_id),
+            );
+            let span = timer.span();
+            let _entered = span.enter();
+            safetensors::SafeTensors::deserialize(input_tensor)?
+        };
         let tv = st.tensor("data")?;
-        let res = exp.forward(&tv)?;
+        let res = {
+            let timer = StageTimer::start(
+                TraceLabels::new("worker", "worker.compute")
+                    .path("worker")
+                    .worker(settings.worker.id.as_str())
+                    .expert_id(expert_id),
+            );
+            let span = timer.span();
+            let _entered = span.enter();
+            exp.forward(&tv)?
+        };
+        let timer = StageTimer::start(
+            TraceLabels::new("worker", "worker.serialize")
+                .path("worker")
+                .worker(settings.worker.id.as_str())
+                .expert_id(expert_id),
+        );
+        let span = timer.span();
+        let _entered = span.enter();
         Ok(res)
     }
 

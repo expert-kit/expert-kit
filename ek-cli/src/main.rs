@@ -149,9 +149,9 @@ fn init_log() {
         })
         .init();
 }
-fn resource(cmd: &'static str) -> Resource {
+fn resource(service_name: &str) -> Resource {
     Resource::builder()
-        .with_service_name(cmd)
+        .with_service_name(service_name.to_string())
         .with_schema_url(
             [
                 KeyValue::new(SERVICE_VERSION, env!("CARGO_PKG_VERSION")),
@@ -162,7 +162,7 @@ fn resource(cmd: &'static str) -> Resource {
         .build()
 }
 
-fn init_tracer_provider(svc_name: &'static str) -> SdkTracerProvider {
+fn init_tracer_provider(service_name: &str) -> SdkTracerProvider {
     let exporter = opentelemetry_otlp::SpanExporter::builder()
         .with_tonic()
         .build()
@@ -173,7 +173,7 @@ fn init_tracer_provider(svc_name: &'static str) -> SdkTracerProvider {
         .with_sampler(Sampler::AlwaysOn)
         // If export trace to AWS X-Ray, you can use XrayIdGenerator
         .with_id_generator(RandomIdGenerator::default())
-        .with_resource(resource(svc_name))
+        .with_resource(resource(service_name))
         .with_batch_exporter(exporter)
         .build();
     let baggage_propagator = BaggagePropagator::new();
@@ -185,8 +185,8 @@ fn init_tracer_provider(svc_name: &'static str) -> SdkTracerProvider {
     opentelemetry::global::set_text_map_propagator(composite_propagator);
     provider
 }
-fn init_tracing_subscriber(svc_name: &'static str) {
-    let tracer_provider = init_tracer_provider(svc_name);
+fn init_tracing_subscriber(service_name: &str) {
+    let tracer_provider = init_tracer_provider(service_name);
     let tracer = tracer_provider.tracer("tracing-otel-subscriber");
     tracing_subscriber::registry()
         .with(tracing_subscriber::filter::LevelFilter::from_level(
@@ -287,6 +287,10 @@ fn main() {
     log::info!("config source: {config_src:?}");
     let settings = ek_base::config::get_ek_settings();
     log::info!("settings: {settings:?}");
+    let tracing_service_name = match &cli.command {
+        Command::Worker {} => settings.worker.id.clone(),
+        _ => command_name.to_string(),
+    };
 
     // Init log
     init_log();
@@ -302,7 +306,7 @@ fn main() {
 
     let res = tokio_rt.block_on(async {
         // Must place tracing subscriber init in tokio runtime block
-        init_tracing_subscriber(command_name);
+        init_tracing_subscriber(&tracing_service_name);
         match cli.command {
             Command::Onnx { command } => onnx::execute_onnx(command).await,
             Command::Pretrain { command } => execute_pretrain(command).await,

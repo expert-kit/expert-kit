@@ -176,7 +176,8 @@ impl ShmQueue {
 
         // Write data to slot
         let slot_offset = meta.tail * self.slot_size;
-        let slot = unsafe { std::slice::from_raw_parts_mut(self.data.add(slot_offset), self.slot_size) };
+        let slot =
+            unsafe { std::slice::from_raw_parts_mut(self.data.add(slot_offset), self.slot_size) };
         item.write_to_slice(slot);
 
         // Update tail
@@ -198,7 +199,8 @@ impl ShmQueue {
 
         // Read data from slot
         let slot_offset = meta.head * self.slot_size;
-        let slot = unsafe { std::slice::from_raw_parts(self.data.add(slot_offset), self.slot_size) };
+        let slot =
+            unsafe { std::slice::from_raw_parts(self.data.add(slot_offset), self.slot_size) };
         let item = T::from_bytes(slot);
 
         // Update head
@@ -236,17 +238,19 @@ pub trait ShmQueueItem {
 pub struct ShmqWorkerReq {
     pub id: usize,
     pub expert_id: String,
+    pub traceparent: String,
     pub input_tensor: Vec<u8>,
 }
 
 static REQ_ID_COUNTER: AtomicUsize = AtomicUsize::new(1);
 
 impl ShmqWorkerReq {
-    pub fn new(expert_id: &str, input_tensor: &[u8]) -> Self {
+    pub fn new(expert_id: &str, input_tensor: &[u8], traceparent: &str) -> Self {
         let id = REQ_ID_COUNTER.fetch_add(1, Ordering::SeqCst);
         Self {
             id,
             expert_id: expert_id.to_string(),
+            traceparent: traceparent.to_string(),
             input_tensor: input_tensor.to_vec(),
         }
     }
@@ -254,7 +258,7 @@ impl ShmqWorkerReq {
 
 impl ShmQueueItem for ShmqWorkerReq {
     fn write_to_slice(&self, slice: &mut [u8]) {
-        // Layout: id (8) + expert_id (64) + tensor_len (8) + tensor_data
+        // Layout: id (8) + expert_id (64) + traceparent (128) + tensor_len (8) + tensor_data
         let id_bytes = self.id.to_le_bytes();
         slice[0..8].copy_from_slice(&id_bytes);
 
@@ -264,12 +268,18 @@ impl ShmQueueItem for ShmqWorkerReq {
         slice[8..8 + expert_id_len].copy_from_slice(&expert_id_bytes[..expert_id_len]);
         slice[8 + expert_id_len..72].fill(0);
 
+        // Traceparent as null-terminated 128-byte array
+        let traceparent_bytes = self.traceparent.as_bytes();
+        let traceparent_len = traceparent_bytes.len().min(127);
+        slice[72..72 + traceparent_len].copy_from_slice(&traceparent_bytes[..traceparent_len]);
+        slice[72 + traceparent_len..200].fill(0);
+
         // Tensor length
         let tensor_len_bytes = self.input_tensor.len().to_le_bytes();
-        slice[72..80].copy_from_slice(&tensor_len_bytes);
+        slice[200..208].copy_from_slice(&tensor_len_bytes);
 
         // Tensor data
-        slice[80..80 + self.input_tensor.len()].copy_from_slice(&self.input_tensor);
+        slice[208..208 + self.input_tensor.len()].copy_from_slice(&self.input_tensor);
     }
 
     fn from_bytes(bytes: &[u8]) -> Self {
@@ -281,13 +291,23 @@ impl ShmQueueItem for ShmqWorkerReq {
         let null_pos = expert_id_bytes.iter().position(|&b| b == 0).unwrap_or(64);
         let expert_id = String::from_utf8_lossy(&expert_id_bytes[..null_pos]).to_string();
 
+        // Parse traceparent (null-terminated)
+        let traceparent_bytes = &bytes[72..200];
+        let traceparent_null = traceparent_bytes
+            .iter()
+            .position(|&b| b == 0)
+            .unwrap_or(128);
+        let traceparent =
+            String::from_utf8_lossy(&traceparent_bytes[..traceparent_null]).to_string();
+
         // Parse tensor
-        let tensor_len = usize::from_le_bytes(bytes[72..80].try_into().unwrap());
-        let input_tensor = bytes[80..80 + tensor_len].to_vec();
+        let tensor_len = usize::from_le_bytes(bytes[200..208].try_into().unwrap());
+        let input_tensor = bytes[208..208 + tensor_len].to_vec();
 
         Self {
             id,
             expert_id,
+            traceparent,
             input_tensor,
         }
     }
@@ -336,8 +356,8 @@ mod tests {
     fn test_queue_basic() {
         let mut queue = ShmQueue::new("test_basic", 10, 1024).unwrap();
 
-        let req1 = ShmqWorkerReq::new("expert_1", b"test_data_1");
-        let req2 = ShmqWorkerReq::new("expert_2", b"test_data_2");
+        let req1 = ShmqWorkerReq::new("expert_1", b"test_data_1", "");
+        let req2 = ShmqWorkerReq::new("expert_2", b"test_data_2", "");
 
         queue.send(&req1).unwrap();
         queue.send(&req2).unwrap();
@@ -350,7 +370,10 @@ mod tests {
         assert_eq!(recv2.expert_id, "expert_2");
         assert_eq!(recv2.input_tensor, b"test_data_2");
 
-        assert!(matches!(queue.recv::<ShmqWorkerReq>(), Err(ShmQueueError::Empty)));
+        assert!(matches!(
+            queue.recv::<ShmqWorkerReq>(),
+            Err(ShmQueueError::Empty)
+        ));
     }
 
     #[test]
@@ -358,7 +381,7 @@ mod tests {
         let mut sender = ShmQueue::new("test_open", 10, 1024).unwrap();
         let mut receiver = ShmQueue::open("test_open", 10, 1024).unwrap();
 
-        let req = ShmqWorkerReq::new("expert_test", b"shared_data");
+        let req = ShmqWorkerReq::new("expert_test", b"shared_data", "");
         sender.send(&req).unwrap();
 
         let recv: ShmqWorkerReq = receiver.recv().unwrap();
