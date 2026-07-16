@@ -228,6 +228,32 @@ class CpuWeightLoader[CpuWeightT, ReadyWeightT]:
         finally:
             await reservation.cancel()
 
+    async def acquire_local(self, key: WeightKey) -> CpuWeightLease[CpuWeightT]:
+        """Load from DRAM or disk only for the non-recursive peer endpoint."""
+
+        cached = await self._cache.acquire(key)
+        if cached is not None:
+            return CpuWeightLease(cached, WeightSource.DRAM)
+
+        reservation = await self._cache.reserve(self._reservation_bytes)
+        try:
+            cached = await self._cache.acquire(key)
+            if cached is not None:
+                return CpuWeightLease(cached, WeightSource.DRAM)
+
+            failures: list[WeightLoadFailure] = []
+            prepared = await self._load_disk(key, failures)
+            if prepared is None:
+                raise WeightLoadFailed(key, tuple(failures))
+            cache_lease = await reservation.commit(
+                key,
+                prepared.entry,
+                actual_bytes=prepared.entry.byte_count,
+            )
+            return CpuWeightLease(cache_lease, WeightSource.DISK)
+        finally:
+            await reservation.cancel()
+
     async def _load_disk(
         self,
         key: WeightKey,

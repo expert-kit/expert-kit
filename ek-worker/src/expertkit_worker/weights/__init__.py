@@ -21,6 +21,7 @@ from expertkit_worker.weights.loader import (
     WeightLoadStage,
     WeightSource,
 )
+from expertkit_worker.weights.peer_server import PeerWeightServer
 from expertkit_worker.weights.ready import (
     ReadyWeightLease,
     ReadyWeightTable,
@@ -35,6 +36,7 @@ __all__ = [
     "CpuWeightLoader",
     "DirectIOWeightDiskCache",
     "DiskWriteback",
+    "PeerWeightServer",
     "ReadyWeightLease",
     "ReadyWeightTable",
     "SafeTensorDType",
