@@ -6,10 +6,12 @@ from expertkit_worker.control.parts import (
     PlacementTargets,
     TargetListAssembler,
 )
+from expertkit_worker.control.state_reporter import ExpertStateReporter
 
 __all__ = [
     "DrainAuthorization",
     "DrainAuthorizationAssembler",
+    "ExpertStateReporter",
     "PlacementTargets",
     "TargetListAssembler",
 ]
