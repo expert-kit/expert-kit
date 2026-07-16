@@ -1,4 +1,4 @@
-use std::{env, mem::transmute, path::PathBuf, sync::LazyLock};
+use std::{env, mem::transmute, path::PathBuf, process::Command as ProcessCommand};
 mod bench;
 mod db;
 mod doctor;
@@ -7,21 +7,19 @@ mod pretrain;
 mod schedule;
 mod wm_server;
 
-mod affinity;
 mod onnx;
 mod weight_index;
-use affinity::try_apply_cpu_affinity;
-use weight_index::{WeightIndexCommand, execute_weight_index};
 use bench::execute_bench;
 use db::execute_db;
 use doctor::doctor_main;
 use ek_base::config::get_ek_settings_base;
-use ek_computation::{controller::controller_main, worker::worker_main};
+use ek_computation::controller::controller_main;
 use env_logger::fmt::default_kv_format;
 use opentelemetry::{
     KeyValue, propagation::TextMapCompositePropagator, trace::TracerProvider as _,
 };
 use std::io::Write;
+use weight_index::{WeightIndexCommand, execute_weight_index};
 
 use tokio::runtime::Runtime;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
@@ -210,62 +208,56 @@ fn get_command_name(cmd: &Command) -> &'static str {
 }
 
 const DEFAULT_THREAD_NUM: usize = 6;
-static WORKER_THREAD_NUM: LazyLock<usize> = LazyLock::new(|| {
-    env::var("EK_WORKER_THREADS")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(1)
-});
 
-/// Init tokio runtime based on command
-fn init_tokio_runtime(command: &Command) -> Result<Runtime, std::io::Error> {
-    match command {
-        Command::Worker {} => {
-            // Apply CPU affinity before creating runtime for worker
-            let settings = ek_base::config::get_ek_settings();
-            if let Err(e) = try_apply_cpu_affinity(&settings.worker) {
-                log::warn!("Failed to apply CPU affinity before runtime creation: {e}");
-            } else {
-                log::debug!("✅ CPU affinity applied before Tokio runtime creation");
+fn run_python_worker(config: Option<String>) -> ! {
+    let config = config.or_else(|| env::var("EK_CONFIG").ok());
+    let Some(config) = config else {
+        eprintln!("The Python Worker requires --config or EK_CONFIG");
+        std::process::exit(2);
+    };
+    let python = env::var("EK_PYTHON").unwrap_or_else(|_| "python3".to_string());
+    let mut command = ProcessCommand::new(python);
+    command
+        .arg("-m")
+        .arg("expertkit_worker")
+        .arg("--config")
+        .arg(config);
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+
+        let error = command.exec();
+        eprintln!("Failed to start the Python Worker: {error}");
+        std::process::exit(1);
+    }
+    #[cfg(not(unix))]
+    {
+        match command.status() {
+            Ok(status) => std::process::exit(status.code().unwrap_or(1)),
+            Err(error) => {
+                eprintln!("Failed to start the Python Worker: {error}");
+                std::process::exit(1);
             }
-
-            // Determine worker thread count based on CPU affinity configuration
-            let worker_threads = if let Some(advanced) = &settings.worker.advanced {
-                if let Some(cpu_config) = &advanced.cpu_affinity {
-                    cpu_config
-                        .cores
-                        .as_ref()
-                        .map(|cores| cores.len())
-                        .unwrap_or_else(|| DEFAULT_THREAD_NUM)
-                } else {
-                    DEFAULT_THREAD_NUM
-                }
-            } else {
-                DEFAULT_THREAD_NUM
-            };
-
-            log::info!("Creating Tokio runtime with {worker_threads} worker threads");
-
-            tokio::runtime::Builder::new_multi_thread()
-                .worker_threads(worker_threads)
-                .max_blocking_threads(*WORKER_THREAD_NUM)
-                .enable_all()
-                .build()
-        }
-        _ => {
-            // Use default runtime for other commands
-            tokio::runtime::Builder::new_multi_thread()
-                .worker_threads(DEFAULT_THREAD_NUM)
-                .enable_all()
-                .build()
         }
     }
+}
+
+/// Initialize the shared Tokio runtime for Rust commands.
+fn init_tokio_runtime(_command: &Command) -> Result<Runtime, std::io::Error> {
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(DEFAULT_THREAD_NUM)
+        .enable_all()
+        .build()
 }
 
 fn main() {
     let cli = RootCli::parse();
     if cli.debug {
         unsafe { std::env::set_var("RUST_LOG", "debug") };
+    }
+    if matches!(&cli.command, Command::Worker {}) {
+        run_python_worker(cli.config.clone());
     }
     let command_name = get_command_name(&cli.command);
 
@@ -306,10 +298,15 @@ fn main() {
         match cli.command {
             Command::Onnx { command } => onnx::execute_onnx(command).await,
             Command::Pretrain { command } => execute_pretrain(command).await,
-            Command::Worker {} => worker_main().await,
+            Command::Worker {} => unreachable!("Worker command is replaced before Tokio startup"),
             Command::Controller {} => controller_main().await,
             Command::Doctor {} => doctor_main().await,
-            Command::WeightServer { host, port, model, no_index } => {
+            Command::WeightServer {
+                host,
+                port,
+                model,
+                no_index,
+            } => {
                 let model: &[PathBuf] = unsafe { transmute(model.as_slice()) };
                 let cache_dir = if no_index {
                     None
