@@ -14,6 +14,7 @@ from expertkit_worker.control.parts import (
     TargetListAssembler,
 )
 from expertkit_worker.control.state_reporter import ExpertStateReporter
+from expertkit_worker.control.supervisor import ControllerSupervisor
 from expertkit_worker.control.weight_stream import (
     WeightControlDrainError,
     WeightControlSession,
@@ -21,6 +22,7 @@ from expertkit_worker.control.weight_stream import (
 
 __all__ = [
     "ControllerConnection",
+    "ControllerSupervisor",
     "DrainAuthorization",
     "DrainAuthorizationAssembler",
     "ExpertStateReporter",
