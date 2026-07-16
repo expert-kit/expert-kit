@@ -1,4 +1,3 @@
-# coding=utf-8
 # Copyright 2025 The Qwen team, Alibaba Group and the HuggingFace Inc. team. All rights reserved.
 #
 # Modifications Copyright (c) 2025 expertkit-torch.
@@ -19,30 +18,25 @@
 # limitations under the License.
 
 import argparse
-import asyncio
 import json
 import os
-import time
+from typing import Any
+
 import torch
 import torch.nn.functional as F
-
-from typing import Optional, Dict, Any, List
-from transformers import (
-    AutoTokenizer,
-    AutoModelForCausalLM,
-)
-from transformers.utils.logging import set_verbosity_error
-from transformers.models.qwen3_moe import modeling_qwen3_moe as qwen3_moe
-from torch import nn
-from expertkit_torch.grpc_client_new import ExpertKitClient
-
+from expertkit_torch.client import RoutedMoEClient
 from expertkit_torch.utils.profiler_manager import ProfilerManager
-from line_profiler import profile
+from torch import nn
+from transformers import (
+    AutoModelForCausalLM,
+    AutoTokenizer,
+)
+from transformers.models.qwen3_moe import modeling_qwen3_moe as qwen3_moe
+from transformers.utils.logging import set_verbosity_error
 
 set_verbosity_error()
 
-# default timeout interval for ek client, in seconds
-DEFAULT_TIMEOUT_INTVAL = 6
+DEFAULT_TIMEOUT_SECONDS = 6
 layer_idx = 0
 
 # The default device should be set according to the environment.
@@ -57,24 +51,24 @@ else:
 def intercept_moe(
     enable_ek: bool = True,
     ek_addr: str = "localhost:5002",
-    ek_model_name: str = "qwen3",
-    enable_direct_path: bool = True,
+    ek_instance_id: int = 1,
 ):
     class InterceptedMoE(nn.Module):
-        client: ExpertKitClient = None
+        client: RoutedMoEClient | None = None
 
         def __init__(self, config):
             super().__init__()
             global layer_idx
             if enable_ek and InterceptedMoE.client is None:
-                # Create ExpertKit client with optional direct worker communication
-                # Direct path reduces latency by ~24% (bypasses controller forwarding)
-                InterceptedMoE.client = ExpertKitClient(
-                    controller_addr=ek_addr,
-                    timeout_sec=DEFAULT_TIMEOUT_INTVAL,
+                InterceptedMoE.client = RoutedMoEClient(
+                    ek_addr,
+                    instance_id=ek_instance_id,
+                    num_layers=config.num_hidden_layers,
+                    experts_per_layer=config.num_experts,
+                    hidden_dim=config.hidden_size,
+                    top_k=config.num_experts_per_tok,
+                    timeout_seconds=DEFAULT_TIMEOUT_SECONDS,
                 )
-                print(
-                    f"[ExpertKit] Client initialized: controller={ek_addr}, direct_path={enable_direct_path}")
             self.layer_id = layer_idx
             layer_idx += 1
             layer_idx = layer_idx % config.num_hidden_layers
@@ -82,8 +76,7 @@ def intercept_moe(
             self.top_k = config.num_experts_per_tok
             self.norm_topk_prob = config.norm_topk_prob
 
-            self.gate = nn.Linear(config.hidden_size,
-                                  config.num_experts, bias=False)
+            self.gate = nn.Linear(config.hidden_size, config.num_experts, bias=False)
             if not enable_ek:
                 self.experts = nn.ModuleList(
                     [
@@ -104,35 +97,14 @@ def intercept_moe(
             sequence_length: int,
             hidden_dim: int,
         ):
-            # Start timing for expert computation
-            start_time = time.time()
-
-            expert_ids = []
-            total_seq_len, _ = hidden_states.shape
-            for seq_idx in range(total_seq_len):
-                eids = selected_experts[seq_idx].tolist()
-                ids = [
-                    f"{ek_model_name}/l{self.layer_id}-e{expert_idx}"
-                    for expert_idx in eids
-                ]
-                expert_ids.append(ids)
-
-            outputs = self.client.forward_expert(
-                expert_ids=expert_ids, hidden_state=hidden_states
+            assert self.client is not None
+            output = self.client.forward_layer(
+                layer_id=self.layer_id,
+                hidden_states=hidden_states,
+                expert_ids=selected_experts,
+                routing_weights=routing_weights,
             )
-            outputs = outputs.to(device=hidden_states.device,
-                                 dtype=hidden_states.dtype)
-            expanded_weights = routing_weights.unsqueeze(-1)
-            output = torch.sum(expanded_weights * outputs, dim=1)
-
-            final_hidden_states = output.reshape(
-                batch_size, sequence_length, hidden_dim
-            )
-
-            # Record expert computation time if profiler is available
-            end_time = time.time()
-
-            return final_hidden_states
+            return output.reshape(batch_size, sequence_length, hidden_dim)
 
         def normal_forward(
             self,
@@ -145,9 +117,6 @@ def intercept_moe(
             sequence_length: int,
             hidden_dim: int,
         ):
-            # Start timing for expert computation
-            start_time = time.time()
-
             final_hidden_states = torch.zeros(
                 (batch_size * sequence_length, hidden_dim),
                 dtype=hidden_states.dtype,
@@ -156,11 +125,9 @@ def intercept_moe(
             for expert_idx in range(self.num_experts):
                 expert_layer = self.experts[expert_idx]
                 idx, top_x = torch.where(expert_mask[expert_idx])
-                current_state = hidden_states[None,
-                                              top_x].reshape(-1, hidden_dim)
+                current_state = hidden_states[None, top_x].reshape(-1, hidden_dim)
                 current_hidden_states = (
-                    expert_layer(current_state) *
-                    routing_weights[top_x, idx, None]
+                    expert_layer(current_state) * routing_weights[top_x, idx, None]
                 )
                 final_hidden_states.index_add_(
                     0, top_x, current_hidden_states.to(hidden_states.dtype)
@@ -169,36 +136,18 @@ def intercept_moe(
                 batch_size, sequence_length, hidden_dim
             )
 
-            # Record expert computation time if profiler is available
-            end_time = time.time()
-
             return final_hidden_states
 
         def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-            # Timing overall MoE forward pass
-            forward_start = time.time()
-
             batch_size, sequence_length, hidden_dim = hidden_states.shape
             hidden_states = hidden_states.view(-1, hidden_dim)
 
             # Process router logits (no need to time separately)
             router_logits = self.gate(hidden_states)
-            routing_weights = F.softmax(
-                router_logits, dim=1, dtype=torch.float)
-            routing_weights, selected_experts = torch.topk(
-                routing_weights, self.top_k, dim=-1
-            )
+            routing_weights = F.softmax(router_logits, dim=1, dtype=torch.float)
+            routing_weights, selected_experts = torch.topk(routing_weights, self.top_k, dim=-1)
             if self.norm_topk_prob:  # only diff with mixtral sparse moe block!
                 routing_weights /= routing_weights.sum(dim=-1, keepdim=True)
-            # we cast back to the input dtype
-            routing_weights = routing_weights.to(hidden_states.dtype)
-
-            # One hot encode the selected experts to create an expert mask
-            # this will be used to easily index which expert is going to be sollicitated
-            expert_mask = torch.nn.functional.one_hot(
-                selected_experts, num_classes=self.num_experts
-            ).permute(2, 1, 0)
-
             if enable_ek:
                 final = self.ek_forward(
                     hidden_states=hidden_states,
@@ -209,6 +158,10 @@ def intercept_moe(
                     hidden_dim=hidden_dim,
                 )
             else:
+                routing_weights = routing_weights.to(hidden_states.dtype)
+                expert_mask = torch.nn.functional.one_hot(
+                    selected_experts, num_classes=self.num_experts
+                ).permute(2, 1, 0)
                 final = self.normal_forward(
                     hidden_states=hidden_states,
                     routing_weights=routing_weights,
@@ -219,17 +172,13 @@ def intercept_moe(
                     hidden_dim=hidden_dim,
                 )
 
-            # Record overall MoE time only if profiler is available
-            forward_end = time.time()
-
             return final, router_logits
 
-    delattr(qwen3_moe, "Qwen3MoeSparseMoeBlock")
-    setattr(qwen3_moe, "Qwen3MoeSparseMoeBlock", InterceptedMoE)
+    qwen3_moe.Qwen3MoeSparseMoeBlock = InterceptedMoE
 
 
-tokenizer: Optional[AutoTokenizer] = None
-model: Optional[AutoModelForCausalLM] = None
+tokenizer: AutoTokenizer | None = None
+model: AutoModelForCausalLM | None = None
 
 
 def evaluate_batch(
@@ -239,9 +188,8 @@ def evaluate_batch(
     output_max_length=64,
     enable_ek=True,
     ek_addr="localhost:5002",
-    ek_model_name="qwen3",
-    enable_direct_path=True,
-) -> Dict[str, Any]:
+    ek_instance_id=1,
+) -> dict[str, Any]:
     """
     Batch inference with performance profiling.
 
@@ -264,8 +212,7 @@ def evaluate_batch(
     intercept_moe(
         enable_ek=enable_ek,
         ek_addr=ek_addr,
-        ek_model_name=ek_model_name,
-        enable_direct_path=enable_direct_path,
+        ek_instance_id=ek_instance_id,
     )
 
     # Load the tokenizer and the model only once
@@ -307,9 +254,7 @@ def evaluate_batch(
 
         # Generate responses - profiling happens automatically via hooks
         generated_ids = model.generate(
-            **model_inputs,
-            max_new_tokens=output_max_length,
-            pad_token_id=tokenizer.eos_token_id
+            **model_inputs, max_new_tokens=output_max_length, pad_token_id=tokenizer.eos_token_id
         )
 
         # Process generated sequences
@@ -322,40 +267,35 @@ def evaluate_batch(
             # Remove padding tokens
             if tokenizer.pad_token_id is not None:
                 output_ids = [
-                    token_id for token_id in output_ids if token_id != tokenizer.pad_token_id]
+                    token_id for token_id in output_ids if token_id != tokenizer.pad_token_id
+                ]
 
             # Extract thinking content
-            thinking_finish = False
             try:
                 # Find </think> token (151668)
                 index = len(output_ids) - output_ids[::-1].index(151668)
-                thinking_finish = True
             except ValueError:
                 # Thinking not finished
                 index = len(output_ids) - 1
 
-            thinking_content = tokenizer.decode(
-                output_ids[:index], skip_special_tokens=True
-            ).strip("\n")
+            thinking_content = tokenizer.decode(output_ids[:index], skip_special_tokens=True).strip(
+                "\n"
+            )
 
-            content = tokenizer.decode(
-                output_ids[index:],
-                skip_special_tokens=True
-            ).strip("\n")
+            content = tokenizer.decode(output_ids[index:], skip_special_tokens=True).strip("\n")
 
-            results.append({
-                "prompt": prompts[i],
-                "thinking_content": thinking_content,
-                "content": content,
-                "input_tokens": len(model_inputs.input_ids[i]),
-                "output_tokens": len(output_ids),
-            })
+            results.append(
+                {
+                    "prompt": prompts[i],
+                    "thinking_content": thinking_content,
+                    "content": content,
+                    "input_tokens": len(model_inputs.input_ids[i]),
+                    "output_tokens": len(output_ids),
+                }
+            )
 
         # Context manager exit will automatically unwrap the model and print the report
-        return {
-            "results": results,
-            "performance": profiler.report()
-        }
+        return {"results": results, "performance": profiler.report()}
 
 
 def sharegpt(path, max_prompt_len=None):
@@ -363,7 +303,7 @@ def sharegpt(path, max_prompt_len=None):
         raise FileNotFoundError(f"File does not exist: {path}")
     if not os.path.isfile(path):
         raise ValueError(f"Path is not a file: {path}")
-    with open(path, "r", encoding="utf-8") as f:
+    with open(path, encoding="utf-8") as f:
         data = json.load(f)
     prompts = []
     for item in data:
@@ -391,23 +331,16 @@ def main():
         help="Enable ExpertKit.",
     )
     parser.add_argument(
-        "--ek_model_name",
-        type=str,
-        default="qwen3",
-        help="The name of the model used in ExpertKit.",
+        "--ek_instance_id",
+        type=int,
+        default=1,
+        help="The numeric model instance ID registered with the Controller.",
     )
     parser.add_argument(
         "--ek_addr",
         type=str,
         default="localhost:5002",
         help="The address of the ExpertKit controller.",
-    )
-    parser.add_argument(
-        "--ek_direct_path",
-        action=argparse.BooleanOptionalAction,
-        default=True,  # Enabled by default - implements controller's decomposition logic
-        help="Enable direct worker communication (bypasses controller forwarding). "
-             "Implements request decomposition to match worker's expected format.",
     )
     parser.add_argument(
         "--detail_profile",
@@ -458,18 +391,16 @@ def main():
             "How does MoE improve model efficiency?",
             "Compare MoE with dense models.",
         ] * args.prompt_num
-        test_prompts = test_prompts[:args.prompt_num]
+        test_prompts = test_prompts[: args.prompt_num]
     elif args.dataset == "sharegpt":
         # Validate that dataset_path is provided
         if args.dataset_path is None:
-            raise ValueError(
-                "You must provide --dataset_path when using the 'sharegpt' dataset.")
+            raise ValueError("You must provide --dataset_path when using the 'sharegpt' dataset.")
         # Load prompts from ShareGPT dataset
-        test_prompts = sharegpt(
-            args.dataset_path, max_prompt_len=args.max_prompt_len)
+        test_prompts = sharegpt(args.dataset_path, max_prompt_len=args.max_prompt_len)
         if len(test_prompts) < args.prompt_num:
             test_prompts *= (args.prompt_num // len(test_prompts)) + 1
-        test_prompts = test_prompts[:args.prompt_num]
+        test_prompts = test_prompts[: args.prompt_num]
     else:
         raise ValueError("Invalid dataset specified.")
 
@@ -481,11 +412,10 @@ def main():
                 break
             batch_result = evaluate_batch(
                 model_path=args.model_path,
-                prompts=test_prompts[prompts:prompts + batch_size],
+                prompts=test_prompts[prompts : prompts + batch_size],
                 enable_ek=args.enable_ek,
                 ek_addr=args.ek_addr,
-                ek_model_name=args.ek_model_name,
-                enable_direct_path=args.ek_direct_path,
+                ek_instance_id=args.ek_instance_id,
                 output_max_length=args.output_max,
             )
             aggregated_results.extend(batch_result["results"])
@@ -497,7 +427,8 @@ def main():
             print(f"Thinking Content: {result['thinking_content']}")
             print(f"Response: {result['content']}")
             print(
-                f"Input Tokens: {result['input_tokens']}, Output Tokens: {result['output_tokens']}")
+                f"Input Tokens: {result['input_tokens']}, Output Tokens: {result['output_tokens']}"
+            )
             print("-" * 40)
 
 
