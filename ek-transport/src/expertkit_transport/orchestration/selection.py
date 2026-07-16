@@ -22,8 +22,14 @@ class ReplicaSelector(ABC):
         expert_id: int,
         replicas: tuple[WorkerTarget, ...],
         excluded: frozenset[WorkerIdentity] = frozenset(),
+        fallback_to_excluded: bool = False,
     ) -> WorkerTarget:
-        """Return one replica or raise a retryable unavailable error."""
+        """Return one replica or raise a retryable unavailable error.
+
+        When `fallback_to_excluded` is true, excluded replicas are considered
+        only if no preferred replica remains. This lets bounded retry avoid the
+        failed process without making a same-process retry impossible.
+        """
 
 
 class RoundRobinSelector(ReplicaSelector):
@@ -41,8 +47,11 @@ class RoundRobinSelector(ReplicaSelector):
         expert_id: int,
         replicas: tuple[WorkerTarget, ...],
         excluded: frozenset[WorkerIdentity] = frozenset(),
+        fallback_to_excluded: bool = False,
     ) -> WorkerTarget:
         eligible = tuple(target for target in replicas if target.identity not in excluded)
+        if not eligible and fallback_to_excluded:
+            eligible = replicas
         if not eligible:
             raise TransportError(
                 TransportErrorCode.UNAVAILABLE,

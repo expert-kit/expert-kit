@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from abc import ABC, abstractmethod
 from collections.abc import Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
@@ -97,3 +98,25 @@ class TopologySnapshot:
                 if route_layer == layer_id
             }
         )
+
+
+class TopologyProvider(ABC):
+    """Provide atomically installed routing snapshots to one logical call.
+
+    Refresh performs at most one bounded attempt to obtain the newest currently
+    available state. It must not poll or wait for a future replacement Worker.
+    """
+
+    @abstractmethod
+    def current(self, instance_id: int) -> TopologySnapshot:
+        """Return the latest complete snapshot already installed locally."""
+
+    @abstractmethod
+    async def refresh(
+        self,
+        instance_id: int,
+        *,
+        observed_version: int,
+        monotonic_deadline: float,
+    ) -> TopologySnapshot:
+        """Make one refresh attempt and return the newest complete snapshot."""

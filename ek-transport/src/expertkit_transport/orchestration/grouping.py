@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 
 import torch
@@ -90,6 +91,8 @@ def group_worker_batches(
     selector: ReplicaSelector,
     *,
     excluded: frozenset[WorkerIdentity] = frozenset(),
+    excluded_by_expert: Mapping[int, frozenset[WorkerIdentity]] | None = None,
+    fallback_to_excluded: bool = False,
 ) -> tuple[WorkerBatchPlan, ...]:
     """Resolve and group one Routed layer batch against one Topology snapshot.
 
@@ -101,7 +104,11 @@ def group_worker_batches(
         batch: Final model-router output.
         topology: Complete snapshot used for every assignment in this attempt.
         selector: Replica policy shared across Routed layer calls.
-        excluded: Worker process starts that a retry should avoid.
+        excluded: Worker process starts that every expert should avoid.
+        excluded_by_expert: Additional failed process starts to avoid for each
+            expert independently.
+        fallback_to_excluded: Use an excluded process only when that expert has
+            no preferred replica.
 
     Returns:
         Physical batches, each no larger than its selected Worker's published
@@ -145,12 +152,16 @@ def group_worker_batches(
     targets_by_identity: dict[WorkerIdentity, WorkerTarget] = {}
     for expert_id in requested_experts:
         replicas = routes[expert_id]
+        expert_excluded = excluded
+        if excluded_by_expert is not None:
+            expert_excluded = excluded | excluded_by_expert.get(expert_id, frozenset())
         target = selector.select(
             instance_id=batch.instance_id,
             layer_id=batch.layer_id,
             expert_id=expert_id,
             replicas=replicas,
-            excluded=excluded,
+            excluded=expert_excluded,
+            fallback_to_excluded=fallback_to_excluded,
         )
         selected_targets[expert_id] = target
         targets_by_identity[target.identity] = target
