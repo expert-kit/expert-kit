@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Coroutine
+from collections.abc import Awaitable, Coroutine
 from dataclasses import dataclass
 from typing import Any
 
@@ -22,6 +22,7 @@ from expertkit_worker.weights import (
     WeightManagerFatalError,
     WeightPlacementFatalError,
     WeightPlacementFatalReason,
+    WeightsNotReady,
     WeightSource,
 )
 from expertkit_worker.weights.dram_cache import WeightKey
@@ -33,10 +34,10 @@ def run(coroutine: Coroutine[Any, Any, Any]) -> Any:
     return asyncio.run(coroutine)
 
 
-async def _await_with_loop_yields[T](coroutine: Coroutine[Any, Any, T]) -> T:
+async def _await_with_loop_yields[T](awaitable: Awaitable[T]) -> T:
     """Keep the test loop runnable while an executor thread completes work."""
 
-    task = asyncio.create_task(coroutine)
+    task = asyncio.ensure_future(awaitable)
     async with asyncio.timeout(2):
         while not task.done():
             await asyncio.sleep(0)
@@ -338,6 +339,96 @@ def test_manager_rejects_invalid_generation_and_capacity_before_loading() -> Non
 
         await _await_with_loop_yields(manager.wait_for_idle())
         assert len(loader.calls) == 1
+        await _await_with_loop_yields(manager.close())
+
+    run(scenario())
+
+
+def test_remove_after_drain_waits_for_backend_reference_before_removed() -> None:
+    async def scenario() -> None:
+        loader = _FakeLoader()
+        changes: list[ExpertStateChange] = []
+        manager, _ = _make_manager(loader, changes=changes)
+        manager.start()
+        key = WeightKey(0, 2)
+        await manager.apply_targets(1, [_target(0, 2)])
+        await _await_with_loop_yields(manager.wait_for_idle())
+        lease = manager.acquire_many(0, (2,))
+        await manager.apply_targets(2, [])
+
+        removal = asyncio.create_task(manager.remove_after_drain(2, (key,)))
+        async with asyncio.timeout(1):
+            while True:
+                try:
+                    probe = manager.acquire_many(0, (2,))
+                except WeightsNotReady:
+                    break
+                probe.close()
+                await asyncio.sleep(0)
+        assert removal.done() is False
+        with pytest.raises(WeightsNotReady):
+            manager.acquire_many(0, (2,))
+
+        lease.close()
+        assert await _await_with_loop_yields(removal) is True
+        assert changes[-1].placement_generation == 2
+        assert changes[-1].expert.key == key
+        assert changes[-1].expert.state is ExpertStateKind.REMOVED
+        stats = await manager.stats()
+        assert stats.ready_experts == 0
+        assert stats.loaded_device_bytes == 0
+        await _await_with_loop_yields(manager.close())
+
+    run(scenario())
+
+
+def test_remove_after_drain_survives_caller_cancellation_and_is_idempotent() -> None:
+    async def scenario() -> None:
+        loader = _FakeLoader()
+        changes: list[ExpertStateChange] = []
+        manager, _ = _make_manager(loader, changes=changes)
+        manager.start()
+        key = WeightKey(1, 1)
+        await manager.apply_targets(1, [_target(1, 1)])
+        await _await_with_loop_yields(manager.wait_for_idle())
+        lease = manager.acquire_many(1, (1,))
+        await manager.apply_targets(2, [])
+
+        cancelled = asyncio.create_task(manager.remove_after_drain(2, (key,)))
+        await asyncio.sleep(0)
+        cancelled.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await cancelled
+        lease.close()
+
+        assert await _await_with_loop_yields(manager.remove_after_drain(2, (key,))) is True
+        removed = [
+            change
+            for change in changes
+            if change.expert.key == key and change.expert.state is ExpertStateKind.REMOVED
+        ]
+        assert len(removed) == 1
+        assert removed[0].placement_generation == 2
+        await _await_with_loop_yields(manager.close())
+
+    run(scenario())
+
+
+def test_remove_after_drain_validates_generation_and_current_targets() -> None:
+    async def scenario() -> None:
+        loader = _FakeLoader()
+        manager, _ = _make_manager(loader)
+        manager.start()
+        key = WeightKey(0, 0)
+        await manager.apply_targets(2, [_target(0, 0)])
+
+        assert await manager.remove_after_drain(1, (key,)) is False
+        with pytest.raises(ValueError, match="newer than current"):
+            await manager.remove_after_drain(3, (key,))
+        with pytest.raises(ValueError, match="current target"):
+            await manager.remove_after_drain(2, (key,))
+
+        await _await_with_loop_yields(manager.wait_for_idle())
         await _await_with_loop_yields(manager.close())
 
     run(scenario())

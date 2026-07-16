@@ -101,6 +101,12 @@ class WeightManagerStats:
     max_experts: int
 
 
+@dataclass(frozen=True, slots=True)
+class _RemovalRequest:
+    placement_generation: int
+    keys: tuple[WeightKey, ...]
+
+
 class WeightManagerFatalError(RuntimeError):
     """Associate one fatal placement failure with its expert position."""
 
@@ -165,6 +171,9 @@ class WeightManager[CpuWeightT, ReadyWeightT]:
         self._targets: dict[WeightKey, TargetExpert] = {}
         self._states: dict[WeightKey, ExpertState] = {}
         self._load_tasks: dict[WeightKey, asyncio.Task[None]] = {}
+        self._removal_lock = asyncio.Lock()
+        self._removal_request: _RemovalRequest | None = None
+        self._removal_task: asyncio.Task[bool] | None = None
         self._ready_keys: set[WeightKey] = set()
         self._loaded_device_bytes = 0
         self._fatal_error: WeightManagerFatalError | None = None
@@ -263,6 +272,50 @@ class WeightManager[CpuWeightT, ReadyWeightT]:
                 self._states[key] for key in sorted(self._states)
             )
 
+    async def remove_after_drain(
+        self,
+        placement_generation: int,
+        keys: Iterable[WeightKey],
+    ) -> bool:
+        """Withdraw unassigned ready objects after Transport admission is idle.
+
+        Returns:
+            ``False`` when the authorization belongs to an older placement
+            generation. Repeating the current request is idempotent.
+
+        Warning:
+            The caller must first stop matching Transport admission and wait for
+            waiting and active batches to drain. Existing Backend references are
+            still waited here before an object becomes ``REMOVED``.
+        """
+
+        request = _RemovalRequest(
+            placement_generation=self._validate_placement_generation(placement_generation),
+            keys=self._validate_weight_keys(keys),
+        )
+        while True:
+            async with self._removal_lock:
+                task = self._removal_task
+                active_request = self._removal_request
+                if task is None:
+                    task = asyncio.create_task(
+                        self._remove_after_drain(request),
+                        name=f"weight-remove-generation-{placement_generation}",
+                    )
+                    self._removal_request = request
+                    self._removal_task = task
+                    active_request = request
+            try:
+                result = await asyncio.shield(task)
+            finally:
+                if task.done():
+                    async with self._removal_lock:
+                        if self._removal_task is task:
+                            self._removal_task = None
+                            self._removal_request = None
+            if active_request == request:
+                return result
+
     async def stats(self) -> WeightManagerStats:
         """Return consistent resource and lifecycle counts."""
 
@@ -354,6 +407,64 @@ class WeightManager[CpuWeightT, ReadyWeightT]:
         if len(resolved) > self._max_experts:
             raise ValueError("target expert count exceeds max_experts")
         return resolved
+
+    @staticmethod
+    def _validate_placement_generation(placement_generation: int) -> int:
+        if isinstance(placement_generation, bool) or not isinstance(placement_generation, int):
+            raise ValueError("placement_generation must be an integer")
+        if placement_generation <= 0:
+            raise ValueError("placement_generation must be positive")
+        return placement_generation
+
+    def _validate_weight_keys(self, keys: Iterable[WeightKey]) -> tuple[WeightKey, ...]:
+        resolved = tuple(keys)
+        if any(not isinstance(key, WeightKey) for key in resolved):
+            raise TypeError("drained experts must be WeightKey values")
+        if len(set(resolved)) != len(resolved):
+            raise ValueError("drained experts must not contain duplicates")
+        for key in resolved:
+            if key.layer_id >= self._num_layers or key.expert_id >= self._experts_per_layer:
+                raise ValueError("drained expert exceeds the configured model shape")
+        return tuple(sorted(resolved))
+
+    async def _remove_after_drain(self, request: _RemovalRequest) -> bool:
+        changes: list[ExpertStateChange] = []
+        async with self._lock:
+            if self._closed:
+                raise RuntimeError("Weight Manager is closed")
+            if request.placement_generation < self._placement_generation:
+                return False
+            if request.placement_generation > self._placement_generation:
+                raise ValueError("drain generation is newer than current placement")
+            assigned = tuple(key for key in request.keys if key in self._targets)
+            if assigned:
+                raise ValueError("cannot remove an expert in the current target list")
+
+            ready_keys = tuple(key for key in request.keys if key in self._ready_keys)
+            for key in ready_keys:
+                self._ready.begin_withdrawal(key.layer_id, key.expert_id)
+            loop = asyncio.get_running_loop()
+            for key in ready_keys:
+                await loop.run_in_executor(
+                    self._conversion_executor,
+                    partial(
+                        self._ready.finish_withdrawal,
+                        key.layer_id,
+                        key.expert_id,
+                    ),
+                )
+                self._ready_keys.remove(key)
+                self._loaded_device_bytes -= self._ready_weight_bytes
+
+            for key in request.keys:
+                change = self._set_state_locked(
+                    key,
+                    ExpertState(key, ExpertStateKind.REMOVED),
+                )
+                if change is not None:
+                    changes.append(change)
+        self._emit(changes)
+        return True
 
     def _start_load_locked(self, key: WeightKey) -> None:
         task = asyncio.create_task(
