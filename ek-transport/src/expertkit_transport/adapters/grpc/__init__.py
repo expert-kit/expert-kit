@@ -15,13 +15,19 @@ from expertkit_transport.adapters.grpc.spec import (
     GrpcMessageLimits,
     calculate_message_limits,
 )
+from expertkit_transport.adapters.grpc.topology import (
+    GrpcTopologyProvider,
+    TopologyProtocolError,
+)
 
 __all__ = [
     "GrpcBatchSpec",
     "GrpcMessageLimits",
     "GrpcProtocolError",
+    "GrpcTopologyProvider",
     "GrpcWorkerServer",
     "GrpcWorkerTransport",
+    "TopologyProtocolError",
     "calculate_message_limits",
     "decode_request",
     "decode_response",
