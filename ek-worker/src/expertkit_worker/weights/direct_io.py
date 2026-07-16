@@ -17,6 +17,10 @@ class DirectIOError(OSError):
     """Report that strict application-managed direct I/O could not complete."""
 
 
+class InvalidWeightFile(DirectIOError):
+    """Report a local file that cannot be a complete accepted expert weight."""
+
+
 def _require_direct_io() -> int:
     if sys.platform != "linux" or not hasattr(os, "O_DIRECT"):
         raise DirectIOError("direct weight I/O requires Linux os.O_DIRECT support")
@@ -95,15 +99,15 @@ def read_direct(path: Path, *, max_bytes: int | None = None) -> AlignedWeightBuf
     try:
         file_stat = os.fstat(file_descriptor)
         if not stat.S_ISREG(file_stat.st_mode):
-            raise DirectIOError("direct weight source must be a regular file")
+            raise InvalidWeightFile("direct weight source must be a regular file")
         logical_size = file_stat.st_size
         if logical_size <= 0:
-            raise DirectIOError("direct weight source must not be empty")
+            raise InvalidWeightFile("direct weight source must not be empty")
         if max_bytes is not None:
             if isinstance(max_bytes, bool) or not isinstance(max_bytes, int) or max_bytes <= 0:
                 raise ValueError("max_bytes must be a positive integer")
             if logical_size > max_bytes:
-                raise DirectIOError("direct weight source exceeds its configured byte limit")
+                raise InvalidWeightFile("direct weight source exceeds its configured byte limit")
 
         result = AlignedWeightBuffer(logical_size)
         target = result.io_view()
@@ -111,13 +115,13 @@ def read_direct(path: Path, *, max_bytes: int | None = None) -> AlignedWeightBuf
             total = 0
             while total < logical_size:
                 if total % result.alignment:
-                    raise DirectIOError("direct weight read returned an unaligned short result")
+                    raise InvalidWeightFile("direct weight read returned an unaligned short result")
                 count = os.preadv(file_descriptor, [target[total:]], total)
                 if count <= 0:
-                    raise DirectIOError("direct weight read ended before the file was complete")
+                    raise InvalidWeightFile("direct weight read ended before the file was complete")
                 total += count
             if total != logical_size:
-                raise DirectIOError("direct weight read exceeded the logical file length")
+                raise InvalidWeightFile("direct weight read exceeded the logical file length")
         finally:
             target.release()
         return result

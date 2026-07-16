@@ -9,12 +9,20 @@ from enum import StrEnum
 from types import MappingProxyType
 from typing import Any
 
-_MAX_HEADER_BYTES = 16 * 1024 * 1024
+MAX_SAFETENSORS_HEADER_BYTES = 16 * 1024 * 1024
 _MAX_TENSOR_BYTES = (1 << 63) - 1
 
 
 class SafeTensorFormatError(ValueError):
     """Reject malformed or unsupported SafeTensors input."""
+
+
+def max_safetensors_file_bytes(tensor_bytes: int) -> int:
+    """Return the parser's complete-file bound for known Tensor data bytes."""
+
+    if isinstance(tensor_bytes, bool) or not isinstance(tensor_bytes, int) or tensor_bytes <= 0:
+        raise ValueError("tensor_bytes must be a positive integer")
+    return 8 + MAX_SAFETENSORS_HEADER_BYTES + tensor_bytes
 
 
 class SafeTensorDType(StrEnum):
@@ -186,7 +194,7 @@ def parse_safetensors(buffer: object) -> SafeTensorData:
         raise SafeTensorFormatError("SafeTensors input is shorter than its length prefix")
 
     header_bytes = int.from_bytes(view[:8], byteorder="little", signed=False)
-    if not 2 <= header_bytes <= _MAX_HEADER_BYTES:
+    if not 2 <= header_bytes <= MAX_SAFETENSORS_HEADER_BYTES:
         raise SafeTensorFormatError("SafeTensors header length is outside the supported bound")
     data_start = 8 + header_bytes
     if data_start > view.nbytes:

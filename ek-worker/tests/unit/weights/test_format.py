@@ -11,8 +11,10 @@ from safetensors.torch import load as official_load
 from safetensors.torch import save as official_save
 
 from expertkit_worker.weights import (
+    MAX_SAFETENSORS_HEADER_BYTES,
     SafeTensorDType,
     SafeTensorFormatError,
+    max_safetensors_file_bytes,
     parse_safetensors,
 )
 
@@ -22,6 +24,12 @@ def raw_file(header: dict[str, object], data: bytes = b"") -> bytes:
 
     encoded = json.dumps(header, separators=(",", ":")).encode()
     return struct.pack("<Q", len(encoded)) + encoded + data
+
+
+def test_complete_file_bound_adds_prefix_header_and_tensor_bytes() -> None:
+    assert max_safetensors_file_bytes(100) == 8 + MAX_SAFETENSORS_HEADER_BYTES + 100
+    with pytest.raises(ValueError, match="positive integer"):
+        max_safetensors_file_bytes(0)
 
 
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32])
