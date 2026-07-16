@@ -136,5 +136,9 @@ class WorkerBatchReceiver(ABC):
         """Wait until no admitted waiting or active batch names the experts."""
 
     @abstractmethod
+    async def wait_all_idle(self, *, monotonic_deadline: float) -> None:
+        """Wait until no admitted waiting or active computation remains."""
+
+    @abstractmethod
     async def close(self) -> None:
         """Stop admission and release Transport resources."""

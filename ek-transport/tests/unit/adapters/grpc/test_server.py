@@ -501,6 +501,37 @@ def test_whole_worker_drain_rejects_every_new_batch() -> None:
     run(scenario())
 
 
+def test_whole_worker_idle_wait_includes_waiting_and_active_batches() -> None:
+    async def scenario() -> None:
+        server, client = await start_pair(max_active_batches=2)
+        output = prepare_output(client)
+        submission = asyncio.create_task(
+            client.submit(
+                worker_batch(),
+                output,
+                monotonic_deadline=float("inf"),
+            )
+        )
+        async with asyncio.timeout(2):
+            await server._wait_pending_count(1)
+
+        idle = asyncio.create_task(server.wait_all_idle(monotonic_deadline=time.monotonic() + 2))
+        await asyncio.sleep(0)
+        assert idle.done() is False
+
+        received = await server.take()
+        await asyncio.sleep(0)
+        assert idle.done() is False
+        await await_with_loop_yields(received.complete(received.batch.hidden_states))
+        await await_with_loop_yields(submission)
+        await idle
+
+        client.output_buffers.release(output)
+        await await_with_loop_yields(close_pair(server, client))
+
+    run(scenario())
+
+
 def test_outer_grpc_concurrency_limit_bounds_active_plus_pending_calls() -> None:
     async def scenario() -> None:
         server, client = await start_pair(client_in_flight=3)

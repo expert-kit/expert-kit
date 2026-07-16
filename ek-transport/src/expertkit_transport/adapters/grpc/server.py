@@ -411,6 +411,20 @@ class GrpcWorkerServer(WorkerBatchReceiver):
                     async with asyncio.timeout(remaining):
                         await self._state_condition.wait()
 
+    async def wait_all_idle(self, *, monotonic_deadline: float) -> None:
+        """Wait until the Transport waiting area and execution are both empty."""
+
+        async with self._state_condition:
+            while self._pending.count or self._active_count:
+                remaining = monotonic_deadline - self._clock()
+                if remaining <= 0:
+                    raise TimeoutError("deadline expired while waiting for all admitted work")
+                if math.isinf(remaining):
+                    await self._state_condition.wait()
+                else:
+                    async with asyncio.timeout(remaining):
+                        await self._state_condition.wait()
+
     def admitted_count(self, layer_id: int, expert_id: int) -> int:
         """Return waiting plus active batches that name one expert."""
 
