@@ -423,9 +423,8 @@ fn state_status(error: ControllerStateError) -> Status {
         | ControllerStateError::PlacementTooLarge { .. }
         | ControllerStateError::PlacementGenerationMismatch { .. }
         | ControllerStateError::ReportSequenceRollback { .. }
-        | ControllerStateError::ConflictingReportSequence(_) => {
-            Status::failed_precondition(error.to_string())
-        }
+        | ControllerStateError::ConflictingReportSequence(_)
+        | ControllerStateError::UnknownDrain(_) => Status::failed_precondition(error.to_string()),
     }
 }
 
