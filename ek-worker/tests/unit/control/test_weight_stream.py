@@ -97,6 +97,13 @@ class FakeManager:
         self.states = states
         self.targets: tuple[TargetExpert, ...] = ()
         self.removals: list[tuple[int, tuple[WeightKey, ...]]] = []
+        self.shutting_down = False
+
+    async def begin_shutdown(self) -> bool:
+        if self.shutting_down:
+            return False
+        self.shutting_down = True
+        return True
 
     async def apply_targets(
         self,
@@ -379,9 +386,12 @@ def test_whole_worker_drain_waits_for_every_admitted_batch() -> None:
         )
         rpc = DrainRpc(stop_all=True)
 
+        assert await session.begin_shutdown() is True
+        assert await session.begin_shutdown() is False
         await session.run_once(rpc)
         await session.wait_shutdown_drained()
 
+        assert manager.shutting_down is True
         assert receiver.all_idle == 1
         assert receiver.expert_idle == []
         assert rpc.sent[-1].drain_complete.drain_id == 12

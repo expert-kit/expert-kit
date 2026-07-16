@@ -255,6 +255,30 @@ def test_removed_never_ready_expert_is_cancelled_and_reported() -> None:
     run(scenario())
 
 
+def test_shutdown_stops_loading_and_rejects_new_expert_targets() -> None:
+    async def scenario() -> None:
+        loader = _FakeLoader()
+        loader.block = True
+        manager, _ = _make_manager(loader)
+        manager.start()
+
+        await manager.apply_targets(1, [_target(0, 0)])
+        await asyncio.wait_for(loader.started.wait(), timeout=1)
+        assert await manager.begin_shutdown() is True
+        assert await manager.begin_shutdown() is False
+        await _await_with_loop_yields(manager.wait_for_idle())
+
+        assert await manager.apply_targets(2, [_target(0, 0)]) is True
+        assert len(loader.calls) == 1
+        with pytest.raises(RuntimeError, match="rejects new expert targets"):
+            await manager.apply_targets(3, [_target(0, 1)])
+        assert await manager.apply_targets(3, []) is True
+
+        await _await_with_loop_yields(manager.close())
+
+    run(scenario())
+
+
 def test_source_and_conversion_failures_are_isolated_per_expert() -> None:
     async def scenario() -> None:
         loader = _FakeLoader()

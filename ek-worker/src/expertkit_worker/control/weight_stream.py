@@ -31,6 +31,9 @@ class WeightControlDrainError(RuntimeError):
 
 
 class _WeightManager(Protocol):
+    async def begin_shutdown(self) -> bool:
+        """Stop loading and reject newly assigned experts."""
+
     async def apply_targets(
         self,
         placement_generation: int,
@@ -173,6 +176,11 @@ class WeightControlSession:
         """Wait for a whole-Worker drain to finish its local safety steps."""
 
         await self._shutdown_drained.wait()
+
+    async def begin_shutdown(self) -> bool:
+        """Stop weight loading while keeping current ready experts available."""
+
+        return await self._manager.begin_shutdown()
 
     async def close(self) -> None:
         """Cancel outstanding drains and reject future stream attempts."""

@@ -180,6 +180,7 @@ class WeightManager[CpuWeightT, ReadyWeightT]:
         self._fatal_event = asyncio.Event()
         self._close_task: asyncio.Task[None] | None = None
         self._started = False
+        self._shutting_down = False
         self._closed = False
 
     @property
@@ -237,6 +238,8 @@ class WeightManager[CpuWeightT, ReadyWeightT]:
                 if resolved != self._targets:
                     raise ValueError("one placement generation cannot contain different targets")
                 return False
+            if self._shutting_down and any(key not in self._targets for key in resolved):
+                raise RuntimeError("shutting-down Weight Manager rejects new expert targets")
 
             previous_targets = self._targets
             self._placement_generation = placement_generation
@@ -258,11 +261,28 @@ class WeightManager[CpuWeightT, ReadyWeightT]:
                 if key in self._ready_keys:
                     continue
                 self._states.pop(key, None)
-                if key not in self._load_tasks:
+                if key not in self._load_tasks and not self._shutting_down:
                     self._start_load_locked(key)
 
         self._emit(changes)
         return True
+
+    async def begin_shutdown(self) -> bool:
+        """Stop current loading and reject targets not already assigned.
+
+        Ready objects remain acquirable until the Controller authorizes their
+        computation drain and removal.
+        """
+
+        async with self._lock:
+            if self._closed:
+                raise RuntimeError("Weight Manager is closed")
+            if self._shutting_down:
+                return False
+            self._shutting_down = True
+            for task in self._load_tasks.values():
+                task.cancel()
+            return True
 
     async def snapshot(self) -> tuple[int, tuple[ExpertState, ...]]:
         """Return one consistent complete state snapshot for stream recovery."""
@@ -615,6 +635,7 @@ class WeightManager[CpuWeightT, ReadyWeightT]:
             should_restart = (
                 cancelled
                 and not self._closed
+                and not self._shutting_down
                 and key in self._targets
                 and key not in self._ready_keys
             )
