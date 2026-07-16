@@ -13,6 +13,8 @@ import torch
 from expertkit_transport._proto.ek.control.v2 import (
     lifecycle_pb2,
     lifecycle_pb2_grpc,
+    weight_control_pb2,
+    weight_control_pb2_grpc,
 )
 from expertkit_transport._proto.ek.worker.v2 import common_pb2
 
@@ -144,11 +146,36 @@ class _LifecycleServicer(lifecycle_pb2_grpc.WorkerLifecycleServiceServicer):
         return lifecycle_pb2.HeartbeatSummary(last_sequence=request.sequence)
 
 
+class _WeightControlServicer(weight_control_pb2_grpc.WeightControlServiceServicer):
+    def __init__(self) -> None:
+        self.open: weight_control_pb2.OpenWeightStream | None = None
+
+    async def Sync(
+        self,
+        request_iterator: AsyncIterator[weight_control_pb2.WorkerWeightMessage],
+        _context: grpc.aio.ServicerContext,
+    ) -> AsyncIterator[weight_control_pb2.ControllerWeightMessage]:
+        request = await anext(request_iterator)
+        self.open = request.open
+        yield weight_control_pb2.ControllerWeightMessage(
+            targets=weight_control_pb2.TargetExpertListPart(
+                placement_generation=5,
+                part_index=0,
+                part_count=1,
+            )
+        )
+
+
 def test_plaintext_connection_registers_and_reuses_channel_for_heartbeat() -> None:
     async def scenario() -> None:
         servicer = _LifecycleServicer()
+        weight_servicer = _WeightControlServicer()
         server = grpc.aio.server()
         lifecycle_pb2_grpc.add_WorkerLifecycleServiceServicer_to_server(servicer, server)
+        weight_control_pb2_grpc.add_WeightControlServiceServicer_to_server(
+            weight_servicer,
+            server,
+        )
         port = server.add_insecure_port("127.0.0.1:0")
         await server.start()
         connection = ControllerConnection(f"127.0.0.1:{port}")
@@ -162,11 +189,26 @@ def test_plaintext_connection_registers_and_reuses_channel_for_heartbeat() -> No
             result = await connection.register(_registration(), timeout_secs=2)
             await sender.run_once(connection)
 
+            async def weight_requests() -> AsyncIterator[weight_control_pb2.WorkerWeightMessage]:
+                yield weight_control_pb2.WorkerWeightMessage(
+                    open=weight_control_pb2.OpenWeightStream(
+                        worker_id="worker-0",
+                        start_id="start-1",
+                    )
+                )
+
+            weight_responses = [
+                response async for response in connection.sync_weights(weight_requests())
+            ]
+
             assert result.topology_version == 11
             assert result.placement_generation == 5
             assert servicer.registrations[0].device.max_experts == 8
             assert servicer.registrations[0].activation_dtype == common_pb2.ACTIVATION_DTYPE_BF16
             assert servicer.heartbeats[0].sequence == 1
+            assert weight_servicer.open is not None
+            assert weight_servicer.open.start_id == "start-1"
+            assert weight_responses[0].targets.placement_generation == 5
         finally:
             sender.close()
             await connection.close()

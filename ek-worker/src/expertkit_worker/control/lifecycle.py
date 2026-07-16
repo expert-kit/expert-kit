@@ -13,6 +13,7 @@ import torch
 from expertkit_transport._proto.ek.control.v2 import (
     lifecycle_pb2,
     lifecycle_pb2_grpc,
+    weight_control_pb2,
     weight_control_pb2_grpc,
 )
 from expertkit_transport._proto.ek.worker.v2 import common_pb2
@@ -188,6 +189,18 @@ class ControllerConnection:
         if self._lifecycle is None:
             raise RuntimeError("Controller connection has not been started")
         return await self._lifecycle.Heartbeat(requests, wait_for_ready=False)
+
+    async def sync_weights(
+        self,
+        requests: AsyncIterator[weight_control_pb2.WorkerWeightMessage],
+    ) -> AsyncIterator[weight_control_pb2.ControllerWeightMessage]:
+        """Open one weight-control stream on the shared Controller channel."""
+
+        if self._weight_control is None:
+            raise RuntimeError("Controller connection has not been started")
+        call = self._weight_control.Sync(requests, wait_for_ready=False)
+        async for response in call:
+            yield response
 
     async def close(self) -> None:
         """Close the shared Controller channel exactly once."""

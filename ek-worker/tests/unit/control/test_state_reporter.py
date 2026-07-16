@@ -111,6 +111,23 @@ def test_reporter_flushes_oldest_update_after_configured_delay() -> None:
     run(scenario())
 
 
+def test_explicit_flush_wakes_a_waiting_report_and_returns_its_sequence() -> None:
+    async def scenario() -> None:
+        clock = FakeClock()
+        reporter = _reporter(clock, max_updates=64)
+        reporter.record(_change(3, 7))
+        waiting = asyncio.create_task(reporter.take_updates())
+
+        sequence = await reporter.flush()
+        message = await waiting
+
+        assert message is not None
+        assert message.state_updates.report_sequence == sequence == 1
+        assert [state.expert_id for state in message.state_updates.experts] == [7]
+
+    run(scenario())
+
+
 def test_reporter_never_mixes_placement_generations() -> None:
     async def scenario() -> None:
         clock = FakeClock()

@@ -114,6 +114,9 @@ class ExpertStateReporter:
         self._clock = clock
         self._pending: dict[WeightKey, _PendingState] = {}
         self._changed = asyncio.Event()
+        self._flush_complete = asyncio.Event()
+        self._flush_complete.set()
+        self._flush_requested = False
         self._change_index = 0
         self._last_report_sequence = 0
         self._last_acknowledged_sequence = 0
@@ -146,7 +149,26 @@ class ExpertStateReporter:
             recorded_at=self._clock() if previous is None else previous.recorded_at,
             change=change,
         )
+        self._flush_complete.clear()
         self._changed.set()
+
+    async def flush(self) -> int:
+        """Make pending changes immediately available and wait until they are taken.
+
+        Returns:
+            The last report sequence allocated after the pending set becomes empty.
+            The caller must separately ensure that messages through this sequence
+            have entered its outgoing stream before sending dependent control data.
+        """
+
+        while self._pending:
+            self._flush_requested = True
+            self._changed.set()
+            self._flush_complete.clear()
+            if not self._pending:
+                break
+            await self._flush_complete.wait()
+        return self._last_report_sequence
 
     def full_state_parts(
         self,
@@ -207,7 +229,7 @@ class ExpertStateReporter:
             selected = self._select_pending()
             if selected:
                 oldest = selected[0].recorded_at
-                ready = force or len(selected) >= self._max_updates
+                ready = force or self._flush_requested or len(selected) >= self._max_updates
                 ready = ready or self._clock() - oldest >= self._max_delay_seconds
                 if ready:
                     return self._take_selected(selected)
@@ -277,6 +299,8 @@ class ExpertStateReporter:
         if self._pending:
             self._changed.set()
         else:
+            self._flush_requested = False
+            self._flush_complete.set()
             self._changed.clear()
 
     def _validate_key(self, key: WeightKey) -> None:
