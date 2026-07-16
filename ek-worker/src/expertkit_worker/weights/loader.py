@@ -43,6 +43,8 @@ class WeightLoadStage(StrEnum):
     READ = "read"
     PARSE = "parse"
     VALIDATE = "validate"
+    CONVERT = "convert"
+    PLACE = "place"
 
 
 class WeightLoadErrorCode(StrEnum):
@@ -53,6 +55,7 @@ class WeightLoadErrorCode(StrEnum):
     NETWORK = "network"
     INVALID_FORMAT = "invalid_format"
     UNEXPECTED_METADATA = "unexpected_metadata"
+    UNSUPPORTED = "unsupported"
     INTERNAL = "internal"
 
 

@@ -3,8 +3,25 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from enum import StrEnum
 
 from expertkit_worker.weights.format import SafeTensorData
+
+
+class WeightPlacementFatalReason(StrEnum):
+    """Classify device failures that make continued Worker service unsafe."""
+
+    DEVICE_OOM = "device_oom"
+    DEVICE_FAILURE = "device_failure"
+
+
+class WeightPlacementFatalError(RuntimeError):
+    """Report a fatal failure while creating a final computation weight."""
+
+    def __init__(self, reason: WeightPlacementFatalReason, diagnostic: str = "") -> None:
+        super().__init__(diagnostic or reason.value)
+        self.reason = reason
+        self.diagnostic = diagnostic
 
 
 class WeightAdapter[CpuWeightT, ReadyWeightT](ABC):

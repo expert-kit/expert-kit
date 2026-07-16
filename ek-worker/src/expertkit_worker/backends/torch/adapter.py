@@ -6,11 +6,15 @@ import torch
 from expertkit_transport.contracts import ACTIVATION_DTYPES
 
 from expertkit_worker.backends.torch.weights import TorchExpertWeights
-from expertkit_worker.weights import (
+from expertkit_worker.weights.adapter import (
+    WeightAdapter,
+    WeightPlacementFatalError,
+    WeightPlacementFatalReason,
+)
+from expertkit_worker.weights.format import (
     SafeTensorData,
     SafeTensorDType,
     SafeTensorRegion,
-    WeightAdapter,
 )
 
 _TORCH_DTYPES = {
@@ -79,26 +83,39 @@ class TorchWeightAdapter(WeightAdapter[TorchExpertWeights, TorchExpertWeights]):
             raise ValueError("Torch cached weight must be on CPU")
         if cpu_weight.dtype != self._source_dtype:
             raise ValueError("Torch cached weight dtype does not match the configured source")
-        ready = TorchExpertWeights(
-            gate_proj=cpu_weight.gate_proj.to(
-                device=self._device,
-                dtype=self._compute_dtype,
-                copy=self._device.type != "cpu" or self._compute_dtype != self._source_dtype,
-            ),
-            up_proj=cpu_weight.up_proj.to(
-                device=self._device,
-                dtype=self._compute_dtype,
-                copy=self._device.type != "cpu" or self._compute_dtype != self._source_dtype,
-            ),
-            down_proj=cpu_weight.down_proj.to(
-                device=self._device,
-                dtype=self._compute_dtype,
-                copy=self._device.type != "cpu" or self._compute_dtype != self._source_dtype,
-            ),
-        )
-        if self._device.type == "cuda":
-            torch.cuda.current_stream(self._device).synchronize()
-        return ready
+        try:
+            ready = TorchExpertWeights(
+                gate_proj=cpu_weight.gate_proj.to(
+                    device=self._device,
+                    dtype=self._compute_dtype,
+                    copy=self._device.type != "cpu" or self._compute_dtype != self._source_dtype,
+                ),
+                up_proj=cpu_weight.up_proj.to(
+                    device=self._device,
+                    dtype=self._compute_dtype,
+                    copy=self._device.type != "cpu" or self._compute_dtype != self._source_dtype,
+                ),
+                down_proj=cpu_weight.down_proj.to(
+                    device=self._device,
+                    dtype=self._compute_dtype,
+                    copy=self._device.type != "cpu" or self._compute_dtype != self._source_dtype,
+                ),
+            )
+            if self._device.type == "cuda":
+                torch.cuda.current_stream(self._device).synchronize()
+            return ready
+        except torch.OutOfMemoryError as error:
+            raise WeightPlacementFatalError(
+                WeightPlacementFatalReason.DEVICE_OOM,
+                str(error),
+            ) from error
+        except RuntimeError as error:
+            if self._device.type == "cuda":
+                raise WeightPlacementFatalError(
+                    WeightPlacementFatalReason.DEVICE_FAILURE,
+                    str(error),
+                ) from error
+            raise
 
     def cpu_extra_bytes(self) -> int:
         """Return zero because CPU Tensors view the retained source buffer."""

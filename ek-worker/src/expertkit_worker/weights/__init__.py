@@ -1,6 +1,10 @@
 """Weight lookup, loading, cache, placement, and lifetime management."""
 
-from expertkit_worker.weights.adapter import WeightAdapter
+from expertkit_worker.weights.adapter import (
+    WeightAdapter,
+    WeightPlacementFatalError,
+    WeightPlacementFatalReason,
+)
 from expertkit_worker.weights.disk_cache import DirectIOWeightDiskCache, WeightDiskCache
 from expertkit_worker.weights.format import (
     MAX_SAFETENSORS_HEADER_BYTES,
@@ -21,6 +25,15 @@ from expertkit_worker.weights.loader import (
     WeightLoadStage,
     WeightSource,
 )
+from expertkit_worker.weights.manager import (
+    ExpertState,
+    ExpertStateChange,
+    ExpertStateKind,
+    TargetExpert,
+    WeightManager,
+    WeightManagerFatalError,
+    WeightManagerStats,
+)
 from expertkit_worker.weights.peer_server import PeerWeightServer
 from expertkit_worker.weights.ready import (
     ReadyWeightLease,
@@ -36,6 +49,9 @@ __all__ = [
     "CpuWeightLoader",
     "DirectIOWeightDiskCache",
     "DiskWriteback",
+    "ExpertState",
+    "ExpertStateChange",
+    "ExpertStateKind",
     "PeerWeightServer",
     "ReadyWeightLease",
     "ReadyWeightTable",
@@ -43,12 +59,18 @@ __all__ = [
     "SafeTensorData",
     "SafeTensorFormatError",
     "SafeTensorRegion",
+    "TargetExpert",
     "WeightAdapter",
     "WeightDiskCache",
     "WeightLoadErrorCode",
     "WeightLoadFailed",
     "WeightLoadFailure",
     "WeightLoadStage",
+    "WeightManager",
+    "WeightManagerFatalError",
+    "WeightManagerStats",
+    "WeightPlacementFatalError",
+    "WeightPlacementFatalReason",
     "WeightSource",
     "WeightsNotReady",
     "max_safetensors_file_bytes",

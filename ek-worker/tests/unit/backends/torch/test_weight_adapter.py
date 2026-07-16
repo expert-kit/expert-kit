@@ -8,7 +8,11 @@ from safetensors.torch import load as official_load
 from safetensors.torch import save as official_save
 
 from expertkit_worker.backends.torch import TorchWeightAdapter
-from expertkit_worker.weights import parse_safetensors
+from expertkit_worker.weights import (
+    WeightPlacementFatalError,
+    WeightPlacementFatalReason,
+    parse_safetensors,
+)
 
 _HIDDEN_DIM = 4
 _INTERMEDIATE_DIM = 3
@@ -95,6 +99,34 @@ def test_torch_adapter_rejects_wrong_source_metadata() -> None:
 
     with pytest.raises(ValueError, match="unexpected dtype"):
         make_adapter(torch.float32, torch.float32).make_cpu_weight(parsed)
+
+
+@pytest.mark.parametrize(
+    ("device_error", "expected_reason"),
+    [
+        (torch.OutOfMemoryError("device full"), WeightPlacementFatalReason.DEVICE_OOM),
+        (RuntimeError("device lost"), WeightPlacementFatalReason.DEVICE_FAILURE),
+    ],
+)
+def test_torch_adapter_classifies_cuda_placement_failures_as_fatal(
+    device_error: RuntimeError,
+    expected_reason: WeightPlacementFatalReason,
+) -> None:
+    class FailingTensor:
+        def to(self, **_options: object) -> torch.Tensor:
+            raise device_error
+
+    class FailingWeight:
+        device = torch.device("cpu")
+        dtype = torch.float32
+        gate_proj = FailingTensor()
+
+    adapter = make_adapter(torch.float32, torch.float32, "cuda:0")
+
+    with pytest.raises(WeightPlacementFatalError) as caught:
+        adapter.make_ready_weight(FailingWeight())
+
+    assert caught.value.reason is expected_reason
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is unavailable")
