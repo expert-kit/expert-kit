@@ -8,13 +8,21 @@ from expertkit_worker.config.models import (
     LogLevel,
     WorkerConfig,
 )
+from expertkit_worker.config.resources import (
+    DeviceResourcePlan,
+    plan_device_resources,
+    validate_available_device_memory,
+)
 
 __all__ = [
     "ActivationDType",
     "BackendName",
     "ConfigFileError",
+    "DeviceResourcePlan",
     "LogFormat",
     "LogLevel",
     "WorkerConfig",
     "load_config",
+    "plan_device_resources",
+    "validate_available_device_memory",
 ]
