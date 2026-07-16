@@ -89,6 +89,39 @@ def _validate_batch_against_spec(batch: WorkerBatch, spec: GrpcBatchSpec) -> Non
         raise GrpcProtocolError("Worker batch activation dtype does not match the endpoint")
 
 
+def _serialize_host_request(
+    batch: WorkerBatch,
+    spec: GrpcBatchSpec,
+    host_hidden_states: torch.Tensor,
+    host_expert_ids: torch.Tensor,
+    host_routing_weights: torch.Tensor,
+) -> bytes:
+    distinct = _validate_routing_values(
+        host_expert_ids,
+        host_routing_weights,
+        spec.experts_per_layer,
+    )
+    if distinct != batch.distinct_expert_ids:
+        raise GrpcProtocolError("distinct_expert_ids does not match the routing tensor")
+
+    request = computation_pb2.ExecuteRequest(
+        instance_id=batch.instance_id,
+        layer_id=batch.layer_id,
+        topology_version=batch.topology_version,
+        token_count=batch.token_count,
+        hidden_dim=batch.hidden_dim,
+        top_k=batch.top_k,
+        dtype=spec.protobuf_dtype,
+        hidden_states=_raw_bytes(host_hidden_states),
+        expert_ids=_raw_bytes(host_expert_ids),
+        routing_weights=_raw_bytes(host_routing_weights),
+    )
+    payload = request.SerializeToString()
+    if len(payload) > calculate_message_limits(spec).request_bytes:
+        raise RuntimeError("encoded request exceeds its calculated gRPC limit")
+    return payload
+
+
 def encode_request(batch: WorkerBatch, spec: GrpcBatchSpec) -> bytes:
     """Compact one Worker batch and return its serialized v2 request."""
 
@@ -109,30 +142,13 @@ def encode_request(batch: WorkerBatch, spec: GrpcBatchSpec) -> bytes:
     host_hidden = hidden_states.detach().to(device="cpu").contiguous()
     host_expert_ids = batch.expert_ids.detach().to(device="cpu").contiguous()
     host_routing_weights = batch.routing_weights.detach().to(device="cpu").contiguous()
-    distinct = _validate_routing_values(
+    return _serialize_host_request(
+        batch,
+        spec,
+        host_hidden,
         host_expert_ids,
         host_routing_weights,
-        spec.experts_per_layer,
     )
-    if distinct != batch.distinct_expert_ids:
-        raise GrpcProtocolError("distinct_expert_ids does not match the routing tensor")
-
-    request = computation_pb2.ExecuteRequest(
-        instance_id=batch.instance_id,
-        layer_id=batch.layer_id,
-        topology_version=batch.topology_version,
-        token_count=batch.token_count,
-        hidden_dim=batch.hidden_dim,
-        top_k=batch.top_k,
-        dtype=spec.protobuf_dtype,
-        hidden_states=_raw_bytes(host_hidden),
-        expert_ids=_raw_bytes(host_expert_ids),
-        routing_weights=_raw_bytes(host_routing_weights),
-    )
-    payload = request.SerializeToString()
-    if len(payload) > calculate_message_limits(spec).request_bytes:
-        raise RuntimeError("encoded request exceeds its calculated gRPC limit")
-    return payload
 
 
 def decode_request(payload: bytes, spec: GrpcBatchSpec) -> WorkerBatch:
