@@ -29,7 +29,8 @@ pub trait Dispatcher {
 }
 
 pub struct DispatcherImpl {
-    ch_store: BTreeMap<String, Sender<Vec<Expert>>>,
+    ch_store: BTreeMap<String, (u64, Sender<Vec<Expert>>)>,
+    next_subscription_id: u64,
     /// Per-worker fingerprint of the last-sent expert list.
     /// If the fingerprint is unchanged the send is skipped.
     last_fingerprint: HashMap<String, u64>,
@@ -55,6 +56,7 @@ impl DispatcherImpl {
     fn new() -> Self {
         Self {
             ch_store: BTreeMap::new(),
+            next_subscription_id: 0,
             last_fingerprint: HashMap::new(),
         }
     }
@@ -117,7 +119,7 @@ impl Dispatcher for DispatcherImpl {
             }
             self.last_fingerprint.insert(node.hostname.clone(), fp);
 
-            if let Some(ch) = self.ch_store.get(&node.hostname)
+            if let Some((_subscription_id, ch)) = self.ch_store.get(&node.hostname)
                 && let Err(e) = ch.send(experts).await
             {
                 log::error!(
@@ -129,11 +131,7 @@ impl Dispatcher for DispatcherImpl {
         }
     }
     async fn subscribe(&mut self, hostname: &str) -> Receiver<Vec<Expert>> {
-        let (tx, rx) = mpsc::channel(10);
-        self.ch_store.insert(hostname.to_string(), tx);
-        // Clear stale fingerprint so the next poller tick always sends the full list
-        self.last_fingerprint.remove(hostname);
-        rx
+        self.subscribe_with_lease(hostname).1
     }
     async fn unsubscribe(&mut self, hostname: &str) {
         self.ch_store.remove(hostname);
@@ -141,10 +139,36 @@ impl Dispatcher for DispatcherImpl {
 }
 
 impl DispatcherImpl {
+    /// Subscribe while retaining an identifier that cannot remove a newer stream.
+    pub fn subscribe_with_lease(&mut self, hostname: &str) -> (u64, Receiver<Vec<Expert>>) {
+        let (tx, rx) = mpsc::channel(10);
+        self.next_subscription_id = self.next_subscription_id.wrapping_add(1).max(1);
+        let subscription_id = self.next_subscription_id;
+        self.ch_store
+            .insert(hostname.to_string(), (subscription_id, tx));
+        // Clear stale fingerprint so the next poller tick always sends the full list
+        self.last_fingerprint.remove(hostname);
+        (subscription_id, rx)
+    }
+
+    /// Remove a subscription only when it is still the current stream.
+    pub fn unsubscribe_with_lease(&mut self, hostname: &str, subscription_id: u64) -> bool {
+        let is_current = self
+            .ch_store
+            .get(hostname)
+            .is_some_and(|(current, _sender)| *current == subscription_id);
+        if is_current {
+            self.ch_store.remove(hostname);
+        }
+        is_current
+    }
+}
+
+impl DispatcherImpl {
     /// Immediately send `experts` to a specific worker without waiting for the next
     /// poller tick. Used by recovery to trigger loading on the target node right away.
     pub async fn trigger_worker(&self, hostname: &str, experts: Vec<Expert>) {
-        if let Some(ch) = self.ch_store.get(hostname) {
+        if let Some((_subscription_id, ch)) = self.ch_store.get(hostname) {
             if let Err(e) = ch.send(experts).await {
                 log::warn!("trigger_worker: failed to send to {hostname}: {e}");
             }
@@ -187,5 +211,16 @@ mod tests {
     #[test]
     fn fingerprint_empty() {
         assert_eq!(fingerprint(&[]), fingerprint(&[]));
+    }
+
+    #[test]
+    fn an_old_subscription_cannot_remove_its_replacement() {
+        let mut dispatcher = DispatcherImpl::new();
+        let (first, _first_receiver) = dispatcher.subscribe_with_lease("worker-0");
+        let (second, _second_receiver) = dispatcher.subscribe_with_lease("worker-0");
+        assert!(!dispatcher.unsubscribe_with_lease("worker-0", first));
+        assert!(dispatcher.ch_store.contains_key("worker-0"));
+        assert!(dispatcher.unsubscribe_with_lease("worker-0", second));
+        assert!(!dispatcher.ch_store.contains_key("worker-0"));
     }
 }
