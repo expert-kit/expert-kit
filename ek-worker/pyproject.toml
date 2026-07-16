@@ -17,6 +17,9 @@ dependencies = [
     "torch==2.11.0",
 ]
 
+[project.scripts]
+expertkit-worker = "expertkit_worker.cli:main"
+
 [tool.uv.sources]
 expertkit-transport = { path = "../ek-transport", editable = true }
 
