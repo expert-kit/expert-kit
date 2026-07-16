@@ -253,6 +253,7 @@ source = { editable = "." }
 dependencies = [
     { name = "aiohttp" },
     { name = "expertkit-transport" },
+    { name = "grpcio" },
     { name = "pydantic" },
     { name = "pyyaml" },
     { name = "structlog" },
@@ -270,6 +271,7 @@ dev = [
 requires-dist = [
     { name = "aiohttp", specifier = ">=3.11,<4" },
     { name = "expertkit-transport", editable = "../ek-transport" },
+    { name = "grpcio", specifier = "==1.71.0" },
     { name = "pydantic", specifier = ">=2.11,<3" },
     { name = "pyyaml", specifier = ">=6,<7" },
     { name = "structlog", specifier = ">=25.4,<26" },
