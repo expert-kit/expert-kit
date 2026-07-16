@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections.abc import Iterable
 from dataclasses import dataclass
 
 import torch
@@ -110,6 +111,29 @@ class WorkerBatchReceiver(ABC):
     @abstractmethod
     def allocate_position_buffers(self, spec: WorkerPositionSpec) -> WorkerPositionBuffers:
         """Allocate adapter-specific fixed storage for one active position."""
+
+    @abstractmethod
+    async def begin_drain(
+        self,
+        experts: Iterable[tuple[int, int]],
+        *,
+        min_topology_version: int,
+        stop_all: bool,
+    ) -> None:
+        """Reject new matching batches after Controller Topology cutover."""
+
+    @abstractmethod
+    async def clear_expert_drains(self, experts: Iterable[tuple[int, int]]) -> None:
+        """Allow newly assigned and ready experts after a later placement."""
+
+    @abstractmethod
+    async def wait_experts_idle(
+        self,
+        experts: Iterable[tuple[int, int]],
+        *,
+        monotonic_deadline: float,
+    ) -> None:
+        """Wait until no admitted waiting or active batch names the experts."""
 
     @abstractmethod
     async def close(self) -> None:

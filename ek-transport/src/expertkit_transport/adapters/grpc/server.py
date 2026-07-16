@@ -40,6 +40,8 @@ from expertkit_transport.contracts import (
 
 _EXECUTE_METHOD_NAME = "Execute"
 _SERVICE_NAME = "ek.worker.v2.ComputationService"
+_UINT32_MAX = (1 << 32) - 1
+_UINT64_MAX = (1 << 64) - 1
 _NATIVE_ERROR_STATUS = {
     TransportErrorCode.DEADLINE_EXCEEDED: grpc.StatusCode.DEADLINE_EXCEEDED,
     TransportErrorCode.CANCELLED: grpc.StatusCode.CANCELLED,
@@ -50,6 +52,27 @@ _NATIVE_ERROR_STATUS = {
 
 def _identity(payload: bytes) -> bytes:
     return payload
+
+
+def _validate_drain_experts(
+    experts: Iterable[tuple[int, int]],
+) -> tuple[tuple[int, int], ...]:
+    resolved = tuple(experts)
+    seen: set[tuple[int, int]] = set()
+    for key in resolved:
+        if not isinstance(key, tuple) or len(key) != 2:
+            raise ValueError("each draining expert must contain layer and expert IDs")
+        for name, value in zip(("layer_id", "expert_id"), key, strict=True):
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, int)
+                or not 0 <= value <= _UINT32_MAX
+            ):
+                raise ValueError(f"{name} must be an unsigned 32-bit integer")
+        if key in seen:
+            raise ValueError("draining experts must not contain duplicates")
+        seen.add(key)
+    return resolved
 
 
 class _CallState(StrEnum):
@@ -232,6 +255,8 @@ class GrpcWorkerServer(WorkerBatchReceiver):
         self._server: grpc.aio.Server | None = None
         self._start_lock = asyncio.Lock()
         self._admitted_experts: Counter[tuple[int, int]] = Counter()
+        self._draining_experts: dict[tuple[int, int], int] = {}
+        self._stop_all_min_topology_version: int | None = None
         self._active_count = 0
         self._state_condition = asyncio.Condition()
         self._closing = False
@@ -323,6 +348,45 @@ class GrpcWorkerServer(WorkerBatchReceiver):
             self._close_task = asyncio.create_task(self._close())
         await asyncio.shield(self._close_task)
 
+    async def begin_drain(
+        self,
+        experts: Iterable[tuple[int, int]],
+        *,
+        min_topology_version: int,
+        stop_all: bool,
+    ) -> None:
+        """Reject new matching calls while preserving already admitted work."""
+
+        selected = _validate_drain_experts(experts)
+        if (
+            isinstance(min_topology_version, bool)
+            or not isinstance(min_topology_version, int)
+            or not 0 < min_topology_version <= _UINT64_MAX
+        ):
+            raise ValueError("min_topology_version must be a positive uint64")
+        if not isinstance(stop_all, bool):
+            raise ValueError("stop_all must be a Boolean")
+        if not selected and not stop_all:
+            raise ValueError("an expert drain must name at least one expert")
+
+        async with self._state_condition:
+            for key in selected:
+                current = self._draining_experts.get(key, 0)
+                self._draining_experts[key] = max(current, min_topology_version)
+            if stop_all:
+                current = self._stop_all_min_topology_version or 0
+                self._stop_all_min_topology_version = max(current, min_topology_version)
+            self._state_condition.notify_all()
+
+    async def clear_expert_drains(self, experts: Iterable[tuple[int, int]]) -> None:
+        """Clear per-expert gates after later assignments become ready."""
+
+        selected = _validate_drain_experts(experts)
+        async with self._state_condition:
+            for key in selected:
+                self._draining_experts.pop(key, None)
+            self._state_condition.notify_all()
+
     async def wait_experts_idle(
         self,
         experts: Iterable[tuple[int, int]],
@@ -331,7 +395,7 @@ class GrpcWorkerServer(WorkerBatchReceiver):
     ) -> None:
         """Wait until no waiting or active batch uses the selected experts."""
 
-        selected = tuple(experts)
+        selected = _validate_drain_experts(experts)
 
         def idle() -> bool:
             return all(self._admitted_experts[key] == 0 for key in selected)
@@ -368,13 +432,9 @@ class GrpcWorkerServer(WorkerBatchReceiver):
         remaining = context.time_remaining()
         deadline = math.inf if remaining is None else self._clock() + max(0.0, remaining)
         item = _GrpcWorkItem(self, batch, deadline, len(payload))
-        if not await self._admit(item):
-            busy = TransportError(
-                TransportErrorCode.BUSY,
-                retryable=True,
-                diagnostic="Worker Transport waiting area is full",
-            )
-            return await self._run_cpu(encode_error_response, busy, self._spec)
+        rejection = await self._admit(item)
+        if rejection is not None:
+            return await self._run_cpu(encode_error_response, rejection, self._spec)
 
         try:
             return await asyncio.shield(item.response)
@@ -390,15 +450,37 @@ class GrpcWorkerServer(WorkerBatchReceiver):
             await context.abort(grpc.StatusCode.INTERNAL, "failed to encode Worker response")
             raise AssertionError("context.abort must terminate the handler") from error
 
-    async def _admit(self, item: _GrpcWorkItem) -> bool:
+    async def _admit(self, item: _GrpcWorkItem) -> TransportError | None:
         async with self._state_condition:
+            draining = self._drain_error_locked(item)
+            if draining is not None:
+                return draining
             admitted = await self._pending.try_admit(item)
             if not admitted:
-                return False
+                return TransportError(
+                    TransportErrorCode.BUSY,
+                    retryable=True,
+                    diagnostic="Worker Transport waiting area is full",
+                )
             for expert_id in item.distinct_expert_ids:
                 self._admitted_experts[(item.layer_id, expert_id)] += 1
             self._state_condition.notify_all()
-        return True
+        return None
+
+    def _drain_error_locked(self, item: _GrpcWorkItem) -> TransportError | None:
+        min_topology_version = self._stop_all_min_topology_version
+        for expert_id in item.distinct_expert_ids:
+            expert_version = self._draining_experts.get((item.layer_id, expert_id))
+            if expert_version is not None:
+                min_topology_version = max(min_topology_version or 0, expert_version)
+        if min_topology_version is None:
+            return None
+        return TransportError(
+            TransportErrorCode.DRAINING,
+            retryable=True,
+            min_topology_version=min_topology_version,
+            diagnostic="Worker is draining the requested expert route",
+        )
 
     async def _cancel(self, item: _GrpcWorkItem) -> None:
         async with self._state_condition:

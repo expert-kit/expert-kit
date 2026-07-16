@@ -3,6 +3,7 @@
 import asyncio
 import time
 from collections.abc import Awaitable
+from dataclasses import replace
 
 import grpc
 import pytest
@@ -85,6 +86,16 @@ async def close_pair(server: GrpcWorkerServer, client: GrpcWorkerTransport) -> N
 
 def run(coroutine: Awaitable[None]) -> None:
     asyncio.run(coroutine)
+
+
+async def await_with_loop_yields[T](awaitable: Awaitable[T]) -> T:
+    """Keep the test loop runnable while executor threads finish codec work."""
+
+    task = asyncio.ensure_future(awaitable)
+    async with asyncio.timeout(2):
+        while not task.done():
+            await asyncio.sleep(0)
+    return task.result()
 
 
 def test_server_allocates_direct_cpu_position_buffers() -> None:
@@ -361,6 +372,131 @@ def test_application_pending_limit_returns_busy_and_cancellation_releases_input(
         client.output_buffers.release(first_output)
         client.output_buffers.release(second_output)
         await close_pair(server, client)
+
+    run(scenario())
+
+
+def test_expert_drain_rejects_new_calls_and_preserves_admitted_work() -> None:
+    async def scenario() -> None:
+        server, client = await start_pair(max_active_batches=2)
+        first_output = prepare_output(client)
+        rejected_output = prepare_output(client)
+        unrelated_output = prepare_output(client)
+        resumed_output = prepare_output(client)
+        first = asyncio.create_task(
+            client.submit(
+                worker_batch(),
+                first_output,
+                monotonic_deadline=float("inf"),
+            )
+        )
+        async with asyncio.timeout(2):
+            await server._wait_pending_count(1)
+
+        await server.begin_drain(
+            ((2, 1),),
+            min_topology_version=12,
+            stop_all=False,
+        )
+        await server.begin_drain(
+            ((2, 1),),
+            min_topology_version=13,
+            stop_all=False,
+        )
+        idle = asyncio.create_task(
+            server.wait_experts_idle(
+                ((2, 1),),
+                monotonic_deadline=time.monotonic() + 2,
+            )
+        )
+        await asyncio.sleep(0)
+        assert idle.done() is False
+
+        with pytest.raises(TransportError) as caught:
+            await await_with_loop_yields(
+                client.submit(
+                    worker_batch(),
+                    rejected_output,
+                    monotonic_deadline=float("inf"),
+                )
+            )
+        assert caught.value.code is TransportErrorCode.DRAINING
+        assert caught.value.retryable is True
+        assert caught.value.min_topology_version == 13
+
+        admitted = await server.take()
+        await await_with_loop_yields(admitted.complete(admitted.batch.hidden_states))
+        await await_with_loop_yields(first)
+        await idle
+        assert server.admitted_count(2, 1) == 0
+
+        unrelated_batch = replace(
+            worker_batch(),
+            expert_ids=torch.tensor([[2, -1], [2, -1]], dtype=torch.int32),
+            routing_weights=torch.tensor([[1.0, 0.0], [1.0, 0.0]], dtype=torch.float32),
+            distinct_expert_ids=(2,),
+        )
+        unrelated = asyncio.create_task(
+            client.submit(
+                unrelated_batch,
+                unrelated_output,
+                monotonic_deadline=float("inf"),
+            )
+        )
+        await await_with_loop_yields(server._wait_pending_count(1))
+        unrelated_received = await server.take()
+        await await_with_loop_yields(
+            unrelated_received.complete(unrelated_received.batch.hidden_states)
+        )
+        await await_with_loop_yields(unrelated)
+
+        await server.clear_expert_drains(((2, 1),))
+        await server.clear_expert_drains(((2, 1),))
+        resumed = asyncio.create_task(
+            client.submit(
+                worker_batch(),
+                resumed_output,
+                monotonic_deadline=float("inf"),
+            )
+        )
+        await await_with_loop_yields(server._wait_pending_count(1))
+        accepted = await server.take()
+        await await_with_loop_yields(accepted.complete(accepted.batch.hidden_states))
+        await await_with_loop_yields(resumed)
+
+        for output in (first_output, rejected_output, unrelated_output, resumed_output):
+            client.output_buffers.release(output)
+        await await_with_loop_yields(close_pair(server, client))
+
+    run(scenario())
+
+
+def test_whole_worker_drain_rejects_every_new_batch() -> None:
+    async def scenario() -> None:
+        server, client = await start_pair()
+        output = prepare_output(client)
+        unrelated = replace(
+            worker_batch(),
+            expert_ids=torch.tensor([[2, -1], [2, -1]], dtype=torch.int32),
+            routing_weights=torch.tensor([[1.0, 0.0], [1.0, 0.0]], dtype=torch.float32),
+            distinct_expert_ids=(2,),
+        )
+        await server.begin_drain((), min_topology_version=15, stop_all=True)
+
+        with pytest.raises(TransportError) as caught:
+            await await_with_loop_yields(
+                client.submit(
+                    unrelated,
+                    output,
+                    monotonic_deadline=float("inf"),
+                )
+            )
+
+        assert caught.value.code is TransportErrorCode.DRAINING
+        assert caught.value.min_topology_version == 15
+        assert server.pending_count == 0
+        client.output_buffers.release(output)
+        await await_with_loop_yields(close_pair(server, client))
 
     run(scenario())
 
