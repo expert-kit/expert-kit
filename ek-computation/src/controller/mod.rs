@@ -17,6 +17,7 @@ use crate::{
         },
         v2::{
             topology_service_server::TopologyServiceServer,
+            weight_control_service_server::WeightControlServiceServer,
             worker_lifecycle_service_server::WorkerLifecycleServiceServer,
         },
     },
@@ -27,6 +28,7 @@ use metrics::spawn_metrics_server;
 use service::{
     control::PlanServiceImpl,
     v2::{DatabaseLifecycleHooks, TopologyServiceImpl, WorkerLifecycleServiceImpl},
+    v2_weight::{DatabaseWeightControlHooks, WeightControlServiceImpl},
 };
 use std::{sync::Arc, time::Duration};
 
@@ -50,6 +52,10 @@ pub async fn controller_main() -> EKResult<()> {
                 .fault_detection
                 .heartbeat_timeout_secs,
         ),
+    );
+    let weight_control_service = WeightControlServiceImpl::new(
+        v2_state.clone(),
+        Arc::new(DatabaseWeightControlHooks::new()),
     );
     let topology_service = TopologyServiceImpl::new(v2_state);
 
@@ -83,6 +89,11 @@ pub async fn controller_main() -> EKResult<()> {
             .add_service(StateServiceServer::new(srv))
             .add_service(
                 WorkerLifecycleServiceServer::new(lifecycle_service)
+                    .max_decoding_message_size(1024 * 1024)
+                    .max_encoding_message_size(1024 * 1024),
+            )
+            .add_service(
+                WeightControlServiceServer::new(weight_control_service)
                     .max_decoding_message_size(1024 * 1024)
                     .max_encoding_message_size(1024 * 1024),
             )

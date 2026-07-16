@@ -109,12 +109,6 @@ impl WorkerLifecycleHooks for DatabaseLifecycleHooks {
         config["max_pending_batches"] =
             serde_json::json!(registration.max_pending_batches_per_device);
 
-        if new_start && let Some(node) = existing.as_ref() {
-            writer
-                .delete_experts_by_node(node.id)
-                .await
-                .map_err(internal_status)?;
-        }
         writer
             .node_upsert(NewNode {
                 hostname: registration.worker_id.clone(),
@@ -408,7 +402,7 @@ impl TopologyService for TopologyServiceImpl {
     }
 }
 
-fn state_status(error: ControllerStateError) -> Status {
+pub(super) fn state_status(error: ControllerStateError) -> Status {
     match error {
         ControllerStateError::InvalidRegistration(_)
         | ControllerStateError::InvalidHeartbeatState

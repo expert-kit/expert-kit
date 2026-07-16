@@ -16,12 +16,14 @@ use crate::proto::ek::{
     control::v2::{
         DrainAuthorizationPart, ExpertRoute, ExpertState, ExpertStateKind, RegisterWorkerRequest,
         RegisterWorkerResponse, RouteChange, TargetExpert, TargetExpertListPart, TopologyMessage,
-        TopologySnapshotPart, TopologyUpdatePart, WorkerRoute, WorkerRunState, topology_message,
+        TopologySnapshotPart, TopologyUpdatePart, WeightLoadErrorCode, WeightLoadStage,
+        WorkerRoute, WorkerRunState, topology_message,
     },
     worker::v2::{ActivationDType, ExpertKey as ProtoExpertKey},
 };
 
 pub const MAX_CONTROL_ENTRIES_PER_PART: usize = 64;
+const MAX_WEIGHT_DIAGNOSTIC_BYTES: usize = 1024;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct ExpertKey {
@@ -861,8 +863,21 @@ fn normalize_states(states: Vec<ExpertState>) -> Result<Vec<ExpertState>, Contro
             .ok()
             .filter(|kind| *kind != ExpertStateKind::ExpertStateUnspecified)
             .ok_or(ControllerStateError::InvalidExpertState)?;
-        if kind != ExpertStateKind::ExpertFailed && state.failure.is_some() {
-            return Err(ControllerStateError::InvalidExpertState);
+        match (kind, state.failure.as_ref()) {
+            (ExpertStateKind::ExpertFailed, Some(failure)) => {
+                let stage = WeightLoadStage::try_from(failure.stage).ok();
+                let code = WeightLoadErrorCode::try_from(failure.code).ok();
+                if stage.is_none_or(|stage| stage == WeightLoadStage::Unspecified)
+                    || code.is_none_or(|code| code == WeightLoadErrorCode::Unspecified)
+                    || failure.diagnostic.len() > MAX_WEIGHT_DIAGNOSTIC_BYTES
+                {
+                    return Err(ControllerStateError::InvalidExpertState);
+                }
+            }
+            (ExpertStateKind::ExpertFailed, None) | (_, Some(_)) => {
+                return Err(ControllerStateError::InvalidExpertState);
+            }
+            (_, None) => {}
         }
         normalized.insert(ExpertKey::from_state(&state), state);
     }
@@ -1350,6 +1365,35 @@ mod tests {
                 .await,
             Err(ControllerStateError::PlacementGenerationMismatch { .. })
         ));
+    }
+
+    #[tokio::test]
+    async fn failed_state_requires_structured_bounded_failure_data() {
+        let state = ControllerV2State::new(8);
+        register_live_worker(&state).await;
+        let placement = state
+            .set_targets("worker-0", "start-0", vec![target(1, 2)])
+            .await
+            .unwrap();
+        let failed_without_details = ExpertState {
+            layer_id: 1,
+            expert_id: 2,
+            state: ExpertStateKind::ExpertFailed as i32,
+            failure: None,
+        };
+        assert_eq!(
+            state
+                .apply_state_report(
+                    "worker-0",
+                    "start-0",
+                    placement.generation,
+                    1,
+                    false,
+                    vec![failed_without_details],
+                )
+                .await,
+            Err(ControllerStateError::InvalidExpertState)
+        );
     }
 
     #[tokio::test]
