@@ -88,6 +88,10 @@ class ReceivedWorkerBatch(ABC):
         """Return whether the caller no longer needs a response."""
 
     @abstractmethod
+    def release_input(self) -> None:
+        """Release received Tensor storage after copying it into an active position."""
+
+    @abstractmethod
     async def complete(self, partial_output: torch.Tensor) -> None:
         """Finish communication of one successful Weighted partial output."""
 

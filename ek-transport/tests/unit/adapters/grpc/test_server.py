@@ -229,12 +229,17 @@ def test_server_hands_one_validated_batch_directly_to_execution() -> None:
         assert server.admitted_count(2, 1) == 1
         assert server.admitted_count(2, 3) == 1
 
+        partial_output = received.batch.hidden_states * 2
+        received.release_input()
+        with pytest.raises(RuntimeError, match="already been released"):
+            _ = received.batch
+
         idle = asyncio.create_task(
             server.wait_experts_idle(
                 ((2, 0), (2, 1), (2, 3)), monotonic_deadline=time.monotonic() + 2
             )
         )
-        await received.complete(received.batch.hidden_states * 2)
+        await received.complete(partial_output)
         await submission
         await idle
 
@@ -244,6 +249,43 @@ def test_server_hands_one_validated_batch_directly_to_execution() -> None:
         )
         assert server.active_count == 0
         assert server.admitted_count(2, 0) == 0
+        client.output_buffers.release(output)
+        await close_pair(server, client)
+
+    run(scenario())
+
+
+@pytest.mark.parametrize(
+    ("code", "expected"),
+    [
+        (TransportErrorCode.DEADLINE_EXCEEDED, TransportErrorCode.DEADLINE_EXCEEDED),
+        (TransportErrorCode.UNAVAILABLE, TransportErrorCode.UNAVAILABLE),
+    ],
+)
+def test_server_maps_native_execution_rejection(
+    code: TransportErrorCode,
+    expected: TransportErrorCode,
+) -> None:
+    async def scenario() -> None:
+        server, client = await start_pair()
+        output = prepare_output(client)
+        submission = asyncio.create_task(
+            client.submit(
+                worker_batch(),
+                output,
+                monotonic_deadline=float("inf"),
+            )
+        )
+        received = await server.take()
+
+        await received.reject(
+            TransportError(code, retryable=True, diagnostic="execution did not start")
+        )
+        with pytest.raises(TransportError) as caught:
+            await submission
+
+        assert caught.value.code is expected
+        assert server.active_count == 0
         client.output_buffers.release(output)
         await close_pair(server, client)
 

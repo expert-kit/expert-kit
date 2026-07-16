@@ -40,6 +40,12 @@ from expertkit_transport.contracts import (
 
 _EXECUTE_METHOD_NAME = "Execute"
 _SERVICE_NAME = "ek.worker.v2.ComputationService"
+_NATIVE_ERROR_STATUS = {
+    TransportErrorCode.DEADLINE_EXCEEDED: grpc.StatusCode.DEADLINE_EXCEEDED,
+    TransportErrorCode.CANCELLED: grpc.StatusCode.CANCELLED,
+    TransportErrorCode.UNAVAILABLE: grpc.StatusCode.UNAVAILABLE,
+    TransportErrorCode.PROTOCOL: grpc.StatusCode.INVALID_ARGUMENT,
+}
 
 
 def _identity(payload: bytes) -> bytes:
@@ -52,6 +58,15 @@ class _CallState(StrEnum):
     FINISHED = "finished"
 
 
+class _NativeCallError(RuntimeError):
+    """Carry a standard gRPC status from execution back to the RPC handler."""
+
+    def __init__(self, status: grpc.StatusCode, diagnostic: str) -> None:
+        super().__init__(diagnostic)
+        self.status = status
+        self.diagnostic = diagnostic
+
+
 class _GrpcWorkItem(ReceivedWorkerBatch):
     def __init__(
         self,
@@ -61,7 +76,10 @@ class _GrpcWorkItem(ReceivedWorkerBatch):
         retained_bytes: int,
     ) -> None:
         self._owner = owner
-        self._batch = batch
+        self._batch: WorkerBatch | None = batch
+        self.layer_id = batch.layer_id
+        self.token_count = batch.token_count
+        self.distinct_expert_ids = batch.distinct_expert_ids
         self._deadline = monotonic_deadline
         self.retained_bytes = retained_bytes
         self.state = _CallState.WAITING
@@ -70,6 +88,8 @@ class _GrpcWorkItem(ReceivedWorkerBatch):
 
     @property
     def batch(self) -> WorkerBatch:
+        if self._batch is None:
+            raise RuntimeError("received gRPC input has already been released")
         return self._batch
 
     @property
@@ -79,6 +99,12 @@ class _GrpcWorkItem(ReceivedWorkerBatch):
     @property
     def cancelled(self) -> bool:
         return self._cancelled
+
+    def release_input(self) -> None:
+        """Drop decoded protobuf Tensor views after the active-position copy."""
+
+        self._owner._require_active(self)
+        self._batch = None
 
     async def complete(self, partial_output: torch.Tensor) -> None:
         """Serialize a success unless the caller already discarded the response."""
@@ -357,6 +383,9 @@ class GrpcWorkerServer(WorkerBatchReceiver):
             with suppress(BaseException):
                 await asyncio.shield(cleanup)
             raise
+        except _NativeCallError as error:
+            await context.abort(error.status, error.diagnostic)
+            raise AssertionError("context.abort must terminate the handler") from error
         except Exception as error:
             await context.abort(grpc.StatusCode.INTERNAL, "failed to encode Worker response")
             raise AssertionError("context.abort must terminate the handler") from error
@@ -366,8 +395,8 @@ class GrpcWorkerServer(WorkerBatchReceiver):
             admitted = await self._pending.try_admit(item)
             if not admitted:
                 return False
-            for expert_id in item.batch.distinct_expert_ids:
-                self._admitted_experts[(item.batch.layer_id, expert_id)] += 1
+            for expert_id in item.distinct_expert_ids:
+                self._admitted_experts[(item.layer_id, expert_id)] += 1
             self._state_condition.notify_all()
         return True
 
@@ -393,7 +422,7 @@ class GrpcWorkerServer(WorkerBatchReceiver):
         self._require_active(item)
         try:
             if not item.cancelled:
-                if partial_output.ndim != 2 or partial_output.shape[0] != item.batch.token_count:
+                if partial_output.ndim != 2 or partial_output.shape[0] != item.token_count:
                     raise ValueError("partial output token count does not match the received batch")
                 payload = await self._run_cpu(
                     encode_success_response,
@@ -417,9 +446,15 @@ class GrpcWorkerServer(WorkerBatchReceiver):
         self._require_active(item)
         try:
             if not item.cancelled:
-                payload = await self._run_cpu(encode_error_response, error, self._spec)
-                if not item.cancelled and not item.response.done():
-                    item.response.set_result(payload)
+                status = _NATIVE_ERROR_STATUS.get(error.code)
+                if status is None:
+                    payload = await self._run_cpu(encode_error_response, error, self._spec)
+                    if not item.cancelled and not item.response.done():
+                        item.response.set_result(payload)
+                elif not item.response.done():
+                    item.response.set_exception(
+                        _NativeCallError(status, error.diagnostic or error.code.value)
+                    )
         except BaseException as cause:
             if not item.cancelled and not item.response.done():
                 item.response.set_exception(cause)
@@ -428,6 +463,7 @@ class GrpcWorkerServer(WorkerBatchReceiver):
             await self._finish_active(item)
 
     async def _finish_active(self, item: _GrpcWorkItem) -> None:
+        item._batch = None
         item.state = _CallState.FINISHED
         cleanup = asyncio.create_task(self._release_admitted(item, was_active=True))
         try:
@@ -445,8 +481,8 @@ class GrpcWorkerServer(WorkerBatchReceiver):
         async with self._state_condition:
             if was_active:
                 self._active_count -= 1
-            for expert_id in item.batch.distinct_expert_ids:
-                key = (item.batch.layer_id, expert_id)
+            for expert_id in item.distinct_expert_ids:
+                key = (item.layer_id, expert_id)
                 self._admitted_experts[key] -= 1
                 if self._admitted_experts[key] == 0:
                     del self._admitted_experts[key]
