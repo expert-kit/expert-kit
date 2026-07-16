@@ -30,6 +30,7 @@ dev = [
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 markers = [
+    "cuda: requires an available CUDA device",
     "direct_io: requires a Linux filesystem supporting strict O_DIRECT reads and writes",
 ]
 
