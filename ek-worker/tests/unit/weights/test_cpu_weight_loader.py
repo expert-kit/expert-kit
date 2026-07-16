@@ -112,6 +112,13 @@ class FakeDiskCache(WeightDiskCache):
         self.removed.append(key)
         self.results.pop(key, None)
 
+    async def write(self, key: WeightKey, buffer: AlignedWeightBuffer) -> None:
+        view = buffer.view()
+        try:
+            self.results[key] = bytes(view)
+        finally:
+            view.release()
+
 
 def make_loader(
     transfer: WeightTransfer,

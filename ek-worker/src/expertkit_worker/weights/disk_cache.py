@@ -13,6 +13,7 @@ from expertkit_worker.weights.direct_io import (
     AlignedWeightBuffer,
     expert_file_path,
     read_direct,
+    write_direct_atomic,
 )
 from expertkit_worker.weights.dram_cache import WeightKey
 
@@ -27,6 +28,10 @@ class WeightDiskCache(ABC):
     @abstractmethod
     async def remove(self, key: WeightKey) -> None:
         """Remove one invalid local file if it still exists."""
+
+    @abstractmethod
+    async def write(self, key: WeightKey, buffer: AlignedWeightBuffer) -> None:
+        """Durably publish one validated SafeTensors buffer."""
 
 
 class DirectIOWeightDiskCache(WeightDiskCache):
@@ -68,6 +73,11 @@ class DirectIOWeightDiskCache(WeightDiskCache):
         """Remove one corrupt cache file without blocking the event loop."""
 
         await self._run_blocking(self.path(key).unlink, missing_ok=True)
+
+    async def write(self, key: WeightKey, buffer: AlignedWeightBuffer) -> None:
+        """Atomically write one validated file through strict direct I/O."""
+
+        await self._run_blocking(write_direct_atomic, self.path(key), buffer)
 
     def path(self, key: WeightKey) -> Path:
         """Return the deterministic file path for one expert."""

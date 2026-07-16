@@ -26,6 +26,7 @@ from expertkit_worker.weights.ready import (
     ReadyWeightTable,
     WeightsNotReady,
 )
+from expertkit_worker.weights.writeback import DiskWriteback
 
 __all__ = [
     "MAX_SAFETENSORS_HEADER_BYTES",
@@ -33,6 +34,7 @@ __all__ = [
     "CpuWeightLease",
     "CpuWeightLoader",
     "DirectIOWeightDiskCache",
+    "DiskWriteback",
     "ReadyWeightLease",
     "ReadyWeightTable",
     "SafeTensorDType",
