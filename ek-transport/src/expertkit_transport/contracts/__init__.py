@@ -7,6 +7,11 @@ from expertkit_transport.contracts.buffers import (
     PreparedOutput,
 )
 from expertkit_transport.contracts.errors import TransportError, TransportErrorCode
+from expertkit_transport.contracts.receiver import (
+    ReceivedWorkerBatch,
+    ReceiverClosed,
+    WorkerBatchReceiver,
+)
 from expertkit_transport.contracts.transport import WorkerTransport
 
 __all__ = [
@@ -14,9 +19,12 @@ __all__ = [
     "OutputBufferProvider",
     "OutputSpec",
     "PreparedOutput",
+    "ReceivedWorkerBatch",
+    "ReceiverClosed",
     "RoutedLayerBatch",
     "TransportError",
     "TransportErrorCode",
     "WorkerBatch",
+    "WorkerBatchReceiver",
     "WorkerTransport",
 ]
