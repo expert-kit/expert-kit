@@ -143,6 +143,7 @@ class FakeReceiver(WorkerBatchReceiver):
         self.begun: list[tuple[tuple[tuple[int, int], ...], int, bool]] = []
         self.expert_idle: list[tuple[tuple[int, int], ...]] = []
         self.all_idle = 0
+        self.all_idle_deadline: float | None = None
         self.wait_error: Exception | None = None
 
     async def take(self) -> ReceivedWorkerBatch:
@@ -179,6 +180,7 @@ class FakeReceiver(WorkerBatchReceiver):
         if self.wait_error is not None:
             raise self.wait_error
         self.all_idle += 1
+        self.all_idle_deadline = monotonic_deadline
 
     async def close(self) -> None:
         return None
@@ -383,6 +385,7 @@ def test_whole_worker_drain_waits_for_every_admitted_batch() -> None:
             manager=manager,
             reporter=reporter,
             receiver=receiver,
+            clock=lambda: 10.0,
         )
         rpc = DrainRpc(stop_all=True)
 
@@ -390,9 +393,12 @@ def test_whole_worker_drain_waits_for_every_admitted_batch() -> None:
         assert await session.begin_shutdown() is False
         await session.run_once(rpc)
         await session.wait_shutdown_drained()
+        await session.wait_shutdown_completion_sent()
 
         assert manager.shutting_down is True
         assert receiver.all_idle == 1
+        assert receiver.all_idle_deadline == 40.0
+        assert session.shutdown_deadline == 40.0
         assert receiver.expert_idle == []
         assert rpc.sent[-1].drain_complete.drain_id == 12
         await session.close()

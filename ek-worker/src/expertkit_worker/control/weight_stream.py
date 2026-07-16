@@ -120,6 +120,8 @@ class WeightControlSession:
         self._drain_failed = asyncio.Event()
         self._drain_error: Exception | None = None
         self._shutdown_drained = asyncio.Event()
+        self._shutdown_completion_sent = asyncio.Event()
+        self._shutdown_deadline: float | None = None
         self._closed = False
 
     async def run_once(self, rpc: _WeightControlRpc) -> None:
@@ -177,9 +179,22 @@ class WeightControlSession:
 
         await self._shutdown_drained.wait()
 
+    @property
+    def shutdown_deadline(self) -> float | None:
+        """Return the fixed overall shutdown deadline after shutdown begins."""
+
+        return self._shutdown_deadline
+
+    async def wait_shutdown_completion_sent(self) -> None:
+        """Wait until whole-Worker drain completion enters the outgoing stream."""
+
+        await self._shutdown_completion_sent.wait()
+
     async def begin_shutdown(self) -> bool:
         """Stop weight loading while keeping current ready experts available."""
 
+        if self._shutdown_deadline is None:
+            self._shutdown_deadline = self._clock() + self._shutdown_grace_secs
         return await self._manager.begin_shutdown()
 
     async def close(self) -> None:
@@ -226,6 +241,10 @@ class WeightControlSession:
             group = await run.outbound.get()
             await self._clear_ready_expert_drains(group)
             for message in group:
+                if message.WhichOneof("message") == "drain_complete":
+                    authorization = self._completed_drains.get(message.drain_complete.drain_id)
+                    if authorization is not None and authorization.stop_accepting_all_computation:
+                        self._shutdown_completion_sent.set()
                 yield message
 
     async def _apply_targets(
@@ -374,7 +393,10 @@ class WeightControlSession:
                 stop_all=authorization.stop_accepting_all_computation,
             )
             if authorization.stop_accepting_all_computation:
-                deadline = self._clock() + self._shutdown_grace_secs
+                deadline = self._shutdown_deadline
+                if deadline is None:
+                    deadline = self._clock() + self._shutdown_grace_secs
+                    self._shutdown_deadline = deadline
                 await self._receiver.wait_all_idle(monotonic_deadline=deadline)
             else:
                 await self._receiver.wait_experts_idle(
