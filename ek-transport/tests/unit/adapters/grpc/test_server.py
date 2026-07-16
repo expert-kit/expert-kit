@@ -20,6 +20,7 @@ from expertkit_transport.contracts import (
     TransportError,
     TransportErrorCode,
     WorkerBatch,
+    WorkerPositionSpec,
 )
 
 
@@ -84,6 +85,124 @@ async def close_pair(server: GrpcWorkerServer, client: GrpcWorkerTransport) -> N
 
 def run(coroutine: Awaitable[None]) -> None:
     asyncio.run(coroutine)
+
+
+def test_server_allocates_direct_cpu_position_buffers() -> None:
+    server = GrpcWorkerServer(
+        "127.0.0.1:0",
+        batch_spec(),
+        max_active_batches=1,
+        max_pending_batches=1,
+    )
+    buffers = server.allocate_position_buffers(
+        WorkerPositionSpec(
+            max_batch_tokens=4,
+            hidden_dim=3,
+            top_k=2,
+            dtype=torch.float16,
+            device="cpu",
+        )
+    )
+    batch = worker_batch()
+    compact = WorkerBatch(
+        instance_id=batch.instance_id,
+        layer_id=batch.layer_id,
+        topology_version=batch.topology_version,
+        hidden_states=batch.hidden_states[batch.token_indices],
+        token_indices=None,
+        expert_ids=batch.expert_ids,
+        routing_weights=batch.routing_weights,
+        distinct_expert_ids=batch.distinct_expert_ids,
+    )
+    hidden = torch.empty((2, 3), dtype=torch.float16)
+    expert_ids = torch.empty((2, 2), dtype=torch.int32)
+    routing_weights = torch.empty((2, 2), dtype=torch.float32)
+
+    buffers.copy_input(compact, hidden, expert_ids, routing_weights)
+    torch.testing.assert_close(hidden, compact.hidden_states)
+    torch.testing.assert_close(expert_ids, compact.expert_ids)
+    torch.testing.assert_close(routing_weights, compact.routing_weights)
+    output = torch.full((2, 3), 7, dtype=torch.float16)
+    assert buffers.copy_output(output) is output
+    assert buffers.host_staging_bytes == 0
+
+    buffers.close()
+    with pytest.raises(RuntimeError, match="closed"):
+        buffers.copy_output(output)
+    run(server.close())
+
+
+def test_server_rejects_position_shape_mismatch() -> None:
+    server = GrpcWorkerServer(
+        "127.0.0.1:0",
+        batch_spec(),
+        max_active_batches=1,
+        max_pending_batches=1,
+    )
+
+    with pytest.raises(ValueError, match="does not match"):
+        server.allocate_position_buffers(
+            WorkerPositionSpec(
+                max_batch_tokens=5,
+                hidden_dim=3,
+                top_k=2,
+                dtype=torch.float16,
+                device="cpu",
+            )
+        )
+    run(server.close())
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_server_reuses_pinned_cuda_position_staging() -> None:
+    server = GrpcWorkerServer(
+        "127.0.0.1:0",
+        batch_spec(),
+        max_active_batches=1,
+        max_pending_batches=1,
+    )
+    buffers = server.allocate_position_buffers(
+        WorkerPositionSpec(
+            max_batch_tokens=4,
+            hidden_dim=3,
+            top_k=2,
+            dtype=torch.float16,
+            device="cuda:0",
+        )
+    )
+    batch = worker_batch()
+    compact = WorkerBatch(
+        instance_id=batch.instance_id,
+        layer_id=batch.layer_id,
+        topology_version=batch.topology_version,
+        hidden_states=batch.hidden_states[batch.token_indices],
+        token_indices=None,
+        expert_ids=batch.expert_ids,
+        routing_weights=batch.routing_weights,
+        distinct_expert_ids=batch.distinct_expert_ids,
+    )
+    hidden = torch.empty((2, 3), dtype=torch.float16, device="cuda:0")
+    expert_ids = torch.empty((2, 2), dtype=torch.int32, device="cuda:0")
+    routing_weights = torch.empty((2, 2), dtype=torch.float32, device="cuda:0")
+    output = torch.full((2, 3), 5, dtype=torch.float16, device="cuda:0")
+
+    stream = torch.cuda.Stream(device="cuda:0")
+    with torch.cuda.stream(stream):
+        buffers.copy_input(compact, hidden, expert_ids, routing_weights)
+        host_output = buffers.copy_output(output)
+        output_pointer = host_output.data_ptr()
+    stream.synchronize()
+    torch.testing.assert_close(hidden.cpu(), compact.hidden_states)
+    torch.testing.assert_close(host_output, torch.full((2, 3), 5, dtype=torch.float16))
+
+    with torch.cuda.stream(stream):
+        second_output = buffers.copy_output(output + 1)
+    stream.synchronize()
+    assert second_output.data_ptr() == output_pointer
+    assert host_output.is_pinned()
+    assert buffers.host_staging_bytes == 112
+    buffers.close()
+    run(server.close())
 
 
 def test_server_hands_one_validated_batch_directly_to_execution() -> None:

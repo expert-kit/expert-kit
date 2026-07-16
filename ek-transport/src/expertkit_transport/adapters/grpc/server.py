@@ -26,6 +26,7 @@ from expertkit_transport.adapters.grpc.spec import (
     GrpcBatchSpec,
     calculate_message_limits,
 )
+from expertkit_transport.adapters.grpc.worker_buffers import GrpcWorkerPositionBuffers
 from expertkit_transport.contracts import (
     ReceivedWorkerBatch,
     ReceiverClosed,
@@ -33,6 +34,8 @@ from expertkit_transport.contracts import (
     TransportErrorCode,
     WorkerBatch,
     WorkerBatchReceiver,
+    WorkerPositionBuffers,
+    WorkerPositionSpec,
 )
 
 _EXECUTE_METHOD_NAME = "Execute"
@@ -272,6 +275,20 @@ class GrpcWorkerServer(WorkerBatchReceiver):
             self._active_count += 1
             self._state_condition.notify_all()
         return item
+
+    def allocate_position_buffers(self, spec: WorkerPositionSpec) -> WorkerPositionBuffers:
+        """Allocate fixed gRPC staging for one Worker active position."""
+
+        expected = (
+            self._spec.max_batch_tokens,
+            self._spec.hidden_dim,
+            self._spec.top_k,
+            self._spec.dtype,
+        )
+        actual = (spec.max_batch_tokens, spec.hidden_dim, spec.top_k, spec.dtype)
+        if actual != expected:
+            raise ValueError("Worker position shape does not match the gRPC endpoint")
+        return GrpcWorkerPositionBuffers(spec)
 
     async def close(self) -> None:
         """Stop RPC admission and release waiting calls and CPU workers."""

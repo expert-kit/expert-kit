@@ -11,6 +11,8 @@ from expertkit_transport.contracts.receiver import (
     ReceivedWorkerBatch,
     ReceiverClosed,
     WorkerBatchReceiver,
+    WorkerPositionBuffers,
+    WorkerPositionSpec,
 )
 from expertkit_transport.contracts.transport import WorkerTransport
 
@@ -26,5 +28,7 @@ __all__ = [
     "TransportErrorCode",
     "WorkerBatch",
     "WorkerBatchReceiver",
+    "WorkerPositionBuffers",
+    "WorkerPositionSpec",
     "WorkerTransport",
 ]
