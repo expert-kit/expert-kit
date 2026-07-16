@@ -100,6 +100,7 @@ message WorkerRoute {
   string device = 4;
   uint32 max_active_batches = 5;
   uint32 max_pending_batches = 6;
+  uint32 max_batch_tokens = 7;
 }
 
 // RouteChange replaces the complete replica list; an empty list removes the route.

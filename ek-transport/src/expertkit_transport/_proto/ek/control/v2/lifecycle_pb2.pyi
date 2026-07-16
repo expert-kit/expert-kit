@@ -133,20 +133,22 @@ class ExpertRoute(_message.Message):
     def __init__(self, layer_id: _Optional[int] = ..., expert_id: _Optional[int] = ..., replicas: _Optional[_Iterable[_Union[WorkerRoute, _Mapping]]] = ...) -> None: ...
 
 class WorkerRoute(_message.Message):
-    __slots__ = ("worker_id", "start_id", "computation_endpoint", "device", "max_active_batches", "max_pending_batches")
+    __slots__ = ("worker_id", "start_id", "computation_endpoint", "device", "max_active_batches", "max_pending_batches", "max_batch_tokens")
     WORKER_ID_FIELD_NUMBER: _ClassVar[int]
     START_ID_FIELD_NUMBER: _ClassVar[int]
     COMPUTATION_ENDPOINT_FIELD_NUMBER: _ClassVar[int]
     DEVICE_FIELD_NUMBER: _ClassVar[int]
     MAX_ACTIVE_BATCHES_FIELD_NUMBER: _ClassVar[int]
     MAX_PENDING_BATCHES_FIELD_NUMBER: _ClassVar[int]
+    MAX_BATCH_TOKENS_FIELD_NUMBER: _ClassVar[int]
     worker_id: str
     start_id: str
     computation_endpoint: str
     device: str
     max_active_batches: int
     max_pending_batches: int
-    def __init__(self, worker_id: _Optional[str] = ..., start_id: _Optional[str] = ..., computation_endpoint: _Optional[str] = ..., device: _Optional[str] = ..., max_active_batches: _Optional[int] = ..., max_pending_batches: _Optional[int] = ...) -> None: ...
+    max_batch_tokens: int
+    def __init__(self, worker_id: _Optional[str] = ..., start_id: _Optional[str] = ..., computation_endpoint: _Optional[str] = ..., device: _Optional[str] = ..., max_active_batches: _Optional[int] = ..., max_pending_batches: _Optional[int] = ..., max_batch_tokens: _Optional[int] = ...) -> None: ...
 
 class RouteChange(_message.Message):
     __slots__ = ("layer_id", "expert_id", "replicas")

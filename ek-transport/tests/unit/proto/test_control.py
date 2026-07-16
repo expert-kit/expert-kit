@@ -70,6 +70,7 @@ def test_topology_message_keeps_snapshot_and_update_exclusive() -> None:
                             device="cuda:0",
                             max_active_batches=1,
                             max_pending_batches=1,
+                            max_batch_tokens=4096,
                         )
                     ],
                 )
@@ -91,6 +92,20 @@ def test_topology_message_keeps_snapshot_and_update_exclusive() -> None:
 
     assert message.WhichOneof("message") == "update"
     assert len(message.update.changes[0].replicas) == 0
+
+
+def test_worker_route_publishes_all_dispatch_limits() -> None:
+    fields = lifecycle_pb2.WorkerRoute.DESCRIPTOR.fields_by_name
+
+    assert {name: field.number for name, field in fields.items()} == {
+        "worker_id": 1,
+        "start_id": 2,
+        "computation_endpoint": 3,
+        "device": 4,
+        "max_active_batches": 5,
+        "max_pending_batches": 6,
+        "max_batch_tokens": 7,
+    }
 
 
 def test_weight_stream_envelopes_round_trip() -> None:
