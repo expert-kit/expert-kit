@@ -55,6 +55,17 @@ class AlignedWeightBuffer:
 
         return self._require_mapping_view()
 
+    def trim(self, logical_size: int) -> None:
+        """Reduce the logical length after a bounded streaming download."""
+
+        if (
+            isinstance(logical_size, bool)
+            or not isinstance(logical_size, int)
+            or not 0 < logical_size <= self.logical_size
+        ):
+            raise ValueError("trimmed logical_size must be positive and within the buffer")
+        self.logical_size = logical_size
+
     def close(self) -> None:
         """Release the anonymous mapping after all derived views are gone."""
 

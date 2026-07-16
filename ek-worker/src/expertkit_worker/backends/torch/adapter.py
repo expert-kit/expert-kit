@@ -105,6 +105,12 @@ class TorchWeightAdapter(WeightAdapter[TorchExpertWeights, TorchExpertWeights]):
 
         return 0
 
+    def source_tensor_bytes(self) -> int:
+        """Return the exact encoded bytes of the three source projection Tensors."""
+
+        elements = 3 * self._hidden_dim * self._intermediate_dim
+        return elements * torch.empty((), dtype=self._source_dtype).element_size()
+
     def ready_weight_bytes(self) -> int:
         """Return the exact logical size of the three final projection Tensors."""
 

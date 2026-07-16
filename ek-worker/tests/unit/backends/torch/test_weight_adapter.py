@@ -60,6 +60,7 @@ def test_torch_adapter_builds_zero_copy_cpu_views(dtype: torch.dtype) -> None:
     ready = adapter.make_ready_weight(cpu_weight)
     assert ready.gate_proj.data_ptr() == cpu_weight.gate_proj.data_ptr()
     assert adapter.cpu_extra_bytes() == 0
+    assert adapter.source_tensor_bytes() == 3 * _HIDDEN_DIM * _INTERMEDIATE_DIM * dtype.itemsize
     assert adapter.conversion_temporary_bytes() == 0
 
 

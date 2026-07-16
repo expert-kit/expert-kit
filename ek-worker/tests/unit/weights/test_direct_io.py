@@ -83,6 +83,25 @@ def test_aligned_buffer_does_not_close_while_a_view_is_alive() -> None:
         buffer.view()
 
 
+def test_aligned_buffer_trims_only_within_its_current_logical_length() -> None:
+    buffer = make_buffer(b"weight-data")
+    try:
+        buffer.trim(6)
+        assert buffer.logical_size == 6
+        view = buffer.view()
+        try:
+            assert bytes(view) == b"weight"
+        finally:
+            view.release()
+
+        with pytest.raises(ValueError, match="within the buffer"):
+            buffer.trim(7)
+        with pytest.raises(ValueError, match="within the buffer"):
+            buffer.trim(0)
+    finally:
+        buffer.close()
+
+
 def test_cleanup_removes_only_weight_temporary_files(tmp_path: Path) -> None:
     nested = tmp_path / "model"
     nested.mkdir()

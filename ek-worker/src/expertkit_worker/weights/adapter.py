@@ -28,6 +28,10 @@ class WeightAdapter[CpuWeightT, ReadyWeightT](ABC):
         """Return bytes allocated beyond the retained SafeTensors buffer."""
 
     @abstractmethod
+    def source_tensor_bytes(self) -> int:
+        """Return the exact encoded bytes for one expert's Tensor data."""
+
+    @abstractmethod
     def ready_weight_bytes(self) -> int:
         """Return final device bytes for one equal-shaped expert."""
 
