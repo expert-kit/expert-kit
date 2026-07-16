@@ -38,6 +38,23 @@ class ActivationDType(StrEnum):
     FP32 = "fp32"
 
 
+class LogLevel(StrEnum):
+    """Supported process log thresholds."""
+
+    DEBUG = "DEBUG"
+    INFO = "INFO"
+    WARNING = "WARNING"
+    ERROR = "ERROR"
+    CRITICAL = "CRITICAL"
+
+
+class LogFormat(StrEnum):
+    """Supported process log renderers."""
+
+    JSON = "json"
+    CONSOLE = "console"
+
+
 def _validate_network_address(value: str) -> str:
     if "://" in value:
         raise ValueError("network address must use host:port without a URL scheme")
@@ -226,6 +243,13 @@ class ObservabilityConfig(_StrictModel):
     tracing: TracingConfig = Field(default_factory=TracingConfig)
 
 
+class LoggingConfig(_StrictModel):
+    """Process-wide structured logging settings."""
+
+    level: LogLevel = LogLevel.INFO
+    format: LogFormat = LogFormat.JSON
+
+
 class GgmlConfig(_StrictModel):
     """Experimental CPU-only GGML backend settings."""
 
@@ -240,6 +264,7 @@ class WorkerConfig(_StrictModel):
     transport: TransportConfig
     controller: ControllerConfig
     weight_manager: WeightManagerConfig
+    logging: LoggingConfig = Field(default_factory=LoggingConfig)
     observability: ObservabilityConfig = Field(default_factory=ObservabilityConfig)
     ggml: GgmlConfig | None = None
 
