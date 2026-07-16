@@ -7,6 +7,7 @@ pub mod registry;
 pub mod routing_broadcaster;
 pub mod scheduler;
 pub mod service;
+pub mod v2_state;
 
 use crate::{
     metrics,
