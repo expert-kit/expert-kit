@@ -8,10 +8,15 @@ version = "0.1.0"
 description = "Expert Kit Python Worker"
 requires-python = ">=3.12"
 dependencies = [
+    "expertkit-transport",
     "pydantic>=2.11,<3",
     "PyYAML>=6,<7",
     "structlog>=25.4,<26",
+    "torch==2.11.0",
 ]
+
+[tool.uv.sources]
+expertkit-transport = { path = "../ek-transport", editable = true }
 
 [dependency-groups]
 dev = [
