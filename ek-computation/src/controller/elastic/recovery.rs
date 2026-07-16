@@ -7,7 +7,7 @@ use crate::{
     controller::{
         dispatcher::DISPATCHER,
         elastic::frequency::get_freq_tracker,
-        scheduler::{expert_size_mb, remaining_capacity_mb},
+        scheduler::remaining_expert_capacity,
     },
     state::{
         io::{StateReader, StateReaderImpl},
@@ -150,12 +150,10 @@ pub async fn recover_unique_experts(dead_hostname: &str) {
     // ── 5. Capacity-aware assignment: best-fit across target nodes ──────
     //
     // Build a capacity map and greedily assign each expert to the node with
-    // the most remaining headroom.  This respects `mem_capacity_mb` — experts
-    // that don't fit anywhere are left unplaced (better than OOM).
-    let per_expert = expert_size_mb();
+    // the most remaining reported expert slots.
     let mut capacity: Vec<(&_, u64)> = Vec::new();
     for n in &target_nodes {
-        let rem = remaining_capacity_mb(n, &reader).await;
+        let rem = remaining_expert_capacity(n, &reader).await;
         capacity.push((n, rem));
     }
 
@@ -167,7 +165,7 @@ pub async fn recover_unique_experts(dead_hostname: &str) {
         capacity.sort_by(|a, b| b.1.cmp(&a.1));
 
         if let Some((target, rem)) = capacity.first_mut() {
-            if *rem >= per_expert {
+            if *rem > 0 {
                 assignments
                     .entry(target.hostname.clone())
                     .or_default()
@@ -178,7 +176,7 @@ pub async fn recover_unique_experts(dead_hostname: &str) {
                         replica: 0,
                         state: serde_json::Value::Null,
                     });
-                *rem -= per_expert;
+                *rem -= 1;
             } else {
                 unplaced.push(expert_id.clone());
             }

@@ -141,23 +141,22 @@ pub async fn progressive_assign(new_hostname: &str) {
         return;
     }
 
-    // expert_size_mb = 3 weight matrices (up/gate/down), BF16 = 2 bytes
-    let expert_size_mb = (3usize * vital.hidden_dim * vital.inter_dim * 2) / (1024 * 1024);
-    let mem_capacity_mb = node
+    let max_experts = node
         .config
-        .get("mem_capacity_mb")
+        .get("max_experts")
         .and_then(|v| v.as_u64())
-        .unwrap_or(4096) as usize;
-
-    let target_per_layer = if expert_size_mb == 0 || n_layers == 0 {
-        vital.routed_experts
-    } else {
-        let capacity_limit = mem_capacity_mb / (expert_size_mb * n_layers);
-        vital.routed_experts.min(capacity_limit).max(1)
-    };
+        .unwrap_or(0) as usize;
+    let target_per_layer = target_per_layer(max_experts, n_layers, vital.routed_experts);
+    if target_per_layer == 0 {
+        log::error!(
+            "progressive_assign: {new_hostname} reports {max_experts} expert slots, \
+             which cannot cover one expert across {n_layers} layers"
+        );
+        return;
+    }
 
     log::info!(
-        "progressive_assign: {new_hostname} mem={mem_capacity_mb}MB, expert_size={expert_size_mb}MB, \
+        "progressive_assign: {new_hostname} capacity={max_experts} experts, \
          target={target_per_layer}/{} experts/layer across {n_layers} layers",
         vital.routed_experts
     );
@@ -388,6 +387,13 @@ fn frequency_sorted_indices(
     scores.into_iter().map(|(idx, _)| idx).collect()
 }
 
+fn target_per_layer(max_experts: usize, layer_count: usize, routed_experts: usize) -> usize {
+    if layer_count == 0 {
+        return 0;
+    }
+    routed_experts.min(max_experts / layer_count)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -406,5 +412,12 @@ mod tests {
         let vital = make_vital((0, 4), 8);
         let result = frequency_sorted_indices("test_model", 8, &vital);
         assert_eq!(result, vec![0, 1, 2, 3, 4, 5, 6, 7]);
+    }
+
+    #[test]
+    fn reported_capacity_is_shared_across_layers() {
+        assert_eq!(target_per_layer(40, 4, 16), 10);
+        assert_eq!(target_per_layer(100, 4, 16), 16);
+        assert_eq!(target_per_layer(3, 4, 16), 0);
     }
 }

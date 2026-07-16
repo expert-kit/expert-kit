@@ -7,30 +7,30 @@ use crate::{
         models::Node,
     },
 };
-use ek_base::{config::get_ek_settings, error::{EKError, EKResult}};
+use ek_base::error::{EKError, EKResult};
 
 use super::load_tracker::LoadTracker;
 
-/// Estimated size of one expert in MB (3 BF16 weight matrices: up/gate/down).
-pub fn expert_size_mb() -> u64 {
-    let s = get_ek_settings();
-    let bytes = 3usize * s.inference.hidden_dim * s.inference.intermediate_dim * 2;
-    (bytes / (1024 * 1024)).max(1) as u64
+/// Return the capacity derived and reported by the Python Worker.
+pub fn max_experts(node: &Node) -> u64 {
+    node.config
+        .get("max_experts")
+        .and_then(|value| value.as_u64())
+        .unwrap_or(0)
 }
 
-/// Remaining memory capacity for a node: total - (assigned_experts × expert_size_mb).
-pub async fn remaining_capacity_mb(node: &Node, reader: &StateReaderImpl) -> u64 {
-    let total = node
-        .config
-        .get("mem_capacity_mb")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(4096);
+/// Return unassigned expert slots, including loading assignments as occupied.
+pub async fn remaining_expert_capacity(node: &Node, reader: &StateReaderImpl) -> u64 {
     let assigned = reader
         .experts_by_node(node.id)
         .await
         .map(|e| e.len() as u64)
         .unwrap_or(0);
-    total.saturating_sub(assigned * expert_size_mb())
+    remaining_slots(max_experts(node), assigned)
+}
+
+fn remaining_slots(maximum: u64, assigned: u64) -> u64 {
+    maximum.saturating_sub(assigned)
 }
 
 /// Select the best available worker to host a new replica of `expert_id`.
@@ -52,9 +52,15 @@ pub async fn select_worker_for_new_replica(
     // All nodes with a recent heartbeat, filtered by exclusions
     let mut candidates: Vec<Node> = Vec::new();
     for n in reader.active_nodes().await? {
-        if n.hostname == exclude_hostname { continue; }
-        if existing_hostnames.contains(n.hostname.as_str()) { continue; }
-        if progressive::is_progressive_loading(&n.hostname).await { continue; }
+        if n.hostname == exclude_hostname {
+            continue;
+        }
+        if existing_hostnames.contains(n.hostname.as_str()) {
+            continue;
+        }
+        if progressive::is_progressive_loading(&n.hostname).await {
+            continue;
+        }
         candidates.push(n);
     }
 
@@ -67,12 +73,30 @@ pub async fn select_worker_for_new_replica(
     // Prefer the node with the most remaining capacity
     let mut with_remaining: Vec<(Node, u64)> = Vec::new();
     for n in candidates {
-        let rem = remaining_capacity_mb(&n, &reader).await;
-        with_remaining.push((n, rem));
+        let remaining = remaining_expert_capacity(&n, &reader).await;
+        if remaining > 0 {
+            with_remaining.push((n, remaining));
+        }
     }
     with_remaining.sort_by(|a, b| b.1.cmp(&a.1));
 
-    Ok(with_remaining.into_iter().next().map(|(n, _)| n).unwrap())
+    with_remaining
+        .into_iter()
+        .next()
+        .map(|(node, _remaining)| node)
+        .ok_or_else(|| EKError::NotFound(format!("no worker has capacity for expert {expert_id}")))
+}
+
+#[cfg(test)]
+mod capacity_tests {
+    use super::remaining_slots;
+
+    #[test]
+    fn assigned_experts_consume_one_reported_slot_each() {
+        assert_eq!(remaining_slots(10, 3), 7);
+        assert_eq!(remaining_slots(10, 10), 0);
+        assert_eq!(remaining_slots(10, 11), 0);
+    }
 }
 
 /// WorkerScheduler selects the best worker for each expert based on device tier and load

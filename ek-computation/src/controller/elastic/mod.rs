@@ -13,7 +13,7 @@ use crate::{
     controller::{
         dispatcher::DISPATCHER,
         routing_broadcaster::get_broadcaster,
-        scheduler::{expert_size_mb, remaining_capacity_mb, select_worker_for_new_replica},
+        scheduler::{remaining_expert_capacity, select_worker_for_new_replica},
     },
     state::{
         io::{StateReader, StateReaderImpl},
@@ -133,12 +133,11 @@ impl ElasticManager {
             };
 
             // Refuse to assign if the best candidate has no room left
-            let per_expert = expert_size_mb();
-            let remaining = remaining_capacity_mb(&target, &reader).await;
-            if remaining < per_expert {
+            let remaining = remaining_expert_capacity(&target, &reader).await;
+            if remaining == 0 {
                 log::warn!(
                     "ElasticManager: skipping replication of {expert_id} → {} \
-                     — insufficient capacity ({remaining} MB remaining, {per_expert} MB needed)",
+                     — no reported expert slots remain",
                     target.hostname
                 );
                 break;
