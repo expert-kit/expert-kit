@@ -22,6 +22,7 @@ expertkit-transport = { path = "../ek-transport", editable = true }
 dev = [
     "pytest>=8.3,<9",
     "ruff>=0.11,<1",
+    "safetensors>=0.5.3,<1",
 ]
 
 [tool.pytest.ini_options]
