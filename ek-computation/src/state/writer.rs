@@ -265,6 +265,7 @@ impl StateWriterImpl {
             .do_update()
             .set((
                 schema::node::hostname.eq(excluded(schema::node::hostname)),
+                schema::node::device.eq(excluded(schema::node::device)),
                 schema::node::config.eq(excluded(schema::node::config)),
             ))
             .returning(models::Node::as_returning())

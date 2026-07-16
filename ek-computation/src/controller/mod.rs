@@ -11,15 +11,24 @@ pub mod v2_state;
 
 use crate::{
     metrics,
-    proto::ek::control::v1::{
-        plan_service_server::PlanServiceServer, routing_service_server::RoutingServiceServer,
+    proto::ek::control::{
+        v1::{
+            plan_service_server::PlanServiceServer, routing_service_server::RoutingServiceServer,
+        },
+        v2::{
+            topology_service_server::TopologyServiceServer,
+            worker_lifecycle_service_server::WorkerLifecycleServiceServer,
+        },
     },
     state::io::StateReaderImpl,
 };
 use ek_base::error::EKResult;
 use metrics::spawn_metrics_server;
-use service::control::PlanServiceImpl;
-use std::sync::Arc;
+use service::{
+    control::PlanServiceImpl,
+    v2::{DatabaseLifecycleHooks, TopologyServiceImpl, WorkerLifecycleServiceImpl},
+};
+use std::{sync::Arc, time::Duration};
 
 use super::{
     controller::{self, poller::start_poll},
@@ -31,6 +40,18 @@ use super::{
 
 pub async fn controller_main() -> EKResult<()> {
     let settings = ek_base::config::get_ek_settings();
+    let v2_state = v2_state::ControllerV2State::new(256);
+    let lifecycle_service = WorkerLifecycleServiceImpl::new(
+        v2_state.clone(),
+        Arc::new(DatabaseLifecycleHooks::new()),
+        Duration::from_secs(
+            settings
+                .controller
+                .fault_detection
+                .heartbeat_timeout_secs,
+        ),
+    );
+    let topology_service = TopologyServiceImpl::new(v2_state);
 
     spawn_metrics_server("0.0.0.0:9080");
 
@@ -60,6 +81,11 @@ pub async fn controller_main() -> EKResult<()> {
         log::info!("state server listening on {intra_addr}");
         let err = tonic::transport::Server::builder()
             .add_service(StateServiceServer::new(srv))
+            .add_service(
+                WorkerLifecycleServiceServer::new(lifecycle_service)
+                    .max_decoding_message_size(1024 * 1024)
+                    .max_encoding_message_size(1024 * 1024),
+            )
             .add_service(RoutingServiceServer::new(routing_srv))
             .serve(intra_addr)
             .await;
@@ -93,6 +119,11 @@ pub async fn controller_main() -> EKResult<()> {
                     .max_encoding_message_size(1024 * 1024 * 1024),
             )
             .add_service(PlanServiceServer::new(plan_srv))
+            .add_service(
+                TopologyServiceServer::new(topology_service)
+                    .max_decoding_message_size(1024 * 1024)
+                    .max_encoding_message_size(1024 * 1024),
+            )
             .add_service(RoutingServiceServer::new(routing_srv))
             .serve(inter_addr)
             .await;
