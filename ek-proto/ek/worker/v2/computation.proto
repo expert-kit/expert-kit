@@ -1,0 +1,55 @@
+syntax = "proto3";
+
+package ek.worker.v2;
+
+import "ek/worker/v2/common.proto";
+
+// ComputationService executes one physical Worker batch per unary call.
+service ComputationService {
+  rpc Execute(ExecuteRequest) returns (ExecuteResponse);
+}
+
+// ExecuteRequest carries one fixed-top-k Worker batch as little-endian raw tensors.
+message ExecuteRequest {
+  uint64 instance_id = 1;
+  uint32 layer_id = 2;
+  uint64 topology_version = 3;
+
+  uint32 token_count = 4;
+  uint32 hidden_dim = 5;
+  uint32 top_k = 6;
+  ActivationDType dtype = 7;
+
+  bytes hidden_states = 8;     // [token_count, hidden_dim], activation dtype.
+  bytes expert_ids = 9;        // [token_count, top_k], signed little-endian int32.
+  bytes routing_weights = 10;  // [token_count, top_k], little-endian FP32.
+}
+
+// ComputeErrorCode is stable Transport-independent recovery information.
+enum ComputeErrorCode {
+  COMPUTE_ERROR_CODE_UNSPECIFIED = 0;
+  COMPUTE_ERROR_BUSY = 1;
+  COMPUTE_ERROR_DRAINING = 2;
+  COMPUTE_ERROR_STALE_TOPOLOGY = 3;
+  COMPUTE_ERROR_EXPERT_NOT_READY = 4;
+  COMPUTE_ERROR_INVALID_REQUEST = 5;
+  COMPUTE_ERROR_UNSUPPORTED = 6;
+}
+
+// ComputeError describes a decoded request that the Worker cannot execute.
+message ComputeError {
+  ComputeErrorCode code = 1;
+  bool retryable = 2;
+  optional uint64 observed_topology_version = 3;
+  optional uint64 min_topology_version = 4;
+  repeated uint32 unavailable_expert_ids = 5;
+  string diagnostic = 6;
+}
+
+// ExecuteResponse contains either an activation-dtype partial output or a rejection.
+message ExecuteResponse {
+  oneof result {
+    bytes partial_output = 1;  // [token_count, hidden_dim], request activation dtype.
+    ComputeError error = 2;
+  }
+}

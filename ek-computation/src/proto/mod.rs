@@ -5,6 +5,9 @@ mod inner {
             pub mod v1 {
                 tonic::include_proto!("ek.worker.v1");
             }
+            pub mod v2 {
+                tonic::include_proto!("ek.worker.v2");
+            }
         }
         pub mod object {
             pub mod v1 {
@@ -15,6 +18,9 @@ mod inner {
         pub mod control {
             pub mod v1 {
                 tonic::include_proto!("ek.control.v1");
+            }
+            pub mod v2 {
+                tonic::include_proto!("ek.control.v2");
             }
         }
     }

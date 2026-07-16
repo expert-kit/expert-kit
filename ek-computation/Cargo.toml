@@ -48,6 +48,7 @@ tracing-opentelemetry = { workspace = true }
 url = { workspace = true }
 
 [build-dependencies]
+protoc-bin-vendored = { workspace = true }
 tonic-build = { workspace = true }
 
 [dev-dependencies]

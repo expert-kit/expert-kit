@@ -1,0 +1,17 @@
+syntax = "proto3";
+
+package ek.worker.v2;
+
+// ActivationDType fixes the element representation of activations and partial outputs.
+enum ActivationDType {
+  ACTIVATION_DTYPE_UNSPECIFIED = 0;
+  ACTIVATION_DTYPE_FP16 = 1;
+  ACTIVATION_DTYPE_BF16 = 2;
+  ACTIVATION_DTYPE_FP32 = 3;
+}
+
+// ExpertKey identifies one stable expert within a routed model layer.
+message ExpertKey {
+  uint32 layer_id = 1;
+  uint32 expert_id = 2;
+}

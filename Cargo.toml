@@ -104,6 +104,7 @@ polars = { version = "0.46.0", features = [
 polars-io = "0.46.0"
 prometheus = "0.14.0"
 prost = "0.13"
+protoc-bin-vendored = "3"
 rand = "0.9.1"
 rand_distr = "0.5.1"
 reqwest = "0.12.15"

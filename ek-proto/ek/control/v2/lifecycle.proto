@@ -1,0 +1,110 @@
+syntax = "proto3";
+
+package ek.control.v2;
+
+import "ek/worker/v2/common.proto";
+
+// WorkerLifecycleService registers one process and receives its liveness stream.
+service WorkerLifecycleService {
+  rpc RegisterWorker(RegisterWorkerRequest) returns (RegisterWorkerResponse);
+  rpc Heartbeat(stream HeartbeatRequest) returns (HeartbeatSummary);
+}
+
+message RegisterWorkerRequest {
+  string worker_id = 1;
+  string start_id = 2;
+  uint64 instance_id = 3;
+  string computation_endpoint = 4;
+  string peer_weight_endpoint = 5;
+  string backend = 6;
+  ek.worker.v2.ActivationDType activation_dtype = 7;
+  WorkerDevice device = 8;
+  uint32 max_batch_tokens = 9;
+  uint32 max_active_batches_per_device = 10;
+  uint32 max_pending_batches_per_device = 11;
+}
+
+message WorkerDevice {
+  string device = 1;
+  uint32 max_experts = 2;
+}
+
+message RegisterWorkerResponse {
+  uint64 current_topology_version = 1;
+  uint64 current_placement_generation = 2;
+}
+
+message HeartbeatRequest {
+  string worker_id = 1;
+  string start_id = 2;
+  uint64 sequence = 3;
+  WorkerRunState state = 4;
+}
+
+enum WorkerRunState {
+  WORKER_RUN_STATE_UNSPECIFIED = 0;
+  WORKER_RUNNING = 1;
+  WORKER_SHUTTING_DOWN = 2;
+}
+
+message HeartbeatSummary {
+  uint64 last_sequence = 1;
+}
+
+// TopologyService streams a contiguous update history or a complete snapshot.
+service TopologyService {
+  rpc WatchTopology(WatchTopologyRequest) returns (stream TopologyMessage);
+}
+
+message WatchTopologyRequest {
+  uint64 instance_id = 1;
+  uint64 current_version = 2;
+}
+
+message TopologyMessage {
+  oneof message {
+    TopologySnapshotPart snapshot = 1;
+    TopologyUpdatePart update = 2;
+  }
+}
+
+// TopologySnapshotPart contains at most 64 routes and uses zero-based part indices.
+message TopologySnapshotPart {
+  uint64 instance_id = 1;
+  uint64 topology_version = 2;
+  uint32 part_index = 3;
+  uint32 part_count = 4;
+  repeated ExpertRoute routes = 5;
+}
+
+// TopologyUpdatePart contains at most 64 changes and joins one exact prior version.
+message TopologyUpdatePart {
+  uint64 instance_id = 1;
+  uint64 previous_version = 2;
+  uint64 topology_version = 3;
+  uint32 part_index = 4;
+  uint32 part_count = 5;
+  repeated RouteChange changes = 6;
+}
+
+message ExpertRoute {
+  uint32 layer_id = 1;
+  uint32 expert_id = 2;
+  repeated WorkerRoute replicas = 3;
+}
+
+message WorkerRoute {
+  string worker_id = 1;
+  string start_id = 2;
+  string computation_endpoint = 3;
+  string device = 4;
+  uint32 max_active_batches = 5;
+  uint32 max_pending_batches = 6;
+}
+
+// RouteChange replaces the complete replica list; an empty list removes the route.
+message RouteChange {
+  uint32 layer_id = 1;
+  uint32 expert_id = 2;
+  repeated WorkerRoute replicas = 3;
+}

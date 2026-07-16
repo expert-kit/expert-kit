@@ -1,0 +1,123 @@
+syntax = "proto3";
+
+package ek.control.v2;
+
+import "ek/worker/v2/common.proto";
+
+// WeightControlService carries desired placement and observed expert state.
+service WeightControlService {
+  rpc Sync(stream WorkerWeightMessage) returns (stream ControllerWeightMessage);
+}
+
+message WorkerWeightMessage {
+  oneof message {
+    OpenWeightStream open = 1;
+    FullExpertStatePart full_state = 2;
+    ExpertStateUpdates state_updates = 3;
+    DrainComplete drain_complete = 4;
+  }
+}
+
+message OpenWeightStream {
+  string worker_id = 1;
+  string start_id = 2;
+}
+
+// FullExpertStatePart contains at most 64 experts and uses zero-based part indices.
+message FullExpertStatePart {
+  uint64 placement_generation = 1;
+  uint64 report_sequence = 2;
+  uint32 part_index = 3;
+  uint32 part_count = 4;
+  repeated ExpertState experts = 5;
+}
+
+message ExpertStateUpdates {
+  uint64 placement_generation = 1;
+  uint64 report_sequence = 2;
+  repeated ExpertState experts = 3;
+}
+
+message ExpertState {
+  uint32 layer_id = 1;
+  uint32 expert_id = 2;
+  ExpertStateKind state = 3;
+  WeightLoadFailure failure = 4;
+}
+
+enum ExpertStateKind {
+  EXPERT_STATE_UNSPECIFIED = 0;
+  EXPERT_READY = 1;
+  EXPERT_FAILED = 2;
+  EXPERT_REMOVED = 3;
+}
+
+enum WeightLoadStage {
+  WEIGHT_LOAD_STAGE_UNSPECIFIED = 0;
+  WEIGHT_LOAD_FETCH = 1;
+  WEIGHT_LOAD_READ = 2;
+  WEIGHT_LOAD_PARSE = 3;
+  WEIGHT_LOAD_VALIDATE = 4;
+  WEIGHT_LOAD_CONVERT = 5;
+  WEIGHT_LOAD_PLACE = 6;
+}
+
+enum WeightLoadErrorCode {
+  WEIGHT_LOAD_ERROR_CODE_UNSPECIFIED = 0;
+  WEIGHT_LOAD_ERROR_NOT_FOUND = 1;
+  WEIGHT_LOAD_ERROR_IO = 2;
+  WEIGHT_LOAD_ERROR_NETWORK = 3;
+  WEIGHT_LOAD_ERROR_INVALID_FORMAT = 4;
+  WEIGHT_LOAD_ERROR_UNEXPECTED_METADATA = 5;
+  WEIGHT_LOAD_ERROR_UNSUPPORTED = 6;
+  WEIGHT_LOAD_ERROR_INTERNAL = 7;
+}
+
+message WeightLoadFailure {
+  WeightLoadStage stage = 1;
+  WeightLoadErrorCode code = 2;
+  bool retryable = 3;
+  string diagnostic = 4;
+}
+
+message DrainComplete {
+  uint64 drain_id = 1;
+}
+
+message ControllerWeightMessage {
+  oneof message {
+    TargetExpertListPart targets = 1;
+    StateReportAck state_ack = 2;
+    DrainAuthorizationPart drain = 3;
+  }
+}
+
+// TargetExpertListPart contains at most 64 experts and uses zero-based part indices.
+message TargetExpertListPart {
+  uint64 placement_generation = 1;
+  uint32 part_index = 2;
+  uint32 part_count = 3;
+  repeated TargetExpert experts = 4;
+}
+
+message TargetExpert {
+  uint32 layer_id = 1;
+  uint32 expert_id = 2;
+  string target_device = 3;
+  repeated string peer_weight_endpoints = 4;
+}
+
+message StateReportAck {
+  uint64 report_sequence = 1;
+}
+
+// DrainAuthorizationPart contains at most 64 experts and applies after publication.
+message DrainAuthorizationPart {
+  uint64 drain_id = 1;
+  uint64 placement_generation = 2;
+  uint64 min_topology_version = 3;
+  bool stop_accepting_all_computation = 4;
+  uint32 part_index = 5;
+  uint32 part_count = 6;
+  repeated ek.worker.v2.ExpertKey experts = 7;
+}
