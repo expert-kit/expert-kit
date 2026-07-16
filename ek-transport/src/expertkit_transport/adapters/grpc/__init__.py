@@ -9,6 +9,10 @@ from expertkit_transport.adapters.grpc.codec import (
     encode_request,
     encode_success_response,
 )
+from expertkit_transport.adapters.grpc.routed_client import (
+    BlockingGrpcRoutedMoEClient,
+    GrpcRoutedMoEClient,
+)
 from expertkit_transport.adapters.grpc.server import GrpcWorkerServer
 from expertkit_transport.adapters.grpc.spec import (
     GrpcBatchSpec,
@@ -21,9 +25,11 @@ from expertkit_transport.adapters.grpc.topology import (
 )
 
 __all__ = [
+    "BlockingGrpcRoutedMoEClient",
     "GrpcBatchSpec",
     "GrpcMessageLimits",
     "GrpcProtocolError",
+    "GrpcRoutedMoEClient",
     "GrpcTopologyProvider",
     "GrpcWorkerServer",
     "GrpcWorkerTransport",
