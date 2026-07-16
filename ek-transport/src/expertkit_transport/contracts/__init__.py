@@ -1,6 +1,6 @@
 """Transport-independent Routed-MoE computation contracts."""
 
-from expertkit_transport.contracts.batches import ACTIVATION_DTYPES, WorkerBatch
+from expertkit_transport.contracts.batches import ACTIVATION_DTYPES, RoutedLayerBatch, WorkerBatch
 from expertkit_transport.contracts.buffers import (
     OutputBufferProvider,
     OutputSpec,
@@ -14,6 +14,7 @@ __all__ = [
     "OutputBufferProvider",
     "OutputSpec",
     "PreparedOutput",
+    "RoutedLayerBatch",
     "TransportError",
     "TransportErrorCode",
     "WorkerBatch",

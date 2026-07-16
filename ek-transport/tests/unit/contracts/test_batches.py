@@ -3,7 +3,7 @@
 import pytest
 import torch
 
-from expertkit_transport.contracts import WorkerBatch
+from expertkit_transport.contracts import RoutedLayerBatch, WorkerBatch
 
 
 def make_batch(**changes: object) -> WorkerBatch:
@@ -45,6 +45,7 @@ def test_omitted_indices_select_every_source_row() -> None:
     ("change", "message"),
     [
         ({"instance_id": -1}, "instance_id"),
+        ({"hidden_states": torch.tensor(1.0)}, "source_tokens"),
         ({"hidden_states": torch.zeros((2, 8), dtype=torch.int8)}, "FP16, BF16, or FP32"),
         ({"token_indices": torch.tensor([0, 1], dtype=torch.int32)}, "int64"),
         ({"expert_ids": torch.zeros((2, 2), dtype=torch.int64)}, "int32"),
@@ -76,3 +77,14 @@ def test_batch_copies_distinct_expert_sequence() -> None:
     distinct.append(7)
 
     assert batch.distinct_expert_ids == (3, 5)
+
+
+def test_routed_layer_requires_fixed_external_dtypes() -> None:
+    with pytest.raises(ValueError, match="int32"):
+        RoutedLayerBatch(
+            instance_id=7,
+            layer_id=2,
+            hidden_states=torch.zeros((2, 8), dtype=torch.bfloat16),
+            expert_ids=torch.zeros((2, 2), dtype=torch.int64),
+            routing_weights=torch.zeros((2, 2), dtype=torch.float32),
+        )

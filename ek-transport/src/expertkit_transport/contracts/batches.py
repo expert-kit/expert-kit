@@ -16,6 +16,86 @@ def _require_unsigned(name: str, value: int, maximum: int) -> None:
         raise ValueError(f"{name} must be an integer in [0, {maximum}]")
 
 
+def _validate_routing_tensors(
+    hidden_states: torch.Tensor,
+    expert_ids: torch.Tensor,
+    routing_weights: torch.Tensor,
+) -> None:
+    if hidden_states.ndim != 2:
+        raise ValueError("hidden_states must have shape [token_count, hidden_dim]")
+    if hidden_states.shape[0] <= 0 or hidden_states.shape[1] <= 0:
+        raise ValueError("hidden_states dimensions must be positive")
+    if hidden_states.dtype not in ACTIVATION_DTYPES:
+        raise ValueError("hidden_states must use FP16, BF16, or FP32")
+
+    if expert_ids.ndim != 2 or expert_ids.shape[0] != hidden_states.shape[0]:
+        raise ValueError("expert_ids must have shape [token_count, top_k]")
+    if expert_ids.shape[1] <= 0:
+        raise ValueError("top_k must be positive")
+    if expert_ids.dtype != torch.int32:
+        raise ValueError("expert_ids must use int32")
+    if expert_ids.device != hidden_states.device:
+        raise ValueError("expert_ids and hidden_states must be on the same device")
+
+    if routing_weights.shape != expert_ids.shape:
+        raise ValueError("routing_weights must have the same shape as expert_ids")
+    if routing_weights.dtype != torch.float32:
+        raise ValueError("routing_weights must use FP32")
+    if routing_weights.device != hidden_states.device:
+        raise ValueError("routing_weights and hidden_states must be on the same device")
+
+
+@dataclass(frozen=True, slots=True)
+class RoutedLayerBatch:
+    """Hold the final assignments produced by one model router.
+
+    Attributes:
+        instance_id: Controller-assigned model instance identifier.
+        layer_id: Model layer containing the routed experts.
+        hidden_states: Activations shaped `[token_count, hidden_dim]`.
+        expert_ids: Stable expert numbers shaped `[token_count, top_k]` using
+            int32. A `-1` position must have zero routing weight.
+        routing_weights: Final FP32 routing weights shaped `[token_count, top_k]`.
+
+    Note:
+        Construction checks Tensor metadata only. Grouping validates routing
+        values while resolving them against one Topology snapshot.
+    """
+
+    instance_id: int
+    layer_id: int
+    hidden_states: torch.Tensor
+    expert_ids: torch.Tensor
+    routing_weights: torch.Tensor
+
+    def __post_init__(self) -> None:
+        _require_unsigned("instance_id", self.instance_id, _UINT64_MAX)
+        _require_unsigned("layer_id", self.layer_id, _UINT32_MAX)
+        _validate_routing_tensors(
+            self.hidden_states,
+            self.expert_ids,
+            self.routing_weights,
+        )
+
+    @property
+    def token_count(self) -> int:
+        """Return the number of routed activation rows."""
+
+        return self.hidden_states.shape[0]
+
+    @property
+    def hidden_dim(self) -> int:
+        """Return the activation hidden dimension."""
+
+        return self.hidden_states.shape[1]
+
+    @property
+    def top_k(self) -> int:
+        """Return the fixed routing width."""
+
+        return self.expert_ids.shape[1]
+
+
 @dataclass(frozen=True, slots=True)
 class WorkerBatch:
     """Describe one asynchronous computation sent to one Worker.
