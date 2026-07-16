@@ -30,6 +30,8 @@ def test_torch_provider_prepares_exact_maximum_output() -> None:
     assert output.tensor.device == torch.device("cpu")
     assert output.tensor.is_contiguous()
     provider.validate(output, spec)
+    provider.before_receive(output)
+    provider.after_consume(output)
     provider.release(output)
 
 

@@ -15,7 +15,9 @@ class WorkerTransport(ABC):
     A successful `submit` fills `output.tensor[:batch.token_count]`. On every
     return or exception, including cancellation, the implementation must no
     longer access the batch inputs or output before allowing the caller to reuse
-    them. The deadline is an absolute `time.monotonic()` value.
+    them. Before overwriting a reused output, the adapter calls its provider's
+    `before_receive` hook in the context that enqueues the actual transfer. The
+    deadline is an absolute `time.monotonic()` value.
     """
 
     @property

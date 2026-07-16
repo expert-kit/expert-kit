@@ -58,5 +58,13 @@ class OutputBufferProvider(ABC):
         """Reject an output that cannot receive results for `spec`."""
 
     @abstractmethod
+    def before_receive(self, output: PreparedOutput) -> None:
+        """Order the adapter's actual receive operation after prior consumption."""
+
+    @abstractmethod
+    def after_consume(self, output: PreparedOutput) -> None:
+        """Record downstream work that must finish before output reuse."""
+
+    @abstractmethod
     def release(self, output: PreparedOutput) -> None:
         """Release adapter-owned registration or allocation state."""

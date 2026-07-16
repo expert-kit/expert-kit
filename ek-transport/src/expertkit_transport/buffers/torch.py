@@ -14,6 +14,7 @@ from expertkit_transport.contracts.buffers import (
 class _TorchPreparedOutput(PreparedOutput):
     def __init__(self, tensor: torch.Tensor) -> None:
         self._tensor = tensor
+        self.reuse_event: torch.cuda.Event | None = None
 
     @property
     def tensor(self) -> torch.Tensor:
@@ -45,6 +46,23 @@ class TorchOutputBufferProvider(OutputBufferProvider):
         if not tensor.is_contiguous():
             raise ValueError("prepared output must be contiguous")
 
+    def before_receive(self, output: PreparedOutput) -> None:
+        if not isinstance(output, _TorchPreparedOutput):
+            raise TypeError("output was not prepared by TorchOutputBufferProvider")
+        if output.reuse_event is not None:
+            torch.cuda.current_stream(output.tensor.device).wait_event(output.reuse_event)
+
+    def after_consume(self, output: PreparedOutput) -> None:
+        if not isinstance(output, _TorchPreparedOutput):
+            raise TypeError("output was not prepared by TorchOutputBufferProvider")
+        if output.tensor.device.type != "cuda":
+            return
+        if output.reuse_event is None:
+            output.reuse_event = torch.cuda.Event(enable_timing=False, blocking=False)
+        output.reuse_event.record(torch.cuda.current_stream(output.tensor.device))
+
     def release(self, output: PreparedOutput) -> None:
         if not isinstance(output, _TorchPreparedOutput):
             raise TypeError("output was not prepared by TorchOutputBufferProvider")
+        if output.reuse_event is not None:
+            output.reuse_event.synchronize()
