@@ -78,6 +78,14 @@ def test_factory_builds_and_closes_ggml_worker(tmp_path: Path) -> None:
     asyncio.run(scenario())
 
 
+def test_factory_rejects_fused_before_device_initialization(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        with pytest.raises(NotImplementedError, match="fused Backend is not implemented"):
+            await build_worker_application(_config(tmp_path, backend="fused"))
+
+    asyncio.run(scenario())
+
+
 @pytest.mark.cuda
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
 def test_factory_builds_and_closes_torch_worker(tmp_path: Path) -> None:

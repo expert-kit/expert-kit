@@ -172,6 +172,8 @@ async def build_worker_application(config: WorkerConfig) -> WorkerApplication:
 
     if not isinstance(config, WorkerConfig):
         raise TypeError("config must be a WorkerConfig")
+    if config.worker.backend is BackendName.FUSED:
+        raise NotImplementedError("the fused Backend is not implemented in this build")
     activation_dtype = _DTYPE[config.model.activation_dtype]
     weight_dtype = _DTYPE[config.model.weight_dtype]
     device = torch.device(config.worker.device)
