@@ -117,6 +117,7 @@ def _application(
         execution=FakeExecution(events),
         control=control or FakeControl(events),
         disk_cache=FakeDiskCache(events),
+        observability=AsyncService("observability", events),
         clock=lambda: 0.0,
     )
 
@@ -132,7 +133,8 @@ def test_application_starts_then_completes_controller_authorized_shutdown() -> N
         assert application.request_shutdown() is False
         await serving
 
-        assert events[:5] == [
+        assert events[:6] == [
+            "start:observability",
             "start:transfer",
             "start:manager",
             "start:peer",
@@ -140,13 +142,14 @@ def test_application_starts_then_completes_controller_authorized_shutdown() -> N
             "start:execution",
         ]
         assert "shutdown:control" in events
-        assert events[-6:] == [
+        assert events[-7:] == [
             "close:control",
             "close:execution",
             "close:peer",
             "close:manager",
             "close:transfer",
             "close:disk",
+            "close:observability",
         ]
 
     run(scenario())
@@ -161,7 +164,7 @@ def test_fatal_weight_failure_terminates_and_cleans_up() -> None:
         with pytest.raises(RuntimeError, match="device placement failed"):
             await application.run()
 
-        assert events[-1] == "close:disk"
+        assert events[-2:] == ["close:disk", "close:observability"]
         assert "shutdown:control" not in events
 
     run(scenario())
@@ -179,6 +182,6 @@ def test_expired_shutdown_deadline_forces_cleanup() -> None:
         with pytest.raises(WorkerShutdownTimeout, match="deadline expired"):
             await serving
 
-        assert events[-1] == "close:disk"
+        assert events[-2:] == ["close:disk", "close:observability"]
 
     run(scenario())

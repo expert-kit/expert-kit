@@ -6,7 +6,7 @@ import asyncio
 import math
 import time
 from collections import Counter, deque
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import suppress
 from enum import StrEnum
@@ -222,6 +222,9 @@ class GrpcWorkerServer(WorkerBatchReceiver):
         max_pending_batches: int,
         cpu_workers: int | None = None,
         clock: Callable[[], float] = time.monotonic,
+        interceptors: Sequence[grpc.aio.ServerInterceptor] = (),
+        on_rejection: Callable[[str], None] | None = None,
+        on_pending_changed: Callable[[int], None] | None = None,
     ) -> None:
         if not listen:
             raise ValueError("listen must not be empty")
@@ -252,6 +255,9 @@ class GrpcWorkerServer(WorkerBatchReceiver):
             thread_name_prefix="expertkit-grpc-server",
         )
         self._clock = clock
+        self._interceptors = tuple(interceptors)
+        self._on_rejection = on_rejection or (lambda _reason: None)
+        self._on_pending_changed = on_pending_changed or (lambda _count: None)
         self._server: grpc.aio.Server | None = None
         self._start_lock = asyncio.Lock()
         self._admitted_experts: Counter[tuple[int, int]] = Counter()
@@ -300,6 +306,7 @@ class GrpcWorkerServer(WorkerBatchReceiver):
             server = grpc.aio.server(
                 options=self._limits.server_options,
                 maximum_concurrent_rpcs=self._maximum_concurrent_rpcs,
+                interceptors=self._interceptors,
             )
             method = grpc.unary_unary_rpc_method_handler(
                 self._execute,
@@ -324,6 +331,7 @@ class GrpcWorkerServer(WorkerBatchReceiver):
         item = await self._pending.take()
         async with self._state_condition:
             self._active_count += 1
+            self._record_pending_count()
             self._state_condition.notify_all()
         return item
 
@@ -436,10 +444,12 @@ class GrpcWorkerServer(WorkerBatchReceiver):
         context: grpc.aio.ServicerContext,
     ) -> bytes:
         if self._closing:
+            self._record_rejection(TransportErrorCode.UNAVAILABLE.value)
             await context.abort(grpc.StatusCode.UNAVAILABLE, "Worker is shutting down")
         try:
             batch = await self._run_cpu(decode_request, payload, self._spec)
         except GrpcProtocolError as error:
+            self._record_rejection(TransportErrorCode.PROTOCOL.value)
             await context.abort(grpc.StatusCode.INVALID_ARGUMENT, str(error))
             raise AssertionError("context.abort must terminate the handler") from error
 
@@ -448,6 +458,7 @@ class GrpcWorkerServer(WorkerBatchReceiver):
         item = _GrpcWorkItem(self, batch, deadline, len(payload))
         rejection = await self._admit(item)
         if rejection is not None:
+            self._record_rejection(rejection.code.value)
             return await self._run_cpu(encode_error_response, rejection, self._spec)
 
         try:
@@ -478,6 +489,7 @@ class GrpcWorkerServer(WorkerBatchReceiver):
                 )
             for expert_id in item.distinct_expert_ids:
                 self._admitted_experts[(item.layer_id, expert_id)] += 1
+            self._record_pending_count()
             self._state_condition.notify_all()
         return None
 
@@ -501,6 +513,7 @@ class GrpcWorkerServer(WorkerBatchReceiver):
             item._cancelled = True
             self._state_condition.notify_all()
         if await self._pending.cancel_waiting(item):
+            self._record_pending_count()
             await self._release_admitted(item, was_active=False)
 
     async def _wait_pending_count(self, expected: int) -> None:
@@ -588,11 +601,20 @@ class GrpcWorkerServer(WorkerBatchReceiver):
         if item.state is not _CallState.ACTIVE:
             raise RuntimeError("Worker batch completion requires one active received batch")
 
+    def _record_rejection(self, reason: str) -> None:
+        with suppress(Exception):
+            self._on_rejection(reason)
+
+    def _record_pending_count(self) -> None:
+        with suppress(Exception):
+            self._on_pending_changed(self._pending.count)
+
     async def _close(self) -> None:
         self._closing = True
         if self._server is not None:
             await self._server.stop(None)
         waiting = await self._pending.close()
+        self._record_pending_count()
         for item in waiting:
             item._cancelled = True
             await self._release_admitted(item, was_active=False)

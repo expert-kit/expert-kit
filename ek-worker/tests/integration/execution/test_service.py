@@ -33,6 +33,38 @@ from expertkit_worker.backends import (
     ComputeBackend,
 )
 from expertkit_worker.execution import WorkerExecution
+from expertkit_worker.observability.api import WorkerMetrics
+
+
+class RecordingMetrics:
+    """Record execution observations without an exporter dependency."""
+
+    def __init__(self) -> None:
+        self.active = 0
+        self.finished: list[tuple[bool, float]] = []
+        self.rejections: list[str] = []
+
+    def batch_started(self) -> None:
+        self.active += 1
+
+    def batch_finished(self, *, fatal: bool, duration_seconds: float) -> None:
+        self.active -= 1
+        self.finished.append((fatal, duration_seconds))
+
+    def batch_rejected(self, reason: str) -> None:
+        self.rejections.append(reason)
+
+    def pending_batches_changed(self, count: int) -> None:
+        raise AssertionError("execution must not report Transport waiting counts")
+
+    def weight_source_result(self, source: str, *, success: bool) -> None:
+        raise AssertionError("execution must not report weight-source outcomes")
+
+    def expert_state_changed(self, state: str) -> None:
+        raise AssertionError("execution must not report expert state")
+
+    def device_weight_bytes_changed(self, byte_count: int) -> None:
+        raise AssertionError("execution must not report ready-weight bytes")
 
 
 class TestBackend(ComputeBackend):
@@ -135,6 +167,7 @@ async def start_stack(
     *,
     active: int = 1,
     pending: int = 1,
+    metrics: WorkerMetrics | None = None,
 ) -> tuple[GrpcWorkerServer, GrpcWorkerTransport, WorkerExecution]:
     server = GrpcWorkerServer(
         "127.0.0.1:0",
@@ -148,6 +181,7 @@ async def start_stack(
         instance_id=7,
         position_spec=position_spec(),
         active_positions=active,
+        metrics=metrics,
     )
     await server.start()
     await execution.start()
@@ -202,7 +236,8 @@ def test_execution_maps_ready_weight_failure_without_stopping_worker() -> None:
     async def scenario() -> None:
         backend = TestBackend()
         backend.error = BackendWeightUnavailable((3,))
-        _server, client, execution = await start_stack(backend)
+        metrics = RecordingMetrics()
+        _server, client, execution = await start_stack(backend, metrics=metrics)
         output = client.output_buffers.prepare(OutputSpec(4, 3, torch.float32, "cpu"))
         try:
             with pytest.raises(TransportError) as caught:
@@ -215,6 +250,11 @@ def test_execution_maps_ready_weight_failure_without_stopping_worker() -> None:
 
             assert caught.value.code is TransportErrorCode.EXPERT_NOT_READY
             assert caught.value.unavailable_expert_ids == (3,)
+            assert metrics.active == 0
+            assert metrics.rejections == [TransportErrorCode.EXPERT_NOT_READY.value]
+            assert len(metrics.finished) == 1
+            assert metrics.finished[0][0] is False
+            assert metrics.finished[0][1] >= 0
         finally:
             client.output_buffers.release(output)
             await close_stack(client, execution)

@@ -77,6 +77,7 @@ class WorkerApplication:
         execution: _Execution,
         control: _Control,
         disk_cache: _SyncClose,
+        observability: _AsyncStartClose,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         if not callable(clock):
@@ -88,6 +89,7 @@ class WorkerApplication:
         self._execution = execution
         self._control = control
         self._disk_cache = disk_cache
+        self._observability = observability
         self._clock = clock
         self._shutdown_requested = asyncio.Event()
         self._started = asyncio.Event()
@@ -166,6 +168,7 @@ class WorkerApplication:
         return remove
 
     async def _start(self) -> None:
+        await self._observability.start()
         await self._transfer.start()
         self._manager.start()
         await self._peer_server.start()
@@ -239,23 +242,26 @@ class WorkerApplication:
         raise RuntimeError("Worker execution stopped unexpectedly")
 
     async def _close(self) -> None:
-        await self._control.close()
-        await self._execution.close()
-        await self._peer_server.close()
-        await self._manager.close()
-        await self._transfer.close()
-        self._disk_cache.close()
-        monitors = tuple(
-            task
-            for task in (
-                self._control_task,
-                self._execution_task,
-                self._manager_fatal_task,
+        try:
+            await self._control.close()
+            await self._execution.close()
+            await self._peer_server.close()
+            await self._manager.close()
+            await self._transfer.close()
+            self._disk_cache.close()
+            monitors = tuple(
+                task
+                for task in (
+                    self._control_task,
+                    self._execution_task,
+                    self._manager_fatal_task,
+                )
+                if task is not None
             )
-            if task is not None
-        )
-        for task in monitors:
-            task.cancel()
-        if monitors:
-            await asyncio.gather(*monitors, return_exceptions=True)
-        logger.info("worker_stopped")
+            for task in monitors:
+                task.cancel()
+            if monitors:
+                await asyncio.gather(*monitors, return_exceptions=True)
+            logger.info("worker_stopped")
+        finally:
+            await self._observability.close()

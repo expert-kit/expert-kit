@@ -30,10 +30,12 @@ from expertkit_worker.control import (
     new_start_id,
 )
 from expertkit_worker.execution import WorkerExecution
+from expertkit_worker.observability import create_observability
 from expertkit_worker.weights import (
     CpuWeightLoader,
     DirectIOWeightDiskCache,
     DiskWriteback,
+    ExpertStateChange,
     PeerWeightServer,
     WeightManager,
     max_safetensors_file_bytes,
@@ -176,6 +178,11 @@ async def build_worker_application(config: WorkerConfig) -> WorkerApplication:
     if device.type == "cuda":
         torch.cuda.set_device(device)
 
+    observability = create_observability(
+        config.observability,
+        worker_id=config.worker.id,
+    )
+    metrics = observability.metrics
     receiver: GrpcWorkerServer | None = None
     execution: WorkerExecution | None = None
     manager: WeightManager[Any, Any] | None = None
@@ -203,6 +210,9 @@ async def build_worker_application(config: WorkerConfig) -> WorkerApplication:
             batch_spec,
             max_active_batches=config.worker.max_active_batches_per_device,
             max_pending_batches=config.transport.max_pending_batches_per_device,
+            interceptors=observability.grpc_interceptors,
+            on_rejection=metrics.batch_rejected,
+            on_pending_changed=metrics.pending_batches_changed,
         )
 
         manager_holder: list[WeightManager[Any, Any] | None] = [None]
@@ -232,6 +242,7 @@ async def build_worker_application(config: WorkerConfig) -> WorkerApplication:
             instance_id=config.model.instance_id,
             position_spec=position_spec,
             active_positions=config.worker.max_active_batches_per_device,
+            metrics=metrics,
         )
         resource_plan = plan_device_resources(
             device_memory_limit_bytes=int(config.worker.device_memory_limit),
@@ -264,6 +275,10 @@ async def build_worker_application(config: WorkerConfig) -> WorkerApplication:
             adapter=adapter,
             cache=dram_cache,
             transfer=transfer,
+            source_result=lambda source, success: metrics.weight_source_result(
+                source,
+                success=success,
+            ),
         )
         writeback = DiskWriteback(
             disk_cache=disk_cache,
@@ -276,6 +291,11 @@ async def build_worker_application(config: WorkerConfig) -> WorkerApplication:
             max_updates=config.weight_manager.state_report.max_updates,
             max_delay_ms=config.weight_manager.state_report.max_delay_ms,
         )
+
+        def state_changed(change: ExpertStateChange) -> None:
+            reporter.record(change)
+            metrics.expert_state_changed(change.expert.state.value)
+
         manager = WeightManager(
             num_layers=config.model.num_layers,
             experts_per_layer=config.model.experts_per_layer,
@@ -285,7 +305,8 @@ async def build_worker_application(config: WorkerConfig) -> WorkerApplication:
             adapter=adapter,
             loader=loader,
             writeback=writeback,
-            state_changed=reporter.record,
+            state_changed=state_changed,
+            device_bytes_changed=metrics.device_weight_bytes_changed,
         )
         manager_holder[0] = manager
 
@@ -357,6 +378,7 @@ async def build_worker_application(config: WorkerConfig) -> WorkerApplication:
             execution=execution,
             control=control,
             disk_cache=disk_cache,
+            observability=observability,
         )
     except BaseException:
         if execution is not None:
@@ -371,4 +393,5 @@ async def build_worker_application(config: WorkerConfig) -> WorkerApplication:
             await transfer.close()
         if disk_cache is not None:
             disk_cache.close()
+        await observability.close()
         raise

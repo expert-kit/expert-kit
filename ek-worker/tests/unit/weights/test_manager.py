@@ -143,6 +143,7 @@ def _make_manager(
     max_concurrent_loads: int = 2,
     device_weight_capacity_bytes: int = 64,
     changes: list[ExpertStateChange] | None = None,
+    byte_changes: list[int] | None = None,
 ) -> tuple[WeightManager[object, object], _FakeWriteback]:
     writeback = _FakeWriteback()
     manager = WeightManager(
@@ -155,6 +156,7 @@ def _make_manager(
         loader=loader,
         writeback=writeback,
         state_changed=None if changes is None else changes.append,
+        device_bytes_changed=None if byte_changes is None else byte_changes.append,
     )
     return manager, writeback
 
@@ -168,10 +170,12 @@ def test_manager_bounds_whole_load_pipeline_and_publishes_direct_references() ->
         loader = _FakeLoader()
         loader.block = True
         changes: list[ExpertStateChange] = []
+        byte_changes: list[int] = []
         manager, writeback = _make_manager(
             loader,
             max_concurrent_loads=2,
             changes=changes,
+            byte_changes=byte_changes,
         )
         manager.start()
 
@@ -201,6 +205,7 @@ def test_manager_bounds_whole_load_pipeline_and_publishes_direct_references() ->
         assert stats.max_experts == 4
         lease.close()
         await _await_with_loop_yields(manager.close())
+        assert byte_changes == [16, 32, 48, 0]
         assert writeback.started is True
         assert writeback.closed is True
 

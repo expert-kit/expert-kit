@@ -123,6 +123,7 @@ class FakeDiskCache(WeightDiskCache):
 def make_loader(
     transfer: WeightTransfer,
     disk_cache: WeightDiskCache | None = None,
+    source_results: list[tuple[str, bool]] | None = None,
 ) -> CpuWeightLoader[object, object]:
     """Return a small Torch CPU loader with full parser-headroom capacity."""
 
@@ -142,6 +143,11 @@ def make_loader(
         adapter=adapter,
         cache=cache,
         transfer=transfer,
+        source_result=(
+            None
+            if source_results is None
+            else lambda source, success: source_results.append((source, success))
+        ),
     )
 
 
@@ -223,7 +229,8 @@ def test_loader_tries_each_peer_once_then_the_weight_server() -> None:
             central_url: make_payload(gate_value=8),
         }
     )
-    loader = make_loader(transfer)
+    source_results: list[tuple[str, bool]] = []
+    loader = make_loader(transfer, source_results=source_results)
 
     async def scenario() -> None:
         loaded = await loader.acquire(
@@ -236,6 +243,12 @@ def test_loader_tries_each_peer_once_then_the_weight_server() -> None:
 
     run(scenario())
     assert transfer.calls == [peer_one_url, peer_two_url, central_url]
+    assert source_results == [
+        ("disk", False),
+        ("peer", False),
+        ("peer", False),
+        ("weight_server", True),
+    ]
 
 
 def test_loader_falls_back_after_invalid_peer_content() -> None:

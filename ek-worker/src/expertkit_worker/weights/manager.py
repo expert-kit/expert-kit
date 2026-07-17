@@ -132,6 +132,7 @@ class WeightManager[CpuWeightT, ReadyWeightT]:
         loader: CpuWeightLoader[CpuWeightT, ReadyWeightT],
         writeback: DiskWriteback[CpuWeightT],
         state_changed: Callable[[ExpertStateChange], None] | None = None,
+        device_bytes_changed: Callable[[int], None] | None = None,
     ) -> None:
         for name, value in (
             ("num_layers", num_layers),
@@ -160,6 +161,7 @@ class WeightManager[CpuWeightT, ReadyWeightT]:
         self._loader = loader
         self._writeback = writeback
         self._state_changed = state_changed or (lambda _change: None)
+        self._device_bytes_changed = device_bytes_changed or (lambda _byte_count: None)
         self._ready = ReadyWeightTable[ReadyWeightT](num_layers, experts_per_layer)
         self._load_limit = asyncio.Semaphore(max_concurrent_loads)
         self._conversion_executor = ThreadPoolExecutor(
@@ -407,6 +409,7 @@ class WeightManager[CpuWeightT, ReadyWeightT]:
         async with self._lock:
             self._ready_keys.clear()
             self._loaded_device_bytes = 0
+        self._emit_device_bytes(0)
 
     def _validate_targets(
         self,
@@ -476,6 +479,8 @@ class WeightManager[CpuWeightT, ReadyWeightT]:
                 self._ready_keys.remove(key)
                 self._loaded_device_bytes -= self._ready_weight_bytes
 
+            loaded_device_bytes = self._loaded_device_bytes
+
             for key in request.keys:
                 change = self._set_state_locked(
                     key,
@@ -484,6 +489,7 @@ class WeightManager[CpuWeightT, ReadyWeightT]:
                 if change is not None:
                     changes.append(change)
         self._emit(changes)
+        self._emit_device_bytes(loaded_device_bytes)
         return True
 
     def _start_load_locked(self, key: WeightKey) -> None:
@@ -578,6 +584,7 @@ class WeightManager[CpuWeightT, ReadyWeightT]:
 
     async def _finish_ready(self, key: WeightKey, ready_weight: ReadyWeightT) -> None:
         changes: list[ExpertStateChange] = []
+        loaded_device_bytes: int | None = None
         async with self._lock:
             if self._closed or key not in self._targets or key in self._ready_keys:
                 return
@@ -600,6 +607,7 @@ class WeightManager[CpuWeightT, ReadyWeightT]:
                 self._ready.publish(key.layer_id, key.expert_id, ready_weight)
                 self._ready_keys.add(key)
                 self._loaded_device_bytes += self._ready_weight_bytes
+                loaded_device_bytes = self._loaded_device_bytes
                 change = self._set_state_locked(
                     key,
                     ExpertState(key, ExpertStateKind.READY),
@@ -607,6 +615,8 @@ class WeightManager[CpuWeightT, ReadyWeightT]:
                 if change is not None:
                     changes.append(change)
         self._emit(changes)
+        if loaded_device_bytes is not None:
+            self._emit_device_bytes(loaded_device_bytes)
 
     async def _finish_failure(self, key: WeightKey, failure: WeightLoadFailure) -> None:
         changes: list[ExpertStateChange] = []
@@ -676,3 +686,13 @@ class WeightManager[CpuWeightT, ReadyWeightT]:
                     placement_generation=change.placement_generation,
                     exc_info=True,
                 )
+
+    def _emit_device_bytes(self, byte_count: int) -> None:
+        try:
+            self._device_bytes_changed(byte_count)
+        except Exception:
+            logger.error(
+                "device_weight_bytes_callback_failed",
+                byte_count=byte_count,
+                exc_info=True,
+            )

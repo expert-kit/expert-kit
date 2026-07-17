@@ -226,6 +226,7 @@ class TracingConfig(_StrictModel):
 
     enabled: bool = False
     endpoint: AnyHttpUrl | None = None
+    sample_ratio: float = Field(default=0.01, gt=0, le=1)
 
     @model_validator(mode="after")
     def validate_export_endpoint(self) -> TracingConfig:
@@ -233,6 +234,8 @@ class TracingConfig(_StrictModel):
 
         if self.enabled and self.endpoint is None:
             raise ValueError("observability.tracing.endpoint is required when tracing is enabled")
+        if self.enabled and self.endpoint is not None and self.endpoint.scheme != "http":
+            raise ValueError("the MVP OpenTelemetry exporter requires a plaintext HTTP endpoint")
         return self
 
 

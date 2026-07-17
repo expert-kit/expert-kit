@@ -81,3 +81,27 @@ def test_device_memory_limit_must_be_positive(tmp_path: Path) -> None:
 
     with pytest.raises(ValidationError, match="greater than 0"):
         WorkerConfig.model_validate(raw)
+
+
+def test_tracing_requires_plaintext_endpoint_and_bounded_sampling(tmp_path: Path) -> None:
+    raw = _config(tmp_path, backend="torch", device="cuda:0")
+    raw["observability"] = {
+        "tracing": {
+            "enabled": True,
+            "endpoint": "https://collector:4317",
+            "sample_ratio": 1,
+        }
+    }
+
+    with pytest.raises(ValidationError, match="plaintext HTTP endpoint"):
+        WorkerConfig.model_validate(raw)
+
+    raw["observability"] = {
+        "tracing": {
+            "enabled": True,
+            "endpoint": "http://collector:4317",
+            "sample_ratio": 0,
+        }
+    }
+    with pytest.raises(ValidationError, match="greater than 0"):
+        WorkerConfig.model_validate(raw)

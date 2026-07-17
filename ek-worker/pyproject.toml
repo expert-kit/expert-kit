@@ -24,6 +24,12 @@ ek-worker = "expertkit_worker.cli:main"
 ggml = [
     "ggml-python==0.0.45",
 ]
+observability = [
+    "opentelemetry-exporter-otlp-proto-grpc==1.39.1",
+    "opentelemetry-instrumentation-grpc==0.60b1",
+    "opentelemetry-sdk==1.39.1",
+    "prometheus-client==0.25.0",
+]
 
 [tool.uv.sources]
 expertkit-transport = { path = "../ek-transport", editable = true }

@@ -62,12 +62,14 @@ async def start_pair(
     max_active_batches: int = 1,
     max_pending_batches: int = 1,
     client_in_flight: int = 2,
+    pending_changes: list[int] | None = None,
 ) -> tuple[GrpcWorkerServer, GrpcWorkerTransport]:
     server = GrpcWorkerServer(
         "127.0.0.1:0",
         batch_spec(),
         max_active_batches=max_active_batches,
         max_pending_batches=max_pending_batches,
+        on_pending_changed=None if pending_changes is None else pending_changes.append,
     )
     await server.start()
     client = GrpcWorkerTransport(
@@ -218,7 +220,8 @@ def test_server_reuses_pinned_cuda_position_staging() -> None:
 
 def test_server_hands_one_validated_batch_directly_to_execution() -> None:
     async def scenario() -> None:
-        server, client = await start_pair()
+        pending_changes: list[int] = []
+        server, client = await start_pair(pending_changes=pending_changes)
         output = prepare_output(client)
         submission = asyncio.create_task(
             client.submit(
@@ -260,6 +263,7 @@ def test_server_hands_one_validated_batch_directly_to_execution() -> None:
         )
         assert server.active_count == 0
         assert server.admitted_count(2, 0) == 0
+        assert pending_changes == [1, 0]
         client.output_buffers.release(output)
         await close_pair(server, client)
 

@@ -28,6 +28,7 @@ from expertkit_worker.backends import (
     UnsupportedBackendBatch,
 )
 from expertkit_worker.execution.position import ActivePosition, PositionResult
+from expertkit_worker.observability.api import NoopWorkerMetrics, WorkerMetrics
 
 logger = structlog.get_logger(__name__)
 
@@ -71,6 +72,7 @@ class WorkerExecution:
         position_spec: WorkerPositionSpec,
         active_positions: int,
         clock: Callable[[], float] = time.monotonic,
+        metrics: WorkerMetrics | None = None,
     ) -> None:
         if isinstance(instance_id, bool) or not isinstance(instance_id, int) or instance_id <= 0:
             raise ValueError("instance_id must be a positive integer")
@@ -89,6 +91,7 @@ class WorkerExecution:
         self._backend = backend
         self._instance_id = instance_id
         self._clock = clock
+        self._metrics = metrics or NoopWorkerMetrics()
         self._positions: list[ActivePosition] = []
         try:
             for _ in range(active_positions):
@@ -171,7 +174,18 @@ class WorkerExecution:
                 received = await self._receiver.take()
             except ReceiverClosed:
                 return
-            fatal = await self._process(received, position)
+            started_at = self._clock()
+            self._metrics.batch_started()
+            fatal: BackendFatalError | None = None
+            failed = True
+            try:
+                fatal = await self._process(received, position)
+                failed = fatal is not None
+            finally:
+                self._metrics.batch_finished(
+                    fatal=failed,
+                    duration_seconds=self._clock() - started_at,
+                )
             if fatal is not None:
                 if self._fatal_error is None:
                     self._fatal_error = fatal
@@ -199,6 +213,7 @@ class WorkerExecution:
                         diagnostic="Worker batch instance ID does not match this process",
                     )
                 )
+                self._metrics.batch_rejected(TransportErrorCode.INVALID_REQUEST.value)
                 return None
             result = await self._run_position(position, received)
         except BackendRequestError as error:
@@ -208,6 +223,7 @@ class WorkerExecution:
                 error_code=rejection.code.value,
                 unavailable_expert_ids=rejection.unavailable_expert_ids,
             )
+            self._metrics.batch_rejected(rejection.code.value)
             await received.reject(rejection)
             return None
         except BackendFatalError as error:
@@ -223,12 +239,14 @@ class WorkerExecution:
 
         try:
             if result.rejection is not None:
+                self._metrics.batch_rejected(result.rejection.code.value)
                 await received.reject(result.rejection)
             elif result.output is None:
                 raise RuntimeError("active position produced neither output nor rejection")
             else:
                 await received.complete(result.output)
         except Exception:
+            self._metrics.batch_rejected("response_failed")
             logger.error("worker_computation_response_failed", exc_info=True)
         finally:
             result.release()

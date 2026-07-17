@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from enum import StrEnum
 from urllib.parse import quote
+
+import structlog
 
 from expertkit_worker.weights.adapter import WeightAdapter
 from expertkit_worker.weights.direct_io import AlignedWeightBuffer, InvalidWeightFile
@@ -25,6 +28,8 @@ from expertkit_worker.weights.transfer import (
     WeightTransfer,
     WeightTransferError,
 )
+
+logger = structlog.get_logger(__name__)
 
 
 class WeightSource(StrEnum):
@@ -146,6 +151,7 @@ class CpuWeightLoader[CpuWeightT, ReadyWeightT]:
         adapter: WeightAdapter[CpuWeightT, ReadyWeightT],
         cache: DramCache[CachedCpuWeight[CpuWeightT]],
         transfer: WeightTransfer,
+        source_result: Callable[[str, bool], None] | None = None,
     ) -> None:
         if not model_name:
             raise ValueError("model_name must not be empty")
@@ -157,6 +163,7 @@ class CpuWeightLoader[CpuWeightT, ReadyWeightT]:
         self._adapter = adapter
         self._cache = cache
         self._transfer = transfer
+        self._source_result = source_result or (lambda _source, _success: None)
         self._max_file_bytes = max_safetensors_file_bytes(adapter.source_tensor_bytes())
         self._reservation_bytes = self._max_file_bytes + adapter.cpu_extra_bytes()
 
@@ -182,12 +189,14 @@ class CpuWeightLoader[CpuWeightT, ReadyWeightT]:
 
         cached = await self._cache.acquire(key)
         if cached is not None:
+            self._record_source_result(WeightSource.DRAM, success=True)
             return CpuWeightLease(cached, WeightSource.DRAM)
 
         reservation = await self._cache.reserve(self._reservation_bytes)
         try:
             cached = await self._cache.acquire(key)
             if cached is not None:
+                self._record_source_result(WeightSource.DRAM, success=True)
                 return CpuWeightLease(cached, WeightSource.DRAM)
 
             failures: list[WeightLoadFailure] = []
@@ -236,12 +245,14 @@ class CpuWeightLoader[CpuWeightT, ReadyWeightT]:
 
         cached = await self._cache.acquire(key)
         if cached is not None:
+            self._record_source_result(WeightSource.DRAM, success=True)
             return CpuWeightLease(cached, WeightSource.DRAM)
 
         reservation = await self._cache.reserve(self._reservation_bytes)
         try:
             cached = await self._cache.acquire(key)
             if cached is not None:
+                self._record_source_result(WeightSource.DRAM, success=True)
                 return CpuWeightLease(cached, WeightSource.DRAM)
 
             failures: list[WeightLoadFailure] = []
@@ -265,6 +276,7 @@ class CpuWeightLoader[CpuWeightT, ReadyWeightT]:
         try:
             buffer = await self._disk_cache.read(key, max_bytes=self._max_file_bytes)
         except FileNotFoundError:
+            self._record_source_result(WeightSource.DISK, success=False)
             failures.append(
                 WeightLoadFailure(
                     WeightSource.DISK,
@@ -276,6 +288,7 @@ class CpuWeightLoader[CpuWeightT, ReadyWeightT]:
             )
             return None
         except InvalidWeightFile as error:
+            self._record_source_result(WeightSource.DISK, success=False)
             await self._disk_cache.remove(key)
             failures.append(
                 WeightLoadFailure(
@@ -288,6 +301,7 @@ class CpuWeightLoader[CpuWeightT, ReadyWeightT]:
             )
             return None
         except OSError as error:
+            self._record_source_result(WeightSource.DISK, success=False)
             failures.append(
                 WeightLoadFailure(
                     WeightSource.DISK,
@@ -301,7 +315,9 @@ class CpuWeightLoader[CpuWeightT, ReadyWeightT]:
 
         prepared = self._prepare(buffer)
         if isinstance(prepared, _PreparedWeight):
+            self._record_source_result(WeightSource.DISK, success=True)
             return prepared
+        self._record_source_result(WeightSource.DISK, success=False)
         buffer.close()
         await self._disk_cache.remove(key)
         failures.append(
@@ -327,6 +343,7 @@ class CpuWeightLoader[CpuWeightT, ReadyWeightT]:
         try:
             buffer = await self._transfer.download(url, max_bytes=self._max_file_bytes)
         except WeightNotFound as error:
+            self._record_source_result(source, success=False)
             failures.append(
                 WeightLoadFailure(
                     source,
@@ -338,6 +355,7 @@ class CpuWeightLoader[CpuWeightT, ReadyWeightT]:
             )
             return None
         except WeightTransferError as error:
+            self._record_source_result(source, success=False)
             failures.append(
                 WeightLoadFailure(
                     source,
@@ -351,7 +369,9 @@ class CpuWeightLoader[CpuWeightT, ReadyWeightT]:
 
         prepared = self._prepare(buffer)
         if isinstance(prepared, _PreparedWeight):
+            self._record_source_result(source, success=True)
             return prepared
+        self._record_source_result(source, success=False)
         buffer.close()
         failures.append(
             WeightLoadFailure(
@@ -401,3 +421,13 @@ class CpuWeightLoader[CpuWeightT, ReadyWeightT]:
     def _expert_url(self, endpoint: str, key: WeightKey) -> str:
         model = quote(self._model_name, safe="")
         return f"{endpoint}/expert/{model}/{key.layer_id}/{key.expert_id}"
+
+    def _record_source_result(self, source: WeightSource, *, success: bool) -> None:
+        try:
+            self._source_result(source.value, success)
+        except Exception:
+            logger.error(
+                "weight_source_observer_failed",
+                source=source.value,
+                exc_info=True,
+            )
