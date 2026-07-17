@@ -588,7 +588,15 @@ impl ControllerV2State {
         let normalized = normalize_targets(targets);
         let mut inner = self.inner.write().await;
         ensure_current_start(&inner, worker_id, start_id)?;
-        let (instance_id, current_generation, current_targets, affected, removed_ready, maximum) = {
+        let (
+            instance_id,
+            current_generation,
+            current_targets,
+            affected,
+            removed_ready,
+            carried_drains,
+            maximum,
+        ) = {
             let worker = inner
                 .workers
                 .get(worker_id)
@@ -613,12 +621,27 @@ impl ControllerV2State {
                 })
                 .copied()
                 .collect::<BTreeSet<_>>();
+            let carried_drains = worker
+                .drains
+                .iter()
+                .filter(|drain| !drain.completed && !drain.stop_all)
+                .flat_map(|drain| drain.experts.iter())
+                .filter(|key| !normalized.contains_key(key))
+                .filter(|key| {
+                    worker
+                        .expert_states
+                        .get(key)
+                        .is_some_and(|state| state.state == ExpertStateKind::ExpertReady as i32)
+                })
+                .copied()
+                .collect::<BTreeSet<_>>();
             (
                 worker.registration.instance_id,
                 worker.placement_generation,
                 worker.targets.clone(),
                 affected,
                 removed_ready,
+                carried_drains,
                 maximum,
             )
         };
@@ -697,7 +720,18 @@ impl ControllerV2State {
                     return Err(error);
                 }
             };
-            let drain_created = if removed_ready.is_empty() {
+            let mut drain_experts = removed_ready;
+            drain_experts.extend(carried_drains);
+            let worker = inner
+                .workers
+                .get_mut(worker_id)
+                .expect("validated worker must exist");
+            for drain in &mut worker.drains {
+                if !drain.completed && !drain.stop_all {
+                    drain.completed = true;
+                }
+            }
+            let drain_created = if drain_experts.is_empty() {
                 false
             } else {
                 let min_topology_version = inner
@@ -715,7 +749,7 @@ impl ControllerV2State {
                         placement_generation: generation,
                         min_topology_version,
                         stop_all: false,
-                        experts: removed_ready,
+                        experts: drain_experts,
                         completed: false,
                     });
                 true
@@ -1942,6 +1976,65 @@ mod tests {
         assert!(
             !state
                 .complete_drain("worker-0", "start-0", drains[0].drain_id)
+                .await
+                .unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn newer_placement_supersedes_and_reissues_incomplete_expert_drains() {
+        let state = ControllerV2State::new(8);
+        register_live_worker(&state).await;
+        let first = state
+            .set_targets("worker-0", "start-0", vec![target(1, 2), target(1, 3)])
+            .await
+            .unwrap();
+        state
+            .apply_state_report(
+                "worker-0",
+                "start-0",
+                first.generation,
+                1,
+                true,
+                vec![ready(1, 2), ready(1, 3)],
+            )
+            .await
+            .unwrap();
+        state
+            .set_targets("worker-0", "start-0", Vec::new())
+            .await
+            .unwrap();
+        let obsolete = state
+            .drain_authorizations("worker-0", "start-0")
+            .await
+            .unwrap();
+        assert_eq!(obsolete.len(), 1);
+        assert_eq!(obsolete[0].parts[0].placement_generation, 2);
+
+        let reassigned = state
+            .set_targets("worker-0", "start-0", vec![target(1, 2)])
+            .await
+            .unwrap();
+        assert_eq!(reassigned.generation, 3);
+        let current = state
+            .drain_authorizations("worker-0", "start-0")
+            .await
+            .unwrap();
+        assert_eq!(current.len(), 1);
+        assert_ne!(current[0].drain_id, obsolete[0].drain_id);
+        assert_eq!(current[0].parts[0].placement_generation, 3);
+        assert_eq!(
+            current[0]
+                .parts
+                .iter()
+                .flat_map(|part| part.experts.iter())
+                .map(|expert| expert.expert_id)
+                .collect::<Vec<_>>(),
+            vec![3]
+        );
+        assert!(
+            !state
+                .complete_drain("worker-0", "start-0", obsolete[0].drain_id)
                 .await
                 .unwrap()
         );

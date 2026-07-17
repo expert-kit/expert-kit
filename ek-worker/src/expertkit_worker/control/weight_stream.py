@@ -112,12 +112,15 @@ class WeightControlSession:
         self._clock = clock
         self._targets = TargetListAssembler(max_experts)
         self._drains = DrainAuthorizationAssembler(max_experts)
+        self._current_placement_generation = 0
         self._current_target_keys: set[WeightKey] = set()
+        self._drain_transition = asyncio.Lock()
         self._run_lock = asyncio.Lock()
         self._report_condition = asyncio.Condition()
         self._last_enqueued_report_sequence = 0
         self._active_drains: dict[int, _ActiveDrain] = {}
         self._completed_drains: OrderedDict[int, DrainAuthorization] = OrderedDict()
+        self._superseded_drains: OrderedDict[int, DrainAuthorization] = OrderedDict()
         self._completion_changed = asyncio.Event()
         self._drain_failed = asyncio.Event()
         self._drain_error: Exception | None = None
@@ -255,22 +258,42 @@ class WeightControlSession:
         targets: tuple[TargetExpert, ...],
         run: _StreamRun,
     ) -> None:
-        self._current_target_keys = {target.key for target in targets}
-        applied = await self._manager.apply_targets(placement_generation, targets)
-        if not applied and run.snapshot_ready.is_set():
-            return
+        target_keys = {target.key for target in targets}
+        superseded_tasks: list[asyncio.Task[None]] = []
+        async with self._drain_transition:
+            if placement_generation > self._current_placement_generation:
+                for active in tuple(self._active_drains.values()):
+                    authorization = active.authorization
+                    if (
+                        not authorization.stop_accepting_all_computation
+                        and authorization.placement_generation < placement_generation
+                    ):
+                        self._remember_superseded(authorization)
+                        active.task.cancel()
+                        superseded_tasks.append(active.task)
 
-        boundary = self._reporter.mark_changes()
-        observed_generation, states = await self._manager.snapshot()
-        if observed_generation != placement_generation:
-            raise RuntimeError("Weight Manager snapshot generation does not match targets")
-        ready_targets = tuple(
-            (state.key.layer_id, state.key.expert_id)
-            for state in states
-            if state.state is ExpertStateKind.READY and state.key in self._current_target_keys
-        )
-        if ready_targets:
-            await self._receiver.clear_expert_drains(ready_targets)
+            applied = await self._manager.apply_targets(placement_generation, targets)
+            self._current_placement_generation = placement_generation
+            self._current_target_keys = target_keys
+            skip_snapshot = not applied and run.snapshot_ready.is_set()
+            if not skip_snapshot:
+                boundary = self._reporter.mark_changes()
+                observed_generation, states = await self._manager.snapshot()
+                if observed_generation != placement_generation:
+                    raise RuntimeError("Weight Manager snapshot generation does not match targets")
+                ready_targets = tuple(
+                    (state.key.layer_id, state.key.expert_id)
+                    for state in states
+                    if state.state is ExpertStateKind.READY
+                    and state.key in self._current_target_keys
+                )
+                if ready_targets:
+                    await self._receiver.clear_expert_drains(ready_targets)
+
+        if superseded_tasks:
+            await asyncio.gather(*superseded_tasks, return_exceptions=True)
+        if skip_snapshot:
+            return
 
         if not run.snapshot_ready.is_set():
             group = self._reporter.full_state_parts(
@@ -368,6 +391,11 @@ class WeightControlSession:
             await self._receiver.clear_expert_drains(sorted(ready))
 
     def _start_drain(self, authorization: DrainAuthorization) -> None:
+        superseded = self._superseded_drains.get(authorization.drain_id)
+        if superseded is not None:
+            if superseded != authorization:
+                raise ValueError("superseded drain ID was repeated with different content")
+            return
         completed = self._completed_drains.get(authorization.drain_id)
         if completed is not None:
             if completed != authorization:
@@ -379,6 +407,12 @@ class WeightControlSession:
             if active.authorization != authorization:
                 raise ValueError("active drain ID was repeated with different content")
             return
+        if (
+            not authorization.stop_accepting_all_computation
+            and authorization.placement_generation < self._current_placement_generation
+        ):
+            self._remember_superseded(authorization)
+            return
         task = asyncio.create_task(
             self._run_drain(authorization),
             name=f"weight-control-drain-{authorization.drain_id}",
@@ -389,11 +423,15 @@ class WeightControlSession:
         keys = authorization.experts
         wire_keys = tuple((key.layer_id, key.expert_id) for key in keys)
         try:
-            await self._receiver.begin_drain(
-                wire_keys,
-                min_topology_version=authorization.min_topology_version,
-                stop_all=authorization.stop_accepting_all_computation,
-            )
+            async with self._drain_transition:
+                if self._is_superseded(authorization):
+                    self._remember_superseded(authorization)
+                    return
+                await self._receiver.begin_drain(
+                    wire_keys,
+                    min_topology_version=authorization.min_topology_version,
+                    stop_all=authorization.stop_accepting_all_computation,
+                )
             if authorization.stop_accepting_all_computation:
                 deadline = self._shutdown_deadline
                 if deadline is None:
@@ -405,12 +443,19 @@ class WeightControlSession:
                     wire_keys,
                     monotonic_deadline=math.inf,
                 )
-            removed = await self._manager.remove_after_drain(
-                authorization.placement_generation,
-                keys,
-                whole_worker_shutdown=authorization.stop_accepting_all_computation,
-            )
+            async with self._drain_transition:
+                if self._is_superseded(authorization):
+                    self._remember_superseded(authorization)
+                    return
+                removed = await self._manager.remove_after_drain(
+                    authorization.placement_generation,
+                    keys,
+                    whole_worker_shutdown=authorization.stop_accepting_all_computation,
+                )
             if not removed:
+                if self._is_superseded(authorization):
+                    self._remember_superseded(authorization)
+                    return
                 raise RuntimeError("Controller drain uses an obsolete placement generation")
             report_sequence = await self._reporter.flush()
             await self._wait_report_enqueued(report_sequence)
@@ -427,6 +472,20 @@ class WeightControlSession:
             active = self._active_drains.get(authorization.drain_id)
             if active is not None and active.task is asyncio.current_task():
                 self._active_drains.pop(authorization.drain_id, None)
+
+    def _is_superseded(self, authorization: DrainAuthorization) -> bool:
+        return (
+            not authorization.stop_accepting_all_computation
+            and authorization.placement_generation < self._current_placement_generation
+        )
+
+    def _remember_superseded(self, authorization: DrainAuthorization) -> None:
+        previous = self._superseded_drains.get(authorization.drain_id)
+        if previous is not None and previous != authorization:
+            raise ValueError("superseded drain ID was repeated with different content")
+        if previous is None and len(self._superseded_drains) >= _COMPLETED_DRAIN_HISTORY:
+            self._superseded_drains.popitem(last=False)
+        self._superseded_drains[authorization.drain_id] = authorization
 
     def _remember_completed(self, authorization: DrainAuthorization) -> None:
         if len(self._completed_drains) >= _COMPLETED_DRAIN_HISTORY:

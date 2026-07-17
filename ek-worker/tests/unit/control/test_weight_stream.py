@@ -130,13 +130,15 @@ class FakeManager:
     ) -> bool:
         resolved = tuple(keys)
         self.removals.append((placement_generation, resolved, whole_worker_shutdown))
+        if placement_generation != self.generation:
+            return False
         retained = {state.key: state for state in self.states}
         for key in resolved:
             removed = ExpertState(key, ExpertStateKind.REMOVED)
             retained[key] = removed
             self.reporter.record(ExpertStateChange(placement_generation, removed))
         self.states = tuple(retained[key] for key in sorted(retained))
-        return placement_generation == self.generation
+        return True
 
 
 class FakeReceiver(WorkerBatchReceiver):
@@ -429,6 +431,156 @@ def test_drain_failure_terminates_the_stream_attempt() -> None:
             await session.run_once(DrainRpc(wait_forever_after_drain=True))
 
         assert isinstance(caught.value.__cause__, TimeoutError)
+        await session.close()
+
+    run(scenario())
+
+
+class ReassignBeforeDrainStartsRpc:
+    def __init__(self) -> None:
+        self.reassigned = asyncio.Event()
+        self.finish = asyncio.Event()
+
+    async def sync_weights(
+        self,
+        requests: AsyncIterator[weight_control_pb2.WorkerWeightMessage],
+    ) -> AsyncIterator[weight_control_pb2.ControllerWeightMessage]:
+        await anext(requests)
+        yield _target_part(4, ())
+        await anext(requests)
+        yield _drain_part(
+            drain_id=12,
+            generation=4,
+            experts=((0, 2),),
+        )
+        yield _target_part(5, ((0, 2),))
+        self.reassigned.set()
+        await self.finish.wait()
+
+
+class BlockingDrainReceiver(FakeReceiver):
+    def __init__(self) -> None:
+        super().__init__()
+        self.drain_started = asyncio.Event()
+        self.wait_cancelled = asyncio.Event()
+
+    async def begin_drain(
+        self,
+        experts: Iterable[tuple[int, int]],
+        *,
+        min_topology_version: int,
+        stop_all: bool,
+    ) -> None:
+        await super().begin_drain(
+            experts,
+            min_topology_version=min_topology_version,
+            stop_all=stop_all,
+        )
+        self.drain_started.set()
+
+    async def wait_experts_idle(
+        self,
+        experts: Iterable[tuple[int, int]],
+        *,
+        monotonic_deadline: float,
+    ) -> None:
+        assert monotonic_deadline == float("inf")
+        self.expert_idle.append(tuple(experts))
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            self.wait_cancelled.set()
+            raise
+
+
+class ReassignAfterDrainStartsRpc:
+    def __init__(self, receiver: BlockingDrainReceiver) -> None:
+        self._receiver = receiver
+        self.reassigned = asyncio.Event()
+        self.finish = asyncio.Event()
+
+    async def sync_weights(
+        self,
+        requests: AsyncIterator[weight_control_pb2.WorkerWeightMessage],
+    ) -> AsyncIterator[weight_control_pb2.ControllerWeightMessage]:
+        await anext(requests)
+        yield _target_part(4, ())
+        await anext(requests)
+        yield _drain_part(
+            drain_id=13,
+            generation=4,
+            experts=((0, 2),),
+        )
+        await self._receiver.drain_started.wait()
+        yield _target_part(5, ((0, 2),))
+        self.reassigned.set()
+        await self.finish.wait()
+
+
+def test_newer_assignment_supersedes_a_drain_task_that_has_not_started() -> None:
+    async def scenario() -> None:
+        reporter = _reporter()
+        key = WeightKey(0, 2)
+        manager = FakeManager(
+            reporter,
+            states=(ExpertState(key, ExpertStateKind.READY),),
+        )
+        receiver = FakeReceiver()
+        session = WeightControlSession(
+            worker_id="worker-0",
+            start_id="start-0",
+            max_experts=4,
+            shutdown_grace_secs=30,
+            manager=manager,
+            reporter=reporter,
+            receiver=receiver,
+        )
+        rpc = ReassignBeforeDrainStartsRpc()
+        running = asyncio.create_task(session.run_once(rpc))
+
+        await asyncio.wait_for(rpc.reassigned.wait(), timeout=1)
+        rpc.finish.set()
+        await asyncio.wait_for(running, timeout=1)
+
+        assert manager.generation == 5
+        assert manager.targets[0].key == key
+        assert manager.removals == []
+        assert receiver.begun == []
+        assert (0, 2) in {expert for group in receiver.cleared for expert in group}
+        await session.close()
+
+    run(scenario())
+
+
+def test_newer_assignment_cancels_an_active_obsolete_drain_and_clears_its_gate() -> None:
+    async def scenario() -> None:
+        reporter = _reporter()
+        key = WeightKey(0, 2)
+        manager = FakeManager(
+            reporter,
+            states=(ExpertState(key, ExpertStateKind.READY),),
+        )
+        receiver = BlockingDrainReceiver()
+        session = WeightControlSession(
+            worker_id="worker-0",
+            start_id="start-0",
+            max_experts=4,
+            shutdown_grace_secs=30,
+            manager=manager,
+            reporter=reporter,
+            receiver=receiver,
+        )
+        rpc = ReassignAfterDrainStartsRpc(receiver)
+        running = asyncio.create_task(session.run_once(rpc))
+
+        await asyncio.wait_for(rpc.reassigned.wait(), timeout=1)
+        rpc.finish.set()
+        await asyncio.wait_for(running, timeout=1)
+
+        assert receiver.begun == [(((0, 2),), 9, False)]
+        assert receiver.wait_cancelled.is_set()
+        assert (0, 2) in {expert for group in receiver.cleared for expert in group}
+        assert manager.removals == []
         await session.close()
 
     run(scenario())
