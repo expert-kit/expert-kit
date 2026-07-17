@@ -1,15 +1,15 @@
-FROM ubuntu:24.04 AS rust-base
+ARG RUST_IMAGE=rust:1.88.0
+FROM ${RUST_IMAGE} AS rust-base
 
 ARG PROXY
 ENV HTTP_PROXY=${PROXY}
 ENV HTTPS_PROXY=${PROXY}
 ENV NO_PROXY=localhost,127.0.0.1
-ENV PATH="/root/.cargo/bin:${PATH}"
+ENV CARGO_HOME=/root/.cargo
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     ca-certificates \
-    curl \
     libpq-dev \
     pkg-config \
     && rm -rf /var/lib/apt/lists/*
@@ -17,12 +17,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 FROM rust-base AS ek-rust-build
 
 WORKDIR /app
-COPY rust-toolchain.toml ./
-RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
-    | sh -s -- -y --default-toolchain none \
-    && rustup show
-
-RUN cargo install diesel_cli --no-default-features --features postgres
+RUN rustc --version && cargo --version
 
 COPY Cargo.toml Cargo.lock ./
 COPY ek-base/ ./ek-base/
@@ -35,6 +30,11 @@ RUN --mount=type=cache,target=/root/.cargo/registry \
     cargo build --release --locked -p ek-cli \
     && cp /app/target/release/ek-cli /tmp/ek-cli
 
+FROM rust-base AS ek-diesel-build
+
+RUN cargo install diesel_cli --version 2.2.12 --locked \
+    --no-default-features --features postgres
+
 FROM ubuntu:24.04 AS ek-runtime
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -43,7 +43,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /ek
-COPY --from=ek-rust-build /root/.cargo/bin/diesel /usr/local/bin/
+COPY --from=ek-diesel-build /root/.cargo/bin/diesel /usr/local/bin/
 COPY --from=ek-rust-build /tmp/ek-cli /usr/local/bin/
 
 RUN mkdir -p /etc/expert-kit && cat > /etc/expert-kit/config.yaml <<'EOF'
@@ -88,7 +88,11 @@ COPY --from=ek-rust-build /tmp/ek-cli /usr/local/bin/
 COPY ek-transport/ /opt/expert-kit/ek-transport/
 COPY ek-worker/ /opt/expert-kit/ek-worker/
 
-RUN uv sync --project /opt/expert-kit/ek-worker --locked --no-dev
+ARG UV_HTTP_TIMEOUT=300
+RUN --mount=type=cache,target=/root/.cache/uv \
+    UV_HTTP_TIMEOUT=${UV_HTTP_TIMEOUT} \
+    UV_LINK_MODE=copy \
+    uv sync --project /opt/expert-kit/ek-worker --locked --no-dev
 
 ENV PATH="/opt/expert-kit/ek-worker/.venv/bin:${PATH}"
 ENV NVIDIA_DRIVER_CAPABILITIES=compute,utility
