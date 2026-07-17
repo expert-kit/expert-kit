@@ -14,6 +14,7 @@ from expertkit_transport.contracts.receiver import (
     WorkerPositionBuffers,
     WorkerPositionSpec,
 )
+from expertkit_transport.contracts.routing import validate_and_convert_routing
 from expertkit_transport.contracts.transport import WorkerTransport
 
 __all__ = [
@@ -31,4 +32,5 @@ __all__ = [
     "WorkerPositionBuffers",
     "WorkerPositionSpec",
     "WorkerTransport",
+    "validate_and_convert_routing",
 ]

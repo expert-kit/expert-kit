@@ -7,6 +7,7 @@ import threading
 
 import torch
 from expertkit_transport.adapters.grpc import BlockingGrpcRoutedMoEClient
+from expertkit_transport.contracts import validate_and_convert_routing
 
 
 class RoutedMoEClient:
@@ -122,11 +123,14 @@ class RoutedMoEClient:
         ):
             raise ValueError("all Routed-MoE tensors must use the activation device")
 
+        encoded_experts, fp32_weights = validate_and_convert_routing(
+            expert_ids,
+            routing_weights,
+            experts_per_layer=self._experts_per_layer,
+        )
         self.start(device=hidden_states.device, dtype=hidden_states.dtype)
         transport = self._transport
         assert transport is not None
-        encoded_experts = expert_ids.to(dtype=torch.int32)
-        fp32_weights = routing_weights.to(dtype=torch.float32)
         return transport.execute(
             layer_id=layer_id,
             hidden_states=hidden_states,

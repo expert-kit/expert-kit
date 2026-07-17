@@ -113,3 +113,78 @@ def test_rejects_mismatched_router_shapes_before_transport_submission(
         )
     assert FakeTransport.instances == []
     routed.close()
+
+
+@pytest.mark.parametrize(
+    ("expert_ids", "weights", "message"),
+    [
+        (
+            torch.tensor([[2**32, 1]], dtype=torch.int64),
+            torch.tensor([[0.5, 0.5]]),
+            "configured expert range",
+        ),
+        (
+            torch.tensor([[-2, 1]], dtype=torch.int64),
+            torch.tensor([[0.5, 0.5]]),
+            "configured expert range",
+        ),
+        (
+            torch.tensor([[4, 1]], dtype=torch.int64),
+            torch.tensor([[0.5, 0.5]]),
+            "configured expert range",
+        ),
+        (
+            torch.tensor([[1.9, 1.0]], dtype=torch.float32),
+            torch.tensor([[0.5, 0.5]]),
+            "integer dtype",
+        ),
+        (
+            torch.tensor([[True, False]], dtype=torch.bool),
+            torch.tensor([[0.5, 0.5]]),
+            "integer dtype",
+        ),
+        (
+            torch.tensor([[-1, 1]], dtype=torch.int64),
+            torch.tensor([[0.5, 0.5]]),
+            "zero routing weight",
+        ),
+    ],
+)
+def test_rejects_invalid_routing_before_starting_transport(
+    monkeypatch,
+    expert_ids: torch.Tensor,
+    weights: torch.Tensor,
+    message: str,
+) -> None:
+    FakeTransport.instances.clear()
+    monkeypatch.setattr(client, "BlockingGrpcRoutedMoEClient", FakeTransport)
+    routed = routed_client()
+
+    with pytest.raises(ValueError, match=message):
+        routed.forward_layer(
+            layer_id=0,
+            hidden_states=torch.ones((1, 3)),
+            expert_ids=expert_ids,
+            routing_weights=weights,
+        )
+
+    assert FakeTransport.instances == []
+    routed.close()
+
+
+def test_forwards_valid_invalid_assignment_with_zero_weight(monkeypatch) -> None:
+    FakeTransport.instances.clear()
+    monkeypatch.setattr(client, "BlockingGrpcRoutedMoEClient", FakeTransport)
+    routed = routed_client()
+
+    routed.forward_layer(
+        layer_id=0,
+        hidden_states=torch.ones((1, 3)),
+        expert_ids=torch.tensor([[-1, 3]], dtype=torch.int64),
+        routing_weights=torch.tensor([[0.0, 1.0]], dtype=torch.float64),
+    )
+
+    call = FakeTransport.instances[0].calls[0]
+    assert call["expert_ids"].tolist() == [[-1, 3]]  # type: ignore[union-attr]
+    assert call["expert_ids"].dtype is torch.int32  # type: ignore[union-attr]
+    routed.close()

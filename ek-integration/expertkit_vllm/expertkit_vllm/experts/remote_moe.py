@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Any
 
 import torch
 from expertkit_transport.adapters.grpc import BlockingGrpcRoutedMoEClient
+from expertkit_transport.contracts import validate_and_convert_routing
 from expertkit_vllm.utils.config import collect_ek_client_config
 from torch import nn
 from vllm.config import CUDAGraphMode, get_current_vllm_config
@@ -237,11 +238,16 @@ class RemoteMoERunner(nn.Module):
             topk_indices_dtype=torch.int32,
             input_ids=input_ids,
         )
+        expert_ids, routing_weights = validate_and_convert_routing(
+            expert_ids,
+            routing_weights,
+            experts_per_layer=self.num_experts,
+        )
         routed_output = _client_for(self, hidden_states).execute(
             layer_id=self.layer_id,
             hidden_states=hidden_states,
             expert_ids=expert_ids,
-            routing_weights=routing_weights.to(torch.float32),
+            routing_weights=routing_weights,
             timeout_seconds=self.client_config.timeout_seconds,
         )
 
