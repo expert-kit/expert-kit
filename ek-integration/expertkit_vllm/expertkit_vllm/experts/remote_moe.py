@@ -60,7 +60,9 @@ def _remote_moe_impl(
     context = get_forward_context()
     layer = context.no_compile_layers[_resolve_layer_name(layer_name)]
     if not isinstance(layer, RemoteMoERunner):
-        raise RuntimeError("the vLLM forward context contains the wrong Expert Kit layer")
+        raise RuntimeError(
+            "the vLLM forward context contains the wrong Expert Kit layer"
+        )
     result = layer._forward_impl(hidden_states, router_logits, input_ids)
     hidden_states.copy_(result)
     return hidden_states
@@ -87,7 +89,9 @@ direct_register_custom_op(
 def _layer_id(prefix: str) -> int:
     match = _LAYER_PATTERN.search(prefix)
     if match is None:
-        raise ValueError(f"cannot determine a model layer number from prefix {prefix!r}")
+        raise ValueError(
+            f"cannot determine a model layer number from prefix {prefix!r}"
+        )
     return int(match.group(1))
 
 
@@ -106,7 +110,9 @@ def _num_layers() -> int:
     return value
 
 
-def _client_for(layer: RemoteMoERunner, hidden_states: torch.Tensor) -> BlockingGrpcRoutedMoEClient:
+def _client_for(
+    layer: RemoteMoERunner, hidden_states: torch.Tensor
+) -> BlockingGrpcRoutedMoEClient:
     config = layer.client_config
     key = (
         config.controller_endpoint,
@@ -316,7 +322,8 @@ def remote_fused_moe(
         "quant_config": quant_config is not None,
         "tensor_parallel": config.parallel_config.tensor_parallel_size != 1
         or tp_size not in (None, 1),
-        "prefill_context_parallel": config.parallel_config.prefill_context_parallel_size != 1
+        "prefill_context_parallel": config.parallel_config.prefill_context_parallel_size
+        != 1
         or pcp_size not in (None, 1),
         "expert_parallel": config.parallel_config.enable_expert_parallel,
         "sequence_parallel": is_sequence_parallel,
@@ -333,11 +340,14 @@ def remote_fused_moe(
         "zero_expert": zero_expert_type is not None,
         "hash_routing": hash_indices_table is not None,
         "custom_runner": runner_cls is not None or runner_args is not None,
-        "custom_experts": routed_experts_cls is not None or routed_experts_args is not None,
+        "custom_experts": routed_experts_cls is not None
+        or routed_experts_args is not None,
     }
     enabled = sorted(name for name, value in unsupported.items() if value)
     if enabled:
-        raise ValueError(f"Expert Kit remote MoE does not support: {', '.join(enabled)}")
+        raise ValueError(
+            f"Expert Kit remote MoE does not support: {', '.join(enabled)}"
+        )
     if not reduce_results:
         raise ValueError("Expert Kit remote MoE requires reduce_results=True")
     if activation != "silu":
@@ -352,7 +362,9 @@ def remote_fused_moe(
             num_expert_group=num_expert_group,
             topk_group=topk_group,
             scoring_func=scoring_func,
-            routed_scaling_factor=(1.0 if apply_routed_scale_to_output else routed_scaling_factor),
+            routed_scaling_factor=(
+                1.0 if apply_routed_scale_to_output else routed_scaling_factor
+            ),
             e_score_correction_bias=e_score_correction_bias,
             custom_routing_function=custom_routing_function,
         )
