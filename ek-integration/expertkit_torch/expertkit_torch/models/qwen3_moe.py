@@ -17,15 +17,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import argparse
-import json
-import os
 from typing import Any
 
 import torch
 import torch.nn.functional as F
-from expertkit_torch.client import RoutedMoEClient
-from expertkit_torch.utils.profiler_manager import ProfilerManager
 from torch import nn
 from transformers import (
     AutoModelForCausalLM,
@@ -33,6 +28,8 @@ from transformers import (
 )
 from transformers.models.qwen3_moe import modeling_qwen3_moe as qwen3_moe
 from transformers.utils.logging import set_verbosity_error
+
+from expertkit_torch.client import RoutedMoEClient
 
 set_verbosity_error()
 
@@ -52,7 +49,9 @@ def intercept_moe(
     enable_ek: bool = True,
     ek_addr: str = "localhost:5002",
     ek_instance_id: int = 1,
-):
+) -> None:
+    """Install the routed Expert Kit MoE block before loading the Qwen model."""
+
     class InterceptedMoE(nn.Module):
         client: RoutedMoEClient | None = None
 
@@ -183,23 +182,25 @@ model: AutoModelForCausalLM | None = None
 
 def evaluate_batch(
     *,
-    model_path="./",
-    prompts="What is MoE Model?",
-    output_max_length=64,
-    enable_ek=True,
-    ek_addr="localhost:5002",
-    ek_instance_id=1,
+    model_path: str = "./",
+    prompts: str | list[str] | None = "What is MoE Model?",
+    output_max_length: int = 64,
+    enable_ek: bool = True,
+    ek_addr: str = "localhost:5002",
+    ek_instance_id: int = 1,
 ) -> dict[str, Any]:
-    """
-    Batch inference with performance profiling.
+    """Generate responses with either routed Expert Kit or local Qwen experts.
 
     Args:
-        model_path: Path to the pretrained model
-        prompts: List of prompt strings for batch processing
-        enable_ek: Whether to enable expert knowledge
+        model_path: Local path to the pretrained Qwen checkpoint.
+        prompts: One prompt or a list of prompts.
+        output_max_length: Maximum number of generated tokens per prompt.
+        enable_ek: Whether to route expert computation through Expert Kit.
+        ek_addr: Controller Topology endpoint in ``host:port`` form.
+        ek_instance_id: Numeric model instance registered with the Controller.
 
     Returns:
-        Dictionary containing results and performance metrics
+        A mapping containing one decoded result per prompt.
     """
     if prompts is None:
         prompts = ["What is MoE Model?"]
@@ -227,210 +228,58 @@ def evaluate_batch(
             torch_dtype="auto",
         ).to(device)
 
-    # Initialize profiler manager with context manager
-    with ProfilerManager(batch_size=len(prompts)) as profiler:
-        # Wrap model with profiler - completely non-invasive
-        profiler.wrap_model(model)
+    batch_messages = []
+    for prompt in prompts:
+        messages = [{"role": "user", "content": prompt}]
+        text = tokenizer.apply_chat_template(
+            messages,
+            tokenize=False,
+            add_generation_prompt=True,
+            enable_thinking=True,
+        )
+        batch_messages.append(text)
 
-        # Prepare batch messages
-        batch_messages = []
-        for prompt in prompts:
-            messages = [{"role": "user", "content": prompt}]
-            text = tokenizer.apply_chat_template(
-                messages,
-                tokenize=False,
-                add_generation_prompt=True,
-                enable_thinking=True,
-            )
-            batch_messages.append(text)
+    model_inputs = tokenizer(
+        batch_messages,
+        return_tensors="pt",
+        padding=True,
+        truncation=True,
+    ).to(model.device)
 
-        # Tokenize batch inputs with padding
-        model_inputs = tokenizer(
-            batch_messages,
-            return_tensors="pt",
-            padding=True,
-            truncation=True,
-        ).to(model.device)
+    generated_ids = model.generate(
+        **model_inputs,
+        max_new_tokens=output_max_length,
+        pad_token_id=tokenizer.eos_token_id,
+    )
 
-        # Generate responses - profiling happens automatically via hooks
-        generated_ids = model.generate(
-            **model_inputs, max_new_tokens=output_max_length, pad_token_id=tokenizer.eos_token_id
+    results = []
+    for index, prompt in enumerate(prompts):
+        input_length = len(model_inputs.input_ids[index])
+        output_ids = generated_ids[index][input_length:].tolist()
+        if tokenizer.pad_token_id is not None:
+            output_ids = [token_id for token_id in output_ids if token_id != tokenizer.pad_token_id]
+
+        try:
+            thinking_end = len(output_ids) - output_ids[::-1].index(151668)
+        except ValueError:
+            thinking_end = max(len(output_ids) - 1, 0)
+
+        thinking_content = tokenizer.decode(
+            output_ids[:thinking_end],
+            skip_special_tokens=True,
+        ).strip("\n")
+        content = tokenizer.decode(
+            output_ids[thinking_end:],
+            skip_special_tokens=True,
+        ).strip("\n")
+        results.append(
+            {
+                "prompt": prompt,
+                "thinking_content": thinking_content,
+                "content": content,
+                "input_tokens": len(model_inputs.input_ids[index]),
+                "output_tokens": len(output_ids),
+            }
         )
 
-        # Process generated sequences
-        results = []
-        for i in range(len(prompts)):
-            # Extract output tokens
-            input_length = len(model_inputs.input_ids[i])
-            output_ids = generated_ids[i][input_length:].tolist()
-
-            # Remove padding tokens
-            if tokenizer.pad_token_id is not None:
-                output_ids = [
-                    token_id for token_id in output_ids if token_id != tokenizer.pad_token_id
-                ]
-
-            # Extract thinking content
-            try:
-                # Find </think> token (151668)
-                index = len(output_ids) - output_ids[::-1].index(151668)
-            except ValueError:
-                # Thinking not finished
-                index = len(output_ids) - 1
-
-            thinking_content = tokenizer.decode(output_ids[:index], skip_special_tokens=True).strip(
-                "\n"
-            )
-
-            content = tokenizer.decode(output_ids[index:], skip_special_tokens=True).strip("\n")
-
-            results.append(
-                {
-                    "prompt": prompts[i],
-                    "thinking_content": thinking_content,
-                    "content": content,
-                    "input_tokens": len(model_inputs.input_ids[i]),
-                    "output_tokens": len(output_ids),
-                }
-            )
-
-        # Context manager exit will automatically unwrap the model and print the report
-        return {"results": results, "performance": profiler.report()}
-
-
-def sharegpt(path, max_prompt_len=None):
-    if not os.path.exists(path):
-        raise FileNotFoundError(f"File does not exist: {path}")
-    if not os.path.isfile(path):
-        raise ValueError(f"Path is not a file: {path}")
-    with open(path, encoding="utf-8") as f:
-        data = json.load(f)
-    prompts = []
-    for item in data:
-        for conversation in item["conversations"]:
-            if conversation["from"] == "human":
-                if max_prompt_len is not None:
-                    prompts.append(conversation["value"][:max_prompt_len])
-                else:
-                    prompts.append(conversation["value"])
-    return prompts
-
-
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "--model_path",
-        type=str,
-        required=True,
-        help="Path to the model directory.",
-    )
-    parser.add_argument(
-        "--enable_ek",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-        help="Enable ExpertKit.",
-    )
-    parser.add_argument(
-        "--ek_instance_id",
-        type=int,
-        default=1,
-        help="The numeric model instance ID registered with the Controller.",
-    )
-    parser.add_argument(
-        "--ek_addr",
-        type=str,
-        default="localhost:5002",
-        help="The address of the ExpertKit controller.",
-    )
-    parser.add_argument(
-        "--detail_profile",
-        action="store_true",
-        help="Enable detailed profiling of model components (attention vs expert).",
-    )
-    parser.add_argument(
-        "--output_max",
-        type=int,
-        default=64,
-        help="The maximum output length for the model.",
-    )
-    parser.add_argument(
-        "--dataset",
-        choices=["none", "sharegpt"],
-        default="none",
-        help="The dataset to use for evaluation.",
-    )
-    parser.add_argument(
-        "--dataset_path",
-        type=str,
-        help="Path to the dataset file.",
-    )
-    parser.add_argument(
-        "--print_response",
-        action="store_true",
-        help="Print the response content.",
-    )
-    parser.add_argument(
-        "--max_prompt_len",
-        type=int,
-        default=None,
-        help="Maximum length of each prompt (applicable for ShareGPT dataset).",
-    )
-    parser.add_argument(
-        "--prompt_num",
-        type=int,
-        default=512,
-        help="The number of prompts to use for evaluation.",
-    )
-    args = parser.parse_args()
-
-    if args.dataset == "none":
-        # Use default prompts if no dataset is specified
-        test_prompts = [
-            "What is MoE Model?",
-            "Explain the benefits of mixture of experts.",
-            "How does MoE improve model efficiency?",
-            "Compare MoE with dense models.",
-        ] * args.prompt_num
-        test_prompts = test_prompts[: args.prompt_num]
-    elif args.dataset == "sharegpt":
-        # Validate that dataset_path is provided
-        if args.dataset_path is None:
-            raise ValueError("You must provide --dataset_path when using the 'sharegpt' dataset.")
-        # Load prompts from ShareGPT dataset
-        test_prompts = sharegpt(args.dataset_path, max_prompt_len=args.max_prompt_len)
-        if len(test_prompts) < args.prompt_num:
-            test_prompts *= (args.prompt_num // len(test_prompts)) + 1
-        test_prompts = test_prompts[: args.prompt_num]
-    else:
-        raise ValueError("Invalid dataset specified.")
-
-    test_batch_sizes = [1, 2, 4, 8, 16, 32, 64, 128, 256]
-    aggregated_results = []
-    for batch_size in test_batch_sizes:
-        for prompts in range(0, len(test_prompts), batch_size):
-            if prompts / batch_size >= 6:
-                break
-            batch_result = evaluate_batch(
-                model_path=args.model_path,
-                prompts=test_prompts[prompts : prompts + batch_size],
-                enable_ek=args.enable_ek,
-                ek_addr=args.ek_addr,
-                ek_instance_id=args.ek_instance_id,
-                output_max_length=args.output_max,
-            )
-            aggregated_results.extend(batch_result["results"])
-
-    if args.print_response:
-        for result in aggregated_results[:5]:
-            print()
-            print(f"Prompt: {result['prompt']}")
-            print(f"Thinking Content: {result['thinking_content']}")
-            print(f"Response: {result['content']}")
-            print(
-                f"Input Tokens: {result['input_tokens']}, Output Tokens: {result['output_tokens']}"
-            )
-            print("-" * 40)
-
-
-if __name__ == "__main__":
-    main()
+    return {"results": results}
