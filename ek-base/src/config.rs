@@ -182,6 +182,12 @@ pub struct WorkerPorts {
     pub main: u16,
 }
 
+impl Default for WorkerPorts {
+    fn default() -> Self {
+        Self { main: 51234 }
+    }
+}
+
 #[derive(Debug, Deserialize, Clone)]
 #[allow(unused)]
 pub struct CpuAffinityConfig {
@@ -225,6 +231,25 @@ pub struct WorkerSettings {
     /// unique experts within this window (default: 30; set 270 for Aliyun 5-min window)
     #[serde(default = "default_shutdown_grace_secs")]
     pub shutdown_grace_secs: u64,
+}
+
+impl Default for WorkerSettings {
+    fn default() -> Self {
+        Self {
+            id: default_worker_id(),
+            channel: default_worker_channel(),
+            listen: "0.0.0.0".to_string(),
+            broadcast: "127.0.0.1".to_string(),
+            ports: WorkerPorts::default(),
+            device: "cpu".to_string(),
+            backend: default_backend(),
+            drop_cache: false,
+            metrics: default_worker_metrics(),
+            advanced: None,
+            mem_capacity_mb: default_worker_mem_capacity_mb(),
+            shutdown_grace_secs: default_shutdown_grace_secs(),
+        }
+    }
 }
 
 fn default_worker_mem_capacity_mb() -> u64 {
@@ -331,6 +356,7 @@ pub struct Settings {
     pub db: DBSettings,
     pub weight: WeightSettings,
     pub controller: ControllerSettings,
+    #[serde(default)]
     pub worker: WorkerSettings,
 }
 
@@ -445,5 +471,43 @@ controller:
             .unwrap();
         let res = config.try_deserialize::<Settings>().unwrap();
         assert_eq!(res.worker.id, "override_test");
+    }
+
+    #[test]
+    fn controller_config_does_not_require_legacy_worker_settings() {
+        let example_yaml = r#"
+inference:
+  instance_name: qwen3-demo
+  model_name: Qwen3-30B-A3B
+  hidden_dim: 2048
+  intermediate_dim: 768
+
+db:
+  db_dsn: postgres://dev:dev@localhost:5432/dev
+  max_conn_size: 32
+
+weight:
+  server:
+    addr: http://localhost:6543
+  cache:
+    Fs:
+      path: /tmp/expert-kit/cache
+
+controller:
+  listen: 0.0.0.0
+  broadcast: localhost
+  ports:
+    intra: 5001
+    inter: 5002
+"#;
+        let config = config::Config::builder()
+            .add_source(File::from_str(example_yaml, FileFormat::Yaml))
+            .build()
+            .unwrap();
+
+        let settings = config.try_deserialize::<Settings>().unwrap();
+
+        assert_eq!(settings.worker.listen, "0.0.0.0");
+        assert_eq!(settings.worker.ports.main, 51234);
     }
 }
