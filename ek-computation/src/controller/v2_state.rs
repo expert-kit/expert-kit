@@ -168,6 +168,7 @@ struct Inner {
 struct WorkerRecord {
     registration: RegisterWorkerRequest,
     live: bool,
+    included_in_topology: bool,
     heartbeat_lease: u64,
     heartbeat_open: bool,
     last_heartbeat_sequence: Option<u64>,
@@ -351,6 +352,7 @@ impl ControllerV2State {
             WorkerRecord {
                 registration,
                 live: false,
+                included_in_topology: true,
                 heartbeat_lease: 0,
                 heartbeat_open: false,
                 last_heartbeat_sequence: None,
@@ -825,7 +827,7 @@ impl ControllerV2State {
                 && shutdown_replacements_ready(&inner, worker_id)
         };
         if should_create_shutdown {
-            let (instance_id, placement_generation, experts) = {
+            let (instance_id, placement_generation, experts, previous) = {
                 let worker = inner
                     .workers
                     .get(worker_id)
@@ -834,7 +836,27 @@ impl ControllerV2State {
                     worker.registration.instance_id,
                     worker.placement_generation,
                     ready_keys(worker),
+                    worker.clone(),
                 )
+            };
+            inner
+                .workers
+                .get_mut(worker_id)
+                .expect("validated worker must exist")
+                .included_in_topology = false;
+            let topology_changed = match publish_routes(
+                &mut inner,
+                instance_id,
+                experts.clone(),
+                self.store.as_ref(),
+            )
+            .await
+            {
+                Ok(changed) => changed,
+                Err(error) => {
+                    inner.workers.insert(worker_id.to_owned(), previous);
+                    return Err(error);
+                }
             };
             let min_topology_version = inner
                 .topologies
@@ -854,6 +876,9 @@ impl ControllerV2State {
                     experts,
                     completed: false,
                 });
+            if topology_changed {
+                notify(&mut inner, &self.changed);
+            }
         }
         let worker = inner
             .workers
@@ -1175,7 +1200,11 @@ async fn publish_routes(
         let mut replicas: Vec<WorkerRoute> = inner
             .workers
             .values()
-            .filter(|worker| worker.registration.instance_id == instance_id && worker.live)
+            .filter(|worker| {
+                worker.registration.instance_id == instance_id
+                    && worker.live
+                    && worker.included_in_topology
+            })
             .filter(|worker| worker.targets.contains_key(&key))
             .filter(|worker| {
                 worker
@@ -1971,18 +2000,29 @@ mod tests {
             )
             .await
             .unwrap();
+        assert_eq!(state.topology_version(7).await, 2);
         let drains = state
             .drain_authorizations("worker-0", "start-0")
             .await
             .unwrap();
         assert_eq!(drains.len(), 1);
         assert!(drains[0].parts[0].stop_accepting_all_computation);
-        assert_eq!(drains[0].parts[0].min_topology_version, 2);
+        assert_eq!(drains[0].parts[0].min_topology_version, 3);
+        let messages = state.topology_messages(7, 2).await.unwrap();
+        let topology_message::Message::Update(update) = messages[0].message.as_ref().unwrap()
+        else {
+            panic!("expected a topology update");
+        };
+        assert_eq!(update.previous_version, 2);
+        assert_eq!(update.topology_version, 3);
+        assert_eq!(update.changes[0].replicas.len(), 1);
+        assert_eq!(update.changes[0].replicas[0].worker_id, "worker-1");
 
         state
             .complete_drain("worker-0", "start-0", drains[0].drain_id)
             .await
             .unwrap();
+        assert_eq!(state.topology_version(7).await, 3);
         assert!(
             state
                 .close_heartbeat("worker-0", "start-0", first_lease)
