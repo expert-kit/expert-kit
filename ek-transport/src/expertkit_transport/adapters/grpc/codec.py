@@ -233,7 +233,7 @@ def decode_request_with_size(payload: bytes, spec: GrpcBatchSpec) -> DecodedRequ
             routing_weights=routing_weights,
             distinct_expert_ids=distinct,
         ),
-        retained_tensor_bytes=hidden_bytes + expert_bytes + routing_bytes,
+        retained_tensor_bytes=hidden_bytes + routing_bytes + routing_bytes,
     )
 
 
