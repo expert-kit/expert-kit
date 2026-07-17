@@ -43,3 +43,104 @@ jobs:
 
       - name: Run CPU tests
         run: uv run --project "${{ matrix.project }}" pytest "${{ matrix.tests }}"
+
+  worker-optional-check:
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - extra: ggml
+            import_check: import ggml
+            tests: ek-worker/tests/unit/backends/ggml ek-worker/tests/unit/test_factory.py
+          - extra: observability
+            import_check: import opentelemetry.sdk, prometheus_client
+            tests: ek-worker/tests/integration/observability
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.6.9"
+          enable-cache: true
+
+      - name: Install the locked optional environment
+        run: uv sync --project ek-worker --locked --extra "${{ matrix.extra }}"
+
+      - name: Verify the optional dependency is installed
+        run: uv run --project ek-worker python -c "${{ matrix.import_check }}"
+
+      - name: Run optional-profile tests
+        run: uv run --project ek-worker pytest ${{ matrix.tests }}
+
+  vllm-lightweight-check:
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.6.9"
+          enable-cache: true
+
+      - name: Install the locked lightweight environment
+        run: uv sync --project ek-worker --locked
+
+      - name: Run Ruff without installing vLLM
+        run: |
+          uv run --project ek-worker ruff check \
+            ek-integration/expertkit_vllm/expertkit_vllm \
+            ek-integration/expertkit_vllm/tests
+          uv run --project ek-worker ruff format --check \
+            ek-integration/expertkit_vllm/expertkit_vllm \
+            ek-integration/expertkit_vllm/tests
+
+      - name: Run lightweight vLLM tests without installing vLLM
+        working-directory: ek-integration/expertkit_vllm
+        env:
+          PYTHONPATH: .
+        run: uv run --project ../../ek-worker pytest tests
+
+  local-compose-check:
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Validate the CUDA Worker image target
+        run: |
+          docker build \
+            --check \
+            --target ek-worker-cuda-runtime \
+            --file container/Dockerfile.cpu \
+            .
+
+      - name: Validate local Compose GPU reservation
+        run: |
+          for compose_file in compose.yaml compose.build.yaml; do
+            docker compose \
+              -f "dev/local-example/${compose_file}" \
+              config --format json > "/tmp/${compose_file}.json"
+            python3 - "/tmp/${compose_file}.json" <<'PY'
+          import json
+          import sys
+
+          with open(sys.argv[1], encoding="utf-8") as source:
+              worker = json.load(source)["services"]["ek-worker"]
+          devices = (
+              worker.get("deploy", {})
+              .get("resources", {})
+              .get("reservations", {})
+              .get("devices", [])
+          )
+          assert any("gpu" in device.get("capabilities", []) for device in devices)
+          assert worker["environment"]["CUDA_VISIBLE_DEVICES"] == "0"
+          PY
+          done
