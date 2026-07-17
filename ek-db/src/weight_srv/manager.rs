@@ -54,7 +54,11 @@ impl WeightManager<'_> {
                     );
                 }
                 Err(e) => {
-                    log::warn!("failed to load expert index for model={}: {}", model_name, e);
+                    log::warn!(
+                        "failed to load expert index for model={}: {}",
+                        model_name,
+                        e
+                    );
                 }
             }
         }
@@ -88,20 +92,21 @@ impl WeightManager<'_> {
         let key = format!("{}/l{}-e{}", model, layer, eid);
 
         if let (Some(idx), Some(cache_dir)) = (self.indices.get(model), &self.cache_dir)
-            && idx.entries.get(&key).map(|e| e.cached).unwrap_or(false) {
-                let blob_path = cache_dir.join(model).join(format!("l{}-e{}", layer, eid));
-                match tokio::fs::read(&blob_path).await {
-                    Ok(bytes) => return Ok(bytes),
-                    Err(e) => {
-                        log::warn!(
-                            "index says {} is cached at {} but read failed: {}, falling back",
-                            key,
-                            blob_path.display(),
-                            e
-                        );
-                    }
+            && idx.entries.get(&key).map(|e| e.cached).unwrap_or(false)
+        {
+            let blob_path = cache_dir.join(model).join(format!("l{}-e{}", layer, eid));
+            match tokio::fs::read(&blob_path).await {
+                Ok(bytes) => return Ok(bytes),
+                Err(e) => {
+                    log::warn!(
+                        "index says {} is cached at {} but read failed: {}, falling back",
+                        key,
+                        blob_path.display(),
+                        e
+                    );
                 }
             }
+        }
 
         // Slow path: existing mmap + serialize.
         let pretrained = self.load_pretrained(model.to_owned()).await?;

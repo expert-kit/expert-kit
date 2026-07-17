@@ -97,9 +97,11 @@ impl MemCache {
             let old_len = old.len();
             drop(old);
             self.map.insert(key, value);
-            let _ = self.total_bytes.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |cur| {
-                Some(cur.saturating_sub(old_len).saturating_add(incoming))
-            });
+            let _ = self
+                .total_bytes
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |cur| {
+                    Some(cur.saturating_sub(old_len).saturating_add(incoming))
+                });
             return;
         }
 
@@ -127,9 +129,11 @@ impl MemCache {
 
     fn remove(&self, key: &str) {
         if let Some((_, v)) = self.map.remove(key) {
-            let _ = self.total_bytes.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |cur| {
-                Some(cur.saturating_sub(v.len()))
-            });
+            let _ = self
+                .total_bytes
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |cur| {
+                    Some(cur.saturating_sub(v.len()))
+                });
         }
     }
 
