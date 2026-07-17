@@ -36,6 +36,26 @@ pub struct TargetSubscription {
     updates: mpsc::Receiver<Result<Vec<TargetExpert>, Status>>,
 }
 
+impl TargetSubscription {
+    /// Build one placement subscription supplied by a Controller integration.
+    ///
+    /// The identifier must remain unique for the lifetime of the matching Worker
+    /// weight stream. Closing `updates` ends that stream and causes `unsubscribe`
+    /// to be called with the same identifier.
+    pub fn new(
+        subscription_id: u64,
+        initial: Vec<TargetExpert>,
+        updates: mpsc::Receiver<Result<Vec<TargetExpert>, Status>>,
+    ) -> Self {
+        assert!(subscription_id > 0, "subscription ID must be positive");
+        Self {
+            subscription_id,
+            initial,
+            updates,
+        }
+    }
+}
+
 #[async_trait]
 pub trait WeightControlHooks: Send + Sync + 'static {
     async fn subscribe(
