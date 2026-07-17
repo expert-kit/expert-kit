@@ -1,127 +1,58 @@
-####################################
-# BASE STAGE
-####################################
-FROM openeuler/openeuler:22.03-lts-sp4 AS base
-
-ARG TORCH_VERSION
-
-# Env variables
-## Torch Related
-ENV TORCH_VERSION=${TORCH_VERSION:-2.5.1}
-ENV LIBTORCH_BASE_DIR=/opt/torch
-ENV LIBTORCH=${LIBTORCH_BASE_DIR}/libtorch
-ENV LIBTORCH_EXT_LIBS=${LIBTORCH_BASE_DIR}/torch.libs
-ENV LD_LIBRARY_PATH=${LIBTORCH}/lib:${LIBTORCH_EXT_LIBS}
-## Rust Related
-ENV PATH="/root/.cargo/bin:/root/.local/bin:${PATH}"
-
-# Install essential build dependencies
-RUN dnf install -y \
-    git \
-    python3 \
-    wget \
-    tar \
-    curl \
-    pkg-config  \
-    openssl-devel \
-    unzip  \
-    protobuf-compiler \
-    libpq-devel
-
-# Prepare libtorch
-RUN mkdir -p ${LIBTORCH} && mkdir -p ${LIBTORCH_EXT_LIBS}
-COPY --from=quay.io/ascend/vllm-ascend:v0.8.4rc1-openeuler /usr/local/python3.10/lib/python3.10/site-packages/torch ${LIBTORCH}
-COPY --from=quay.io/ascend/vllm-ascend:v0.8.4rc1-openeuler /usr/local/python3.10/lib/python3.10/site-packages/torch.libs ${LIBTORCH_EXT_LIBS}
-
-# # Prepare Ascend
-# COPY --from=quay.io/ascend/vllm-ascend:v0.8.4rc1-openeuler /usr/local/Ascend /usr/local/Ascend
-# RUN cat >> ~/.bashrc <<EOF
-# source /usr/local/Ascend/ascend-toolkit/set_env.sh
-# source /usr/local/Ascend/nnal/atb/set_env.sh
-# EOF
-
-####################################
-# rust build STAGE
-####################################
-FROM base AS ek-rust-build
+FROM openeuler/openeuler:22.03-lts-sp4 AS rust-base
 
 ARG PROXY
-# Env variables
-## Proxy
 ENV HTTP_PROXY=${PROXY}
 ENV HTTPS_PROXY=${PROXY}
 ENV NO_PROXY=localhost,127.0.0.1
-## Rust build related
-ENV RUSTFLAGS="-C link-args=-Wl,-rpath,${LIBTORCH}/lib"
-ENV CXXFLAGS="-D_GLIBCXX_USE_CXX11_ABI=0"
+ENV PATH="/root/.cargo/bin:${PATH}"
 
-# Prepare build env
-RUN dnf groupinstall -y 'Development Tools'
+RUN dnf install -y \
+    curl \
+    gcc \
+    gcc-c++ \
+    git \
+    libpq-devel \
+    make \
+    openssl-devel \
+    pkg-config \
+    && dnf clean all
 
-# Prepare rust toolchain
+FROM rust-base AS ek-rust-build
+
 WORKDIR /app
-COPY rust-toolchain.toml /app
-RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain none && \
-    rustup show
+COPY rust-toolchain.toml ./
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+    | sh -s -- -y --default-toolchain none \
+    && rustup show
 
-# Install migration Tools
-RUN cargo install diesel_cli --no-default-features --features "postgres"
+RUN cargo install diesel_cli --no-default-features --features postgres
 
-# Build Rust
-WORKDIR /app
-## Build dependencies
-RUN cargo new --lib ek-base && \
-    cargo new --lib ek-benchmark && \
-    cargo new --lib ek-computation && \
-    cargo new --lib ek-db && \
-    cargo new --lib ek-cli
-COPY ./ek-base/Cargo.toml ./ek-base/
-COPY ./ek-benchmark/Cargo.toml ./ek-benchmark/
-COPY ./ek-computation/Cargo.toml ./ek-computation/
-COPY ./ek-cli/Cargo.toml ./ek-cli/
-COPY ./ek-db/Cargo.toml ./ek-db/
-COPY ./Cargo.toml ./Cargo.lock ./
-# TODO: hard code for tch-rs, for only tch-rs==0.18.1 work for libtorch==2.5.1
-RUN sed -i 's/tch = "0.20.0"/tch = "0.18.1"\ntorch-sys = "0.18.1"/g' Cargo.toml
-RUN --mount=type=cache,target=/usr/local/cargo/registry cargo build --release --lib
-## Build the rest of the project
+COPY Cargo.toml Cargo.lock ./
 COPY ek-base/ ./ek-base/
-COPY ek-benchmark/ ./ek-benchmark/
-COPY ek-computation/ ./ek-computation/
 COPY ek-cli/ ./ek-cli/
+COPY ek-computation/ ./ek-computation/
 COPY ek-db/ ./ek-db/
 COPY ek-proto/ ./ek-proto/
+RUN --mount=type=cache,target=/root/.cargo/registry \
+    --mount=type=cache,target=/app/target \
+    cargo build --release --locked -p ek-cli \
+    && cp /app/target/release/ek-cli /tmp/ek-cli
 
-RUN --mount=type=cache,target=/usr/local/cargo/registry  <<EOF
-    touch ./ek-base/src/lib.rs
-    touch ./ek-computation/src/lib.rs
-    touch ./ek-benchmark/src/lib.rs
-    touch ./ek-db/src/lib.rs
-    touch ./ek-cli/src/lib.rs
-    cargo build --release
-EOF
+FROM openeuler/openeuler:22.03-lts-sp4 AS ek-runtime
 
-####################################
-# RUNTIME STAGE
-####################################
-FROM base AS ek-runtime
+RUN dnf install -y ca-certificates libpq && dnf clean all
 
-# Set env
 WORKDIR /ek
-
-# Copy binary from build stage
 COPY --from=ek-rust-build /root/.cargo/bin/diesel /usr/local/bin/
-COPY --from=ek-rust-build /app/target/release/ek-cli /usr/local/bin/
+COPY --from=ek-rust-build /tmp/ek-cli /usr/local/bin/
 
-# Prepare ek default config
-# Create default config with a readable format
-RUN mkdir -p /etc/expert-kit && cat > /etc/expert-kit/config.yaml <<EOF
+RUN mkdir -p /etc/expert-kit && cat > /etc/expert-kit/config.yaml <<'EOF'
 inference:
   instance_name: qwen3_moe_30b_local_test
-  model_name: ds-tiny
+  model_name: qwen3
   hidden_dim: 2048
   intermediate_dim: 768
-  
+
 db:
   db_dsn: postgres://dev:dev@localhost:5432/dev
   max_conn_size: 32
@@ -133,13 +64,6 @@ weight:
     Fs:
       path: /ek/weight_cache
 
-worker:
-  id: local_test
-  listen: 0.0.0.0
-  broadcast: 0.0.0.0
-  ports:
-    main: 51234
-
 controller:
   listen: 0.0.0.0
   broadcast: localhost
@@ -148,4 +72,4 @@ controller:
     inter: 5002
 EOF
 
-ENTRYPOINT [ "" ]
+ENTRYPOINT [""]

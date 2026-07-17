@@ -11,21 +11,9 @@ db:
 weight:
   server:
     addr: http://WEIGHT_SERVER_ADDR:6543
-  wm_listen: 0.0.0.0:5004
-  wm_broadcast: WORKER_EXTERNAL_IP:5004
-  mem_cache_mb: 32768        # 32 GB mem cache for A10/A100 workers
   cache:
     Fs:
       path: /data/expert-kit/cache
-
-worker:
-  id: WORKER_ID              # Set via EK_WORKER_ID env var in practice
-  listen: 0.0.0.0
-  broadcast: WORKER_EXTERNAL_IP
-  ports:
-    main: 51234
-  mem_capacity_mb: 32768     # 32 GB; adjust per instance type
-  shutdown_grace_secs: 270   # Aliyun spot gives ~5 min notice
 
 controller:
   listen: 0.0.0.0
@@ -36,18 +24,7 @@ controller:
   fault_detection:
     heartbeat_timeout_secs: 10
 
-  replication:
-    enabled: true
-    hotspot_threshold: 50     # higher threshold for production load
-    target_rate_per_worker: 50
-    max_replicas: 3
-
-  provisioning:
-    enabled: true
-    script: "./scripts/provision-aliyun.sh"
-    cooldown_secs: 300
-
-  # scaling:                  # enable to auto-assign experts when a new spot instance joins
+  # scaling:                  # enable to auto-assign experts when a new Worker joins
   #   auto_assign: true
   #   experts_per_step: 16    # larger stripes for fast NVMe-backed workers
   #   step_delay_ms: 500      # give the worker time to load each stripe before the next

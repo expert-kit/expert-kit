@@ -1,0 +1,50 @@
+model:
+  instance_id: {{ ek_instance_id }}
+  name: "{{ ek_model_name }}"
+  weight_version: "{{ ek_worker_weight_version }}"
+  num_layers: {{ ek_model_num_layers }}
+  experts_per_layer: {{ ek_model_experts_per_layer }}
+  hidden_dim: {{ ek_model_hidden_dim }}
+  expert_intermediate_dim: {{ ek_model_expert_intermediate_dim }}
+  top_k: {{ ek_model_top_k }}
+  activation_dtype: "{{ ek_worker_activation_dtype }}"
+  weight_dtype: "{{ ek_worker_weight_dtype }}"
+
+worker:
+  id: "{{ ek_worker_id }}"
+  backend: "{{ ek_worker_backend }}"
+  device: "{{ ek_worker_device }}"
+  max_batch_tokens: {{ ek_worker_max_batch_tokens }}
+  max_active_batches_per_device: {{ ek_worker_max_active_batches }}
+  device_memory_limit: "{{ ek_worker_device_memory_limit }}"
+  shutdown_grace_secs: {{ ek_worker_shutdown_grace_secs }}
+
+transport:
+  grpc:
+    listen: "0.0.0.0:{{ ek_worker_grpc_port }}"
+    advertise: "{{ ek_worker_advertise_host }}:{{ ek_worker_grpc_port }}"
+
+controller:
+  endpoint: "{{ ek_controller_addr }}"
+  heartbeat_interval_secs: 3
+  heartbeat_timeout_secs: 10
+
+weight_manager:
+  max_concurrent_loads: {{ ek_worker_max_concurrent_loads }}
+  disk_cache:
+    path: "{{ ek_worker_cache_dir }}"
+    writeback: true
+  peer:
+    listen: "0.0.0.0:{{ ek_worker_peer_port }}"
+    advertise: "http://{{ ek_worker_advertise_host }}:{{ ek_worker_peer_port }}"
+  weight_server_endpoint: "{{ ek_weight_server_addr }}"
+
+logging:
+  level: INFO
+  format: json
+
+observability:
+  prometheus:
+    enabled: false
+  tracing:
+    enabled: false

@@ -1,0 +1,45 @@
+name: Python Worker checks
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: ["dev"]
+    types: [opened, synchronize, reopened]
+
+jobs:
+  python-check:
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - project: ek-transport
+            source: ek-transport/src
+            tests: ek-transport/tests
+          - project: ek-worker
+            source: ek-worker/src
+            tests: ek-worker/tests
+          - project: ek-integration/expertkit_torch
+            source: ek-integration/expertkit_torch/expertkit_torch
+            tests: ek-integration/expertkit_torch/tests
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.6.9"
+          enable-cache: true
+
+      - name: Install the locked environment
+        run: uv sync --project "${{ matrix.project }}" --locked
+
+      - name: Run Ruff
+        run: |
+          uv run --project "${{ matrix.project }}" ruff check "${{ matrix.source }}" "${{ matrix.tests }}"
+          uv run --project "${{ matrix.project }}" ruff format --check "${{ matrix.source }}" "${{ matrix.tests }}"
+
+      - name: Run CPU tests
+        run: uv run --project "${{ matrix.project }}" pytest "${{ matrix.tests }}"

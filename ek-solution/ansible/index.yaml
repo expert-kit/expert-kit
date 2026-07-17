@@ -1,6 +1,5 @@
 ---
 - hosts: all
-  become: yes # Needed for installing to /opt
+  become: true
   roles:
-    # - torch
     - ek_worker

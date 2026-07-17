@@ -1,20 +1,14 @@
-- name: Ensure the weight cache directory exists
-  ansible.builtin.file:
-    path: "{{ ek_worker_weight_cache_dir }}"
-    state: directory
-    mode: "0755"
-    owner: root
-    group: root
+- name: Verify the Python Worker is installed
+  ansible.builtin.stat:
+    path: "{{ ek_worker_executable }}"
+  register: ek_worker_executable_stat
 
-- name: Ensure the bin dir exists
-  ansible.builtin.file:
-    path: "{{ ek_worker_bin_dir }}"
-    state: directory
-    mode: "0755"
-    owner: root
-    group: root
+- name: Reject an image without the Python Worker
+  ansible.builtin.fail:
+    msg: "The image must contain the locked Python Worker at {{ ek_worker_executable }}."
+  when: not ek_worker_executable_stat.stat.exists
 
-- name: Ensure the config dir exists
+- name: Create the Worker configuration directory
   ansible.builtin.file:
     path: "{{ ek_worker_config_dir }}"
     state: directory
@@ -22,30 +16,35 @@
     owner: root
     group: root
 
-- name: Copy ek worker binary
-  ansible.builtin.copy:
-    src: "{{ ek_worker_bin }}"
-    dest: "{{ ek_worker_bin_dir }}/ek-cli"
+- name: Create the Worker disk-cache directory
+  ansible.builtin.file:
+    path: "{{ ek_worker_cache_dir }}"
+    state: directory
     mode: "0755"
     owner: root
     group: root
 
-- name: Copy ek worker config
-  ansible.builtin.copy:
-    src: "{{ ek_worker_config }}"
-    dest: "{{ ek_worker_config_dir }}/config.yaml"
+- name: Render the Python Worker configuration
+  ansible.builtin.template:
+    src: worker.yaml.j2
+    dest: "{{ ek_worker_config_path }}"
     mode: "0644"
     owner: root
     group: root
+  notify: Restart Expert Kit Worker
 
-- name: Prepare env
-  ansible.builtin.blockinfile:
-    path: "/root/.bashrc"
-    block: |
-      export PATH=$PATH:{{ ek_worker_bin_dir }}
-      export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/opt/libtorch/lib
-      export EK_WORKER_ID={{ inventory_hostname }}
-      export EK_WORKER_BROADCAST={{ ansible_ssh_host }}
+- name: Install the Worker systemd unit
+  ansible.builtin.template:
+    src: expertkit-worker.service.j2
+    dest: "/etc/systemd/system/{{ ek_worker_service_name }}.service"
+    mode: "0644"
+    owner: root
+    group: root
+  notify: Restart Expert Kit Worker
 
-    marker_begin: "# {mark} ANSIBLE MANAGED BLOCK"
-    marker_end: "# {mark} ANSIBLE MANAGED BLOCK"
+- name: Start the Python Worker
+  ansible.builtin.systemd_service:
+    name: "{{ ek_worker_service_name }}"
+    enabled: true
+    state: started
+    daemon_reload: true

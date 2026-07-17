@@ -79,8 +79,7 @@ Package-specific documentation:
 - `ek-proto`: protobuf contracts for Worker computation and Controller control
   streams.
 - `ek-integration`: Torch and vLLM Frontend integrations.
-- `ek-computation`: Rust Controller and the control-plane state used during the
-  migration.
+- `ek-computation`: Rust Controller, placement, topology, and recovery state.
 - `ek-db`: metadata access, SafeTensors handling, and the central Weight Server.
 - `ek-cli`: unified service and administrative command entry point.
 

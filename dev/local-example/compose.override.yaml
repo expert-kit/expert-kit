@@ -1,4 +1,3 @@
-version: "3"
 services:
   ek-weight-server:
     command: 
@@ -26,9 +25,7 @@ services:
       - RUST_LOG=debug
 
   ek-worker:
-    command: ["ek-cli", "worker"]
+    command: ["ek-cli", "--config", "/etc/expert-kit/worker.yaml", "worker"]
     volumes:
-      - *config_path_map
-      - *model_path_map
-    environment:
-      - RUST_LOG=info
+      - ./worker.yaml:/etc/expert-kit/worker.yaml:ro
+      - ../../data/worker-cache:/ek/worker_cache

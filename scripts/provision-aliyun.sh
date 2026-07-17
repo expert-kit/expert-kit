@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# provision-aliyun.sh — Launch Aliyun ECS Spot worker nodes for Expert Kit.
+# provision-aliyun.sh — Launch and configure Aliyun ECS Spot Python Workers.
 #
-# Called by the ElasticManager provisioner when a capacity shortfall is detected:
+# Invoke this administrative script directly:
 #   provision-aliyun.sh --count <N> --model <model> --instance <instance>
 #
 # Required environment variables (set in the controller environment):
@@ -14,10 +14,14 @@
 #   ALIYUN_KEY_PAIR        SSH key pair name
 #   EK_CONTROLLER_ADDR     Controller intra-node gRPC address (host:5001)
 #   EK_WEIGHT_SERVER_ADDR  Weight server HTTP address (http://host:6543)
-#   EK_DB_DSN              Postgres DSN for the worker config
-#   EK_CONFIG_TEMPLATE     Path to aliyun.config.yaml template (default: dev/aliyun.config.yaml)
+#   EK_INSTANCE_ID         Existing numeric Controller model-instance ID
+#   EK_MODEL_NUM_LAYERS
+#   EK_MODEL_EXPERTS_PER_LAYER
+#   EK_MODEL_HIDDEN_DIM
+#   EK_MODEL_EXPERT_INTERMEDIATE_DIM
+#   EK_MODEL_TOP_K
+#   EK_WORKER_DEVICE_MEMORY_LIMIT  Python ByteSize value such as 20GiB
 #   ANSIBLE_PLAYBOOK       Path to ansible playbook (default: ek-solution/ansible/index.yaml)
-#   EK_CLI_BIN             Path to ek-cli binary (default: ./target/release/ek-cli)
 
 set -euo pipefail
 
@@ -46,9 +50,13 @@ echo "[provision] count=$COUNT model=$MODEL instance=$INSTANCE"
 ALIYUN_REGION="${ALIYUN_REGION:-cn-hangzhou}"
 ALIYUN_ZONE="${ALIYUN_ZONE:-cn-hangzhou-h}"
 ALIYUN_INSTANCE_TYPE="${ALIYUN_INSTANCE_TYPE:-ecs.gn6i-c4g1.xlarge}"
-EK_CONFIG_TEMPLATE="${EK_CONFIG_TEMPLATE:-dev/aliyun.config.yaml}"
 ANSIBLE_PLAYBOOK="${ANSIBLE_PLAYBOOK:-ek-solution/ansible/index.yaml}"
-EK_CLI_BIN="${EK_CLI_BIN:-./target/release/ek-cli}"
+EK_WORKER_EXECUTABLE="${EK_WORKER_EXECUTABLE:-/opt/expert-kit/ek-worker/.venv/bin/ek-worker}"
+EK_WORKER_DEVICE="${EK_WORKER_DEVICE:-cuda:0}"
+EK_WORKER_BACKEND="${EK_WORKER_BACKEND:-torch}"
+EK_WORKER_ACTIVATION_DTYPE="${EK_WORKER_ACTIVATION_DTYPE:-bf16}"
+EK_WORKER_WEIGHT_DTYPE="${EK_WORKER_WEIGHT_DTYPE:-bf16}"
+EK_WORKER_WEIGHT_VERSION="${EK_WORKER_WEIGHT_VERSION:-main}"
 
 # ── Launch ECS Spot instances ──────────────────────────────────────────────────
 echo "[provision] launching $COUNT ECS Spot instance(s) in $ALIYUN_REGION/$ALIYUN_ZONE"
@@ -134,13 +142,25 @@ trap "rm -f $INVENTORY_FILE" EXIT
     echo "  vars:"
     echo "    ek_controller_addr: ${EK_CONTROLLER_ADDR:?EK_CONTROLLER_ADDR not set}"
     echo "    ek_weight_server_addr: ${EK_WEIGHT_SERVER_ADDR:?EK_WEIGHT_SERVER_ADDR not set}"
-    echo "    ek_db_dsn: ${EK_DB_DSN:?EK_DB_DSN not set}"
     echo "    ek_model_name: $MODEL"
-    echo "    ek_instance_name: $INSTANCE"
+    echo "    ek_instance_id: ${EK_INSTANCE_ID:?EK_INSTANCE_ID not set}"
+    echo "    ek_model_num_layers: ${EK_MODEL_NUM_LAYERS:?EK_MODEL_NUM_LAYERS not set}"
+    echo "    ek_model_experts_per_layer: ${EK_MODEL_EXPERTS_PER_LAYER:?EK_MODEL_EXPERTS_PER_LAYER not set}"
+    echo "    ek_model_hidden_dim: ${EK_MODEL_HIDDEN_DIM:?EK_MODEL_HIDDEN_DIM not set}"
+    echo "    ek_model_expert_intermediate_dim: ${EK_MODEL_EXPERT_INTERMEDIATE_DIM:?EK_MODEL_EXPERT_INTERMEDIATE_DIM not set}"
+    echo "    ek_model_top_k: ${EK_MODEL_TOP_K:?EK_MODEL_TOP_K not set}"
+    echo "    ek_worker_device_memory_limit: '${EK_WORKER_DEVICE_MEMORY_LIMIT:?EK_WORKER_DEVICE_MEMORY_LIMIT not set}'"
+    echo "    ek_worker_executable: '$EK_WORKER_EXECUTABLE'"
+    echo "    ek_worker_device: '$EK_WORKER_DEVICE'"
+    echo "    ek_worker_backend: '$EK_WORKER_BACKEND'"
+    echo "    ek_worker_activation_dtype: '$EK_WORKER_ACTIVATION_DTYPE'"
+    echo "    ek_worker_weight_dtype: '$EK_WORKER_WEIGHT_DTYPE'"
+    echo "    ek_worker_weight_version: '$EK_WORKER_WEIGHT_VERSION'"
     echo "  hosts:"
     for IP in "${PUBLIC_IPS[@]}"; do
         echo "    $IP:"
         echo "      ansible_user: root"
+        echo "      ek_worker_advertise_host: '$IP'"
         echo "      ansible_ssh_common_args: '-o StrictHostKeyChecking=no'"
     done
 } > "$INVENTORY_FILE"
@@ -148,22 +168,4 @@ trap "rm -f $INVENTORY_FILE" EXIT
 echo "[provision] running ansible playbook: $ANSIBLE_PLAYBOOK"
 ansible-playbook -i "$INVENTORY_FILE" "$ANSIBLE_PLAYBOOK"
 
-# ── Register new nodes in EK scheduler ────────────────────────────────────────
-# Build a static inventory snippet and call ek-cli schedule static to register
-# the new workers. The workers will connect back via heartbeat automatically,
-# but pre-registering lets the scheduler assign experts immediately.
-NODE_INVENTORY="$(mktemp /tmp/ek-nodes-XXXX.yaml)"
-trap "rm -f $INVENTORY_FILE $NODE_INVENTORY" EXIT
-
-{
-    echo "nodes:"
-    for IP in "${PUBLIC_IPS[@]}"; do
-        echo "  - addr: $IP:51234"
-        echo "    channel: grpc"
-    done
-} > "$NODE_INVENTORY"
-
-echo "[provision] registering nodes with ek-cli"
-"$EK_CLI_BIN" schedule static --inventory "$NODE_INVENTORY"
-
-echo "[provision] done: $COUNT node(s) provisioned and registered"
+echo "[provision] done: $COUNT Python Worker node(s) provisioned and started for instance $INSTANCE"

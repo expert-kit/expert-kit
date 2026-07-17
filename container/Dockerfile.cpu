@@ -1,119 +1,58 @@
-####################################
-# BASE STAGE
-####################################
-FROM ubuntu:24.04 AS base
+FROM ubuntu:24.04 AS rust-base
 
 ARG PROXY
-ARG TORCH_VERSION
-
-# Env variables
-## Proxy
 ENV HTTP_PROXY=${PROXY}
 ENV HTTPS_PROXY=${PROXY}
 ENV NO_PROXY=localhost,127.0.0.1
-## Torch Related
-ENV TORCH_VERSION=${TORCH_VERSION:-2.7.0}
+ENV PATH="/root/.cargo/bin:${PATH}"
 
-ENV LIBTORCH_BASE_DIR=/opt/torch
-ENV LIBTORCH=${LIBTORCH_BASE_DIR}/libtorch
-ENV LD_LIBRARY_PATH=${LIBTORCH}/lib
-## Rust Related
-ENV PATH="/root/.cargo/bin:/root/.local/bin:${PATH}"
-ENV CXXFLAGS="-D_GLIBCXX_USE_CXX11_ABI=1"
-
-# Install essential build dependencies
-RUN apt-get update && apt-get install -y \
+RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
-    pkg-config  \
-    unzip  \
-    tar \
-    git \
-    wget \
+    ca-certificates \
     curl \
-    libssl-dev \
-    libpq-dev\
-    protobuf-compiler
+    libpq-dev \
+    pkg-config \
+    && rm -rf /var/lib/apt/lists/*
 
-# Prepare libtorch
-WORKDIR /
-RUN mkdir -p ${LIBTORCH_BASE_DIR} && \
-    wget -q https://download.pytorch.org/libtorch/cpu/libtorch-cxx11-abi-shared-with-deps-${TORCH_VERSION}%2Bcpu.zip && \
-    unzip /libtorch-cxx11-abi-shared-with-deps-${TORCH_VERSION}+cpu.zip -d ${LIBTORCH_BASE_DIR} && \
-    rm /libtorch-cxx11-abi-shared-with-deps-${TORCH_VERSION}+cpu.zip
+FROM rust-base AS ek-rust-build
 
-####################################
-# RUST BUILD STAGE
-####################################
-FROM base AS ek-rust-build
-
-# Prepare rust toolchain
 WORKDIR /app
-COPY rust-toolchain.toml /app/
-RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain none && \
-    rustup show
+COPY rust-toolchain.toml ./
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+    | sh -s -- -y --default-toolchain none \
+    && rustup show
 
-# Install migration Tools
-RUN cargo install diesel_cli --no-default-features --features "postgres"
+RUN cargo install diesel_cli --no-default-features --features postgres
 
-# Build Rust
-WORKDIR /app
-## Build dependencies
-RUN cargo new --lib ek-base && \
-    cargo new --lib ek-benchmark && \
-    cargo new --lib ek-computation && \
-    cargo new --lib ek-db && \
-    cargo new --lib ek-cli
-COPY ./ek-base/Cargo.toml ./ek-base/
-COPY ./ek-benchmark/Cargo.toml ./ek-benchmark/
-COPY ./ek-computation/Cargo.toml ./ek-computation/
-COPY ./ek-cli/Cargo.toml ./ek-cli/
-COPY ./ek-db/Cargo.toml ./ek-db/
-COPY ./Cargo.toml ./Cargo.lock ./
-RUN --mount=type=cache,target=/usr/local/cargo/registry cargo build --release --lib
-
-## Build the rest of the project
+COPY Cargo.toml Cargo.lock ./
 COPY ek-base/ ./ek-base/
-COPY ek-benchmark/ ./ek-benchmark/
-COPY ek-computation/ ./ek-computation/
 COPY ek-cli/ ./ek-cli/
+COPY ek-computation/ ./ek-computation/
 COPY ek-db/ ./ek-db/
 COPY ek-proto/ ./ek-proto/
-RUN --mount=type=cache,target=/usr/local/cargo/registry  <<EOF
-    touch ./ek-base/src/lib.rs
-    touch ./ek-computation/src/lib.rs
-    touch ./ek-benchmark/src/lib.rs
-    touch ./ek-db/src/lib.rs
-    touch ./ek-cli/src/lib.rs
-    cargo build --release
-EOF
+RUN --mount=type=cache,target=/root/.cargo/registry \
+    --mount=type=cache,target=/app/target \
+    cargo build --release --locked -p ek-cli \
+    && cp /app/target/release/ek-cli /tmp/ek-cli
 
-####################################
-# RUNTIME STAGE
-####################################
-FROM base AS ek-runtime
+FROM ubuntu:24.04 AS ek-runtime
 
-# Set env
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    libpq5 \
+    && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /ek
-ENV LIBTORCH=/opt/torch/libtorch
-ENV LD_LIBRARY_PATH=$LIBTORCH/lib
-# Unset proxy
-ENV HTTP_PROXY=
-ENV HTTPS_PROXY=
-ENV NO_PROXY=
-
-# Copy binary from build stage
 COPY --from=ek-rust-build /root/.cargo/bin/diesel /usr/local/bin/
-COPY --from=ek-rust-build /app/target/release/ek-cli /usr/local/bin/
+COPY --from=ek-rust-build /tmp/ek-cli /usr/local/bin/
 
-# Prepare ek default config
-# Create default config with a readable format
-RUN mkdir -p /etc/expert-kit && cat > /etc/expert-kit/config.yaml <<EOF
+RUN mkdir -p /etc/expert-kit && cat > /etc/expert-kit/config.yaml <<'EOF'
 inference:
   instance_name: qwen3_moe_30b_local_test
-  model_name: ds-tiny
+  model_name: qwen3
   hidden_dim: 2048
   intermediate_dim: 768
-  
+
 db:
   db_dsn: postgres://dev:dev@localhost:5432/dev
   max_conn_size: 32
@@ -123,14 +62,7 @@ weight:
     addr: http://localhost:6543
   cache:
     Fs:
-      path: /ek/weight_cache/
-
-worker:
-  id: local_test
-  listen: 0.0.0.0
-  broadcast: 0.0.0.0
-  ports:
-    main: 51234
+      path: /ek/weight_cache
 
 controller:
   listen: 0.0.0.0
@@ -140,4 +72,24 @@ controller:
     inter: 5002
 EOF
 
-ENTRYPOINT [ "" ]
+ENTRYPOINT [""]
+
+FROM ubuntu:24.04 AS ek-worker-runtime
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    libpq5 \
+    python3.12 \
+    python3.12-venv \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=ghcr.io/astral-sh/uv:0.6.9 /uv /uvx /usr/local/bin/
+COPY --from=ek-rust-build /tmp/ek-cli /usr/local/bin/
+COPY ek-transport/ /opt/expert-kit/ek-transport/
+COPY ek-worker/ /opt/expert-kit/ek-worker/
+
+RUN uv sync --project /opt/expert-kit/ek-worker --locked --no-dev
+
+ENV PATH="/opt/expert-kit/ek-worker/.venv/bin:${PATH}"
+WORKDIR /opt/expert-kit
+ENTRYPOINT [""]

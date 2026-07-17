@@ -3,126 +3,17 @@ api:
   address: 0.0.0.0:8686
 
 sources:
-  # https://vector.dev/docs/reference/configuration/sources/file/
-  scrape_worker_log:
-    type: file
-    line_delimiter: "\n"
-    include:
-      - /log/*.log
-    data_dir: /data/
-  # https://vector.dev/docs/reference/configuration/sources/prometheus_scrape/
-  scrape_controller:
-    type: prometheus_scrape
-    endpoints:
-      - http://host.docker.internal:9080/metrics
-    scrape_interval_secs: 5
-  scrape_worker:
+  scrape_workers:
     type: prometheus_scrape
     endpoints:
       - http://host.docker.internal:9091/metrics
       - http://host.docker.internal:9092/metrics
     scrape_timeout_secs: 1
     scrape_interval_secs: 5
-transforms:
-  wo_expert_activation:
-    type: remap
-    inputs:
-      - scrape_worker
-    source: |-
-      if contains(string!(.name),"worker_expert_activation") {
-        abort
-      }
-  filter_expert_detail_activation:
-    type: filter
-    inputs:
-      - scrape_worker_log
-    condition: 'contains(string!(.message),"expert activation")'
-
-  activation_detail_log:
-    type: remap
-    inputs:
-      - filter_expert_detail_activation
-    source: |-
-      l = parse_regex!(.message, r'.*worker_id=(?P<worker>.*) model_name=(?P<model>.*) expert=(?P<expert>.*) count=(?P<count>.*)')
-      exp = parse_regex!(l.expert, r'.*l(?P<layer>\d+)-e(?P<idx>\d+)')
-
-      row = {}
-      row.worker = l.worker
-      row.model = l.model
-      row.layer = exp.layer
-      row.idx = exp.idx
-      row.count = l.count
-      . = row
-      row
-
-  expert_activation:
-    type: filter
-    inputs:
-      - scrape_worker
-    condition: '.name == "worker_expert_activation"'
-
-  activation_log:
-    type: metric_to_log
-    inputs:
-      - expert_activation
-
-  trail_activation_log:
-    type: remap
-    inputs:
-      - activation_log
-    source: |-
-      row = {}
-      row.worker = .tags.worker
-      row.model= .tags.model
-      exp = parse_regex!(.tags.expert, r'.*l(?P<layer>\d+)-e(?P<idx>\d+)')
-      row.layer = exp.layer
-      row.idx = exp.idx
-      row.count = to_int!(.counter.value)
-      . = row
 
 sinks:
-  # https://vector.dev/docs/reference/configuration/sinks/clickhouse/
-  clickhouse:
-    type: clickhouse
-    auth:
-      strategy: basic
-      user: dev
-      password: dev
-    batch:
-      max_bytes: 10000000
-      timeout_secs: 5
-    inputs:
-      - trail_activation_log
-    endpoint: host.docker.internal:8123
-    table: expert_activate
-    database: dev
-
-  clickhouse_detail:
-    type: clickhouse
-    auth:
-      strategy: basic
-      user: dev
-      password: dev
-    batch:
-      max_bytes: 10000000
-      timeout_secs: 5
-    inputs:
-      - activation_detail_log
-    endpoint: host.docker.internal:8123
-    table: expert_activate_detail
-    database: dev
-  # https://vector.dev/docs/reference/configuration/sinks/prometheus_exporter/
-  prometheus_exp:
-    inputs:
-      - scrape_controller
-      - wo_expert_activation
+  prometheus:
     type: prometheus_exporter
+    inputs:
+      - scrape_workers
     address: 0.0.0.0:32122
-  # console:
-  #   type: console
-  #   encoding:
-  #     codec: "json"
-  #     json:
-  #       pretty: true
-  #   inputs:
-  #     - activation_detail_log

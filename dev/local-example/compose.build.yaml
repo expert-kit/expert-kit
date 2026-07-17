@@ -1,4 +1,3 @@
-version: "3"
 services:
   ek-postgres:
     container_name: ek-postgres
@@ -80,18 +79,17 @@ services:
     build:
       context: ../../
       dockerfile: ./container/Dockerfile.cpu
-      target: ek-runtime
+      target: ek-worker-runtime
     container_name: ek-worker
     restart: unless-stopped
     depends_on:
       - ek-controller
-    command: ["ek-cli", "worker"]
+    command: ["ek-cli", "--config", "/etc/expert-kit/worker.yaml", "worker"]
+    ports:
+      - 51234:51234
     volumes:
-      - ./config.yaml:/etc/expert-kit/config.yaml
-      - ../../data/qwen3/ek-qwen3:/ek/qwen3
-    environment:
-      - EK_WORKER_ID=local-dev
-      - RUST_LOG=info
+      - ./worker.yaml:/etc/expert-kit/worker.yaml:ro
+      - ../../data/worker-cache:/ek/worker_cache
     networks:
       - expert-kit-network
 

@@ -1,0 +1,14 @@
+[Unit]
+Description=Expert Kit Python Worker
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart={{ ek_worker_executable }} --config {{ ek_worker_config_path }}
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec={{ ek_worker_shutdown_grace_secs + 5 }}
+
+[Install]
+WantedBy=multi-user.target

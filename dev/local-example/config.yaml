@@ -5,7 +5,7 @@ inference:
   intermediate_dim: 768
   
 db:
-  db_dsn: postgres://dev:dev@localhost:5432/dev
+  db_dsn: postgres://dev:dev@ek-postgres:5432/dev
   max_conn_size: 32
 
 weight:
@@ -14,13 +14,6 @@ weight:
   cache:
     Fs:
       path: /tmp/expert-kit/cache
-
-worker:
-  id: local-dev
-  listen: 0.0.0.0
-  broadcast: ek-worker
-  ports:
-    main: 51234
 
 controller:
   listen: 0.0.0.0

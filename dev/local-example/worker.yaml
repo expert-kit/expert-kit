@@ -1,0 +1,51 @@
+# The example assumes the scheduled model instance has database ID 1.
+model:
+  instance_id: 1
+  name: qwen3
+  weight_version: main
+  num_layers: 48
+  experts_per_layer: 128
+  hidden_dim: 2048
+  expert_intermediate_dim: 768
+  top_k: 8
+  activation_dtype: bf16
+  weight_dtype: bf16
+
+worker:
+  id: local-dev
+  backend: torch
+  device: cuda:0
+  max_batch_tokens: 4096
+  max_active_batches_per_device: 1
+  device_memory_limit: 20GiB
+  shutdown_grace_secs: 30
+
+transport:
+  grpc:
+    listen: 0.0.0.0:51234
+    advertise: ek-worker:51234
+
+controller:
+  endpoint: ek-controller:5001
+  heartbeat_interval_secs: 3
+  heartbeat_timeout_secs: 10
+
+weight_manager:
+  max_concurrent_loads: 64
+  disk_cache:
+    path: /ek/worker_cache
+    writeback: true
+  peer:
+    listen: 0.0.0.0:5004
+    advertise: http://ek-worker:5004
+  weight_server_endpoint: http://ek-weight-server:6543
+
+logging:
+  level: INFO
+  format: json
+
+observability:
+  prometheus:
+    enabled: false
+  tracing:
+    enabled: false

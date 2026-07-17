@@ -1,5 +1,17 @@
-ek_worker_weight_cache_dir: /var/expert-kit/cache
-ek_worker_bin_dir: /opt/expert-kit/
-ek_worker_config_dir: /etc/expert-kit/
-ek_worker_bin: ../../target/release/ek-cli
-ek_worker_config: ../../dev/dsv3-test.config.yaml
+ek_worker_executable: /opt/expert-kit/ek-worker/.venv/bin/ek-worker
+ek_worker_config_dir: /etc/expert-kit
+ek_worker_config_path: "{{ ek_worker_config_dir }}/worker.yaml"
+ek_worker_cache_dir: "/var/cache/expert-kit/{{ inventory_hostname }}"
+ek_worker_service_name: expertkit-worker
+ek_worker_id: "{{ inventory_hostname }}"
+ek_worker_device: cuda:0
+ek_worker_backend: torch
+ek_worker_grpc_port: 51234
+ek_worker_peer_port: 5004
+ek_worker_max_batch_tokens: 4096
+ek_worker_max_active_batches: 1
+ek_worker_max_concurrent_loads: 64
+ek_worker_shutdown_grace_secs: 30
+ek_worker_weight_version: main
+ek_worker_activation_dtype: bf16
+ek_worker_weight_dtype: bf16
