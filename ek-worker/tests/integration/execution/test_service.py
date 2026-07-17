@@ -261,6 +261,50 @@ def test_execution_limits_active_work_to_fixed_positions() -> None:
     run(scenario())
 
 
+def test_cancelled_response_does_not_cancel_active_computation() -> None:
+    async def scenario() -> None:
+        backend = BlockingBackend(expected_active=1)
+        server, client, execution = await start_stack(backend)
+        first_output = client.output_buffers.prepare(OutputSpec(4, 3, torch.float32, "cpu"))
+        second_output = client.output_buffers.prepare(OutputSpec(4, 3, torch.float32, "cpu"))
+        first = asyncio.create_task(
+            client.submit(
+                worker_batch(),
+                first_output,
+                monotonic_deadline=float("inf"),
+            )
+        )
+        try:
+            assert await asyncio.to_thread(backend.started.wait, 2) is True
+            first.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await first
+
+            backend.release.set()
+            async with asyncio.timeout(2):
+                await server.wait_all_idle(monotonic_deadline=float("inf"))
+                await client.submit(
+                    worker_batch(),
+                    second_output,
+                    monotonic_deadline=float("inf"),
+                )
+
+            torch.testing.assert_close(
+                second_output.tensor[:2],
+                torch.tensor([[3, 6, 9], [12, 15, 18]], dtype=torch.float32),
+            )
+            assert server.active_count == 0
+            assert server.pending_count == 0
+        finally:
+            backend.release.set()
+            await asyncio.gather(first, return_exceptions=True)
+            client.output_buffers.release(first_output)
+            client.output_buffers.release(second_output)
+            await close_stack(client, execution)
+
+    run(scenario())
+
+
 def test_fatal_backend_error_stops_execution() -> None:
     async def scenario() -> None:
         backend = TestBackend()
