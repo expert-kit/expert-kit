@@ -76,9 +76,16 @@ class TorchWeightAdapter(WeightAdapter[TorchExpertWeights, TorchExpertWeights]):
             down_proj=self._view(down, (self._hidden_dim, self._intermediate_dim)),
         )
 
-    def make_ready_weight(self, cpu_weight: TorchExpertWeights) -> TorchExpertWeights:
+    def make_ready_weight(
+        self,
+        cpu_weight: TorchExpertWeights,
+        *,
+        layer_id: int,
+        expert_id: int,
+    ) -> TorchExpertWeights:
         """Copy or convert CPU views directly into final Torch tensors."""
 
+        del layer_id, expert_id
         if cpu_weight.device.type != "cpu":
             raise ValueError("Torch cached weight must be on CPU")
         if cpu_weight.dtype != self._source_dtype:

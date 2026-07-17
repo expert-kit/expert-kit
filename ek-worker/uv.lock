@@ -266,6 +266,9 @@ dependencies = [
 ]
 
 [package.optional-dependencies]
+fused = [
+    { name = "triton" },
+]
 ggml = [
     { name = "ggml-python" },
 ]
@@ -297,8 +300,9 @@ requires-dist = [
     { name = "pyyaml", specifier = ">=6,<7" },
     { name = "structlog", specifier = ">=25.4,<26" },
     { name = "torch", specifier = "==2.11.0" },
+    { name = "triton", marker = "extra == 'fused'", specifier = "==3.6.0" },
 ]
-provides-extras = ["ggml", "observability"]
+provides-extras = ["fused", "ggml", "observability"]
 
 [package.metadata.requires-dev]
 dev = [

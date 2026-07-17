@@ -88,9 +88,16 @@ class GgmlWeightAdapter(WeightAdapter[GgmlCpuWeights, GgmlExpertWeights]):
             down_proj=self._view(down, (self._hidden_dim, self._intermediate_dim)),
         )
 
-    def make_ready_weight(self, cpu_weight: GgmlCpuWeights) -> GgmlExpertWeights:
+    def make_ready_weight(
+        self,
+        cpu_weight: GgmlCpuWeights,
+        *,
+        layer_id: int,
+        expert_id: int,
+    ) -> GgmlExpertWeights:
         """Convert once to the configured dtype and create direct ggml views."""
 
+        del layer_id, expert_id
         if not isinstance(cpu_weight, GgmlCpuWeights):
             raise TypeError("GGML cached weight has the wrong object type")
         if cpu_weight.dtype != self._source_dtype:

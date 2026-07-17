@@ -53,7 +53,7 @@ def test_ggml_adapter_builds_ready_cpu_views(dtype: torch.dtype) -> None:
     adapter = _adapter(dtype, dtype)
 
     cpu_weight = adapter.make_cpu_weight(parse_safetensors(source))
-    ready = adapter.make_ready_weight(cpu_weight)
+    ready = adapter.make_ready_weight(cpu_weight, layer_id=0, expert_id=0)
 
     assert ready.dtype == dtype
     assert ready.gate_proj.data_ptr() == cpu_weight.gate_proj.data_ptr()
@@ -65,7 +65,7 @@ def test_ggml_adapter_converts_weights_once_during_ready_creation() -> None:
     adapter = _adapter(torch.float32, torch.bfloat16)
 
     cpu_weight = adapter.make_cpu_weight(parse_safetensors(_source(torch.float32)))
-    ready = adapter.make_ready_weight(cpu_weight)
+    ready = adapter.make_ready_weight(cpu_weight, layer_id=0, expert_id=0)
 
     assert cpu_weight.dtype == torch.float32
     assert ready.dtype == torch.bfloat16

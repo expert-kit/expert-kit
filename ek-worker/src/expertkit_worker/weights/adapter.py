@@ -37,8 +37,14 @@ class WeightAdapter[CpuWeightT, ReadyWeightT](ABC):
         """Create the cached CPU object from validated source regions."""
 
     @abstractmethod
-    def make_ready_weight(self, cpu_weight: CpuWeightT) -> ReadyWeightT:
-        """Create and fully synchronize the final computation object."""
+    def make_ready_weight(
+        self,
+        cpu_weight: CpuWeightT,
+        *,
+        layer_id: int,
+        expert_id: int,
+    ) -> ReadyWeightT:
+        """Create and synchronize the final object for one stable expert position."""
 
     @abstractmethod
     def cpu_extra_bytes(self) -> int:

@@ -21,6 +21,9 @@ dependencies = [
 ek-worker = "expertkit_worker.cli:main"
 
 [project.optional-dependencies]
+fused = [
+    "triton==3.6.0",
+]
 ggml = [
     "ggml-python==0.0.45",
 ]

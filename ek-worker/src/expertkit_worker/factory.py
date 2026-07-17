@@ -107,7 +107,22 @@ def _create_weight_adapter(
             source_dtype=source_dtype,
             compute_dtype=compute_dtype,
         )
-    raise NotImplementedError("the fused Backend is not implemented in this build")
+    try:
+        from expertkit_worker.backends.fused import FusedWeightAdapter
+    except ModuleNotFoundError as error:
+        if error.name == "triton":
+            raise RuntimeError("the fused Backend requires the locked fused extra") from error
+        raise
+
+    return FusedWeightAdapter(
+        num_layers=config.model.num_layers,
+        experts_per_layer=config.model.experts_per_layer,
+        hidden_dim=config.model.hidden_dim,
+        intermediate_dim=config.model.expert_intermediate_dim,
+        source_dtype=source_dtype,
+        compute_dtype=compute_dtype,
+        device=device,
+    )
 
 
 def _create_backend(
@@ -141,7 +156,23 @@ def _create_backend(
             cpu_threads=config.ggml.cpu_threads,
             acquire_many=acquire_many,
         )
-    raise NotImplementedError("the fused Backend is not implemented in this build")
+    try:
+        from expertkit_worker.backends.fused import FusedBackend
+    except ModuleNotFoundError as error:
+        if error.name == "triton":
+            raise RuntimeError("the fused Backend requires the locked fused extra") from error
+        raise
+
+    return FusedBackend(
+        num_layers=config.model.num_layers,
+        experts_per_layer=config.model.experts_per_layer,
+        hidden_dim=config.model.hidden_dim,
+        intermediate_dim=config.model.expert_intermediate_dim,
+        top_k=config.model.top_k,
+        dtype=dtype,
+        device=device,
+        acquire_many=acquire_many,
+    )
 
 
 def _memory_info(device: torch.device) -> tuple[int, int]:
@@ -165,15 +196,12 @@ async def build_worker_application(config: WorkerConfig) -> WorkerApplication:
     """Build the selected MVP Worker without starting network listeners.
 
     Raises:
-        NotImplementedError: The fused Backend remains disabled in this build.
         RuntimeError: A selected Backend extra is absent or memory cannot be queried.
         ValueError: Startup resource planning or a component contract is invalid.
     """
 
     if not isinstance(config, WorkerConfig):
         raise TypeError("config must be a WorkerConfig")
-    if config.worker.backend is BackendName.FUSED:
-        raise NotImplementedError("the fused Backend is not implemented in this build")
     activation_dtype = _DTYPE[config.model.activation_dtype]
     weight_dtype = _DTYPE[config.model.weight_dtype]
     device = torch.device(config.worker.device)

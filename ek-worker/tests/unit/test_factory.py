@@ -35,7 +35,7 @@ def _config(cache_path: Path, *, backend: str = "torch") -> WorkerConfig:
             "device": worker_device,
             "max_batch_tokens": 4,
             "max_active_batches_per_device": 1,
-            "device_memory_limit": "1GiB",
+            "device_memory_limit": "513MiB" if backend == "fused" else "1GiB",
         },
         "transport": {
             "max_pending_batches_per_device": 1,
@@ -79,10 +79,12 @@ def test_factory_builds_and_closes_ggml_worker(tmp_path: Path) -> None:
     asyncio.run(scenario())
 
 
-def test_factory_rejects_fused_before_device_initialization(tmp_path: Path) -> None:
+@pytest.mark.cuda
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_factory_builds_and_closes_fused_worker(tmp_path: Path) -> None:
     async def scenario() -> None:
-        with pytest.raises(NotImplementedError, match="fused Backend is not implemented"):
-            await build_worker_application(_config(tmp_path, backend="fused"))
+        application = await build_worker_application(_config(tmp_path, backend="fused"))
+        await application.close()
 
     asyncio.run(scenario())
 

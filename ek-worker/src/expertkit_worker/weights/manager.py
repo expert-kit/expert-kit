@@ -533,7 +533,8 @@ class WeightManager[CpuWeightT, ReadyWeightT]:
                     try:
                         try:
                             ready_weight, conversion_cancelled = await self._make_ready_weight(
-                                cpu_lease
+                                key,
+                                cpu_lease,
                             )
                             cancelled = cancelled or conversion_cancelled
                         except WeightPlacementFatalError as error:
@@ -585,13 +586,18 @@ class WeightManager[CpuWeightT, ReadyWeightT]:
 
     async def _make_ready_weight(
         self,
+        key: WeightKey,
         lease: CpuWeightLease[CpuWeightT],
     ) -> tuple[ReadyWeightT, bool]:
         loop = asyncio.get_running_loop()
         work = loop.run_in_executor(
             self._conversion_executor,
-            self._adapter.make_ready_weight,
-            lease.cached.value,
+            partial(
+                self._adapter.make_ready_weight,
+                lease.cached.value,
+                layer_id=key.layer_id,
+                expert_id=key.expert_id,
+            ),
         )
         cancelled = False
         while True:

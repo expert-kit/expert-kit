@@ -119,7 +119,14 @@ class _FakeAdapter(WeightAdapter[object, object]):
     def make_cpu_weight(self, source: object) -> object:
         return source
 
-    def make_ready_weight(self, cpu_weight: object) -> object:
+    def make_ready_weight(
+        self,
+        cpu_weight: object,
+        *,
+        layer_id: int,
+        expert_id: int,
+    ) -> object:
+        del layer_id, expert_id
         if cpu_weight == "invalid":
             raise ValueError("unsupported weight metadata")
         if cpu_weight == "fatal":

@@ -1,0 +1,33 @@
+name: Fused CUDA qualification
+
+on:
+  workflow_dispatch:
+
+jobs:
+  fused-cuda-check:
+    runs-on: [self-hosted, linux, x64, nvidia]
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.6.9"
+          enable-cache: true
+
+      - name: Install the locked fused environment
+        run: uv sync --project ek-worker --locked --extra fused
+
+      - name: Verify NVIDIA CUDA is available
+        run: |
+          uv run --project ek-worker python -c \
+            "import torch; assert torch.cuda.is_available(); print(torch.cuda.get_device_name(0))"
+
+      - name: Run fused CUDA qualification tests
+        run: |
+          uv run --project ek-worker pytest \
+            ek-worker/tests/unit/backends/fused \
+            ek-worker/tests/unit/test_factory.py \
+            -m cuda

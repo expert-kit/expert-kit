@@ -50,6 +50,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          - extra: fused
+            import_check: import triton; import expertkit_worker.backends.fused
+            tests: ek-worker/tests/unit/backends/fused ek-worker/tests/unit/config/test_models.py
           - extra: ggml
             import_check: import ggml
             tests: ek-worker/tests/unit/backends/ggml ek-worker/tests/unit/test_factory.py

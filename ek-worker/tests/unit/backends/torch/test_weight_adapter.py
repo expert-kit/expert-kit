@@ -61,7 +61,7 @@ def test_torch_adapter_builds_zero_copy_cpu_views(dtype: torch.dtype) -> None:
 
     oracle = official_load(bytes(owned))
     assert oracle["model.expert.gate_proj.weight"][0, 0].item() == 9
-    ready = adapter.make_ready_weight(cpu_weight)
+    ready = adapter.make_ready_weight(cpu_weight, layer_id=0, expert_id=0)
     assert ready.gate_proj.data_ptr() == cpu_weight.gate_proj.data_ptr()
     assert adapter.cpu_extra_bytes() == 0
     assert adapter.source_tensor_bytes() == 3 * _HIDDEN_DIM * _INTERMEDIATE_DIM * dtype.itemsize
@@ -84,7 +84,7 @@ def test_torch_adapter_converts_only_during_ready_weight_creation() -> None:
     adapter = make_adapter(torch.float32, torch.bfloat16)
 
     cpu_weight = adapter.make_cpu_weight(parse_safetensors(owned))
-    ready = adapter.make_ready_weight(cpu_weight)
+    ready = adapter.make_ready_weight(cpu_weight, layer_id=0, expert_id=0)
 
     assert cpu_weight.dtype is torch.float32
     assert ready.dtype is torch.bfloat16
@@ -124,7 +124,7 @@ def test_torch_adapter_classifies_cuda_placement_failures_as_fatal(
     adapter = make_adapter(torch.float32, torch.float32, "cuda:0")
 
     with pytest.raises(WeightPlacementFatalError) as caught:
-        adapter.make_ready_weight(FailingWeight())
+        adapter.make_ready_weight(FailingWeight(), layer_id=0, expert_id=0)
 
     assert caught.value.reason is expected_reason
 
@@ -134,7 +134,11 @@ def test_torch_adapter_places_final_weight_on_configured_cuda_device() -> None:
     owned, _ = make_source(torch.float32)
     adapter = make_adapter(torch.float32, torch.float16, "cuda:0")
 
-    ready = adapter.make_ready_weight(adapter.make_cpu_weight(parse_safetensors(owned)))
+    ready = adapter.make_ready_weight(
+        adapter.make_cpu_weight(parse_safetensors(owned)),
+        layer_id=0,
+        expert_id=0,
+    )
 
     assert ready.device == torch.device("cuda:0")
     assert ready.dtype is torch.float16
