@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 
 import pytest
@@ -65,6 +66,11 @@ def test_split_address_handles_ipv4_hostnames_and_ipv6() -> None:
 
 
 def test_factory_builds_and_closes_ggml_worker(tmp_path: Path) -> None:
+    try:
+        version("ggml-python")
+    except PackageNotFoundError:
+        pytest.skip("the GGML extra is not installed")
+
     async def scenario() -> None:
         application = await build_worker_application(_config(tmp_path, backend="ggml"))
         await application.close()

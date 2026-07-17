@@ -2,9 +2,16 @@
 
 from __future__ import annotations
 
+from importlib.metadata import PackageNotFoundError, version
+
 import pytest
 import torch
 from safetensors.torch import save as official_save
+
+try:
+    version("ggml-python")
+except PackageNotFoundError:
+    pytest.skip("the GGML extra is not installed", allow_module_level=True)
 
 from expertkit_worker.backends.ggml import GgmlWeightAdapter
 from expertkit_worker.weights import parse_safetensors

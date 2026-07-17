@@ -2,8 +2,15 @@
 
 from __future__ import annotations
 
+from importlib.metadata import PackageNotFoundError, version
+
 import pytest
 import torch
+
+try:
+    version("ggml-python")
+except PackageNotFoundError:
+    pytest.skip("the GGML extra is not installed", allow_module_level=True)
 
 from expertkit_worker.backends import BackendBatch, BackendWeightUnavailable, InvalidBackendInput
 from expertkit_worker.backends.ggml import GgmlBackend, GgmlExpertWeights
