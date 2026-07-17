@@ -8,6 +8,7 @@ pub mod routing_broadcaster;
 pub mod scheduler;
 pub mod service;
 pub mod v2_state;
+pub mod v2_store;
 
 use crate::{
     metrics,
@@ -42,7 +43,12 @@ use super::{
 
 pub async fn controller_main() -> EKResult<()> {
     let settings = ek_base::config::get_ek_settings();
-    let v2_state = v2_state::ControllerV2State::new(256);
+    let v2_state = v2_state::ControllerV2State::restore(
+        256,
+        v2_store::PostgresControllerStateStore::shared(),
+    )
+    .await
+    .map_err(|error| ek_base::error::EKError::RuntimeError(error.to_string()))?;
     let lifecycle_service = WorkerLifecycleServiceImpl::new(
         v2_state.clone(),
         Arc::new(DatabaseLifecycleHooks::new()),

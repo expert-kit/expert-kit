@@ -1,6 +1,22 @@
 // @generated automatically by Diesel CLI.
 
 diesel::table! {
+    controller_v2_placement (worker_id) {
+        worker_id -> Text,
+        instance_id -> Int8,
+        generation -> Int8,
+        targets -> Jsonb,
+    }
+}
+
+diesel::table! {
+    controller_v2_topology (instance_id) {
+        instance_id -> Int8,
+        version -> Int8,
+    }
+}
+
+diesel::table! {
     expert (id) {
         id -> Int4,
         instance_id -> Int4,
@@ -41,4 +57,11 @@ diesel::table! {
 diesel::joinable!(expert -> instance (instance_id));
 diesel::joinable!(expert -> node (node_id));
 diesel::joinable!(instance -> model (model_id));
-diesel::allow_tables_to_appear_in_same_query!(expert, instance, model, node,);
+diesel::allow_tables_to_appear_in_same_query!(
+    controller_v2_placement,
+    controller_v2_topology,
+    expert,
+    instance,
+    model,
+    node,
+);

@@ -419,6 +419,7 @@ pub(super) fn state_status(error: ControllerStateError) -> Status {
         | ControllerStateError::ReportSequenceRollback { .. }
         | ControllerStateError::ConflictingReportSequence(_)
         | ControllerStateError::UnknownDrain(_) => Status::failed_precondition(error.to_string()),
+        ControllerStateError::Persistence(_) => Status::internal(error.to_string()),
     }
 }
 

@@ -1,8 +1,7 @@
-//! In-memory state shared by the v2 Controller services.
+//! State shared by the v2 Controller services.
 //!
-//! The database remains the durable source for placement policy. This module owns
-//! process-lifetime protocol state: Worker starts, heartbeat leases, placement and
-//! report sequences, and the versioned routes consumed by Frontends.
+//! Worker starts, leases, and observed readiness are process-local. Placement
+//! generations, target lists, and topology versions use the injected durable store.
 
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, VecDeque},
@@ -11,6 +10,11 @@ use std::{
 };
 
 use tokio::sync::{RwLock, watch};
+
+use super::v2_store::{
+    ControllerStateStore, ControllerStoreSnapshot, PersistedPlacement,
+    TransientControllerStateStore,
+};
 
 use crate::proto::ek::{
     control::v2::{
@@ -93,6 +97,7 @@ pub enum ControllerStateError {
     InvalidExpertState,
     UnknownDrain(u64),
     FutureTopologyVersion { current: u64, requested: u64 },
+    Persistence(String),
 }
 
 impl fmt::Display for ControllerStateError {
@@ -133,6 +138,9 @@ impl fmt::Display for ControllerStateError {
                 formatter,
                 "requested topology version {requested} is newer than current version {current}"
             ),
+            Self::Persistence(message) => {
+                write!(formatter, "controller state storage failed: {message}")
+            }
         }
     }
 }
@@ -143,17 +151,20 @@ impl std::error::Error for ControllerStateError {}
 pub struct ControllerV2State {
     inner: Arc<RwLock<Inner>>,
     changed: watch::Sender<u64>,
+    store: Arc<dyn ControllerStateStore>,
 }
 
 struct Inner {
     workers: HashMap<String, WorkerRecord>,
     topologies: HashMap<u64, InstanceTopology>,
+    persisted_placements: HashMap<String, PersistedPlacement>,
     next_heartbeat_lease: u64,
     next_drain_id: u64,
     notification_sequence: u64,
     history_limit: usize,
 }
 
+#[derive(Clone)]
 struct WorkerRecord {
     registration: RegisterWorkerRequest,
     live: bool,
@@ -175,6 +186,7 @@ struct StoredReport {
     states: Vec<ExpertState>,
 }
 
+#[derive(Clone)]
 struct DrainRecord {
     drain_id: u64,
     placement_generation: u64,
@@ -200,18 +212,75 @@ struct TopologyRevision {
 
 impl ControllerV2State {
     pub fn new(history_limit: usize) -> Self {
+        Self::from_snapshot(
+            history_limit,
+            TransientControllerStateStore::shared(),
+            ControllerStoreSnapshot::default(),
+            HashMap::new(),
+        )
+    }
+
+    /// Restore durable counters and start with an empty observed-ready topology.
+    pub async fn restore(
+        history_limit: usize,
+        store: Arc<dyn ControllerStateStore>,
+    ) -> Result<Self, ControllerStateError> {
+        assert!(history_limit > 0, "topology history limit must be positive");
+        let snapshot = store
+            .load()
+            .await
+            .map_err(|error| ControllerStateError::Persistence(error.to_string()))?;
+        let mut instance_versions = snapshot.topology_versions.clone();
+        for placement in &snapshot.placements {
+            instance_versions.entry(placement.instance_id).or_default();
+        }
+        let mut topologies = HashMap::new();
+        for (instance_id, current_version) in instance_versions {
+            let version = store
+                .advance_topology_version(instance_id, current_version)
+                .await
+                .map_err(|error| ControllerStateError::Persistence(error.to_string()))?;
+            topologies.insert(
+                instance_id,
+                InstanceTopology {
+                    version,
+                    ..InstanceTopology::default()
+                },
+            );
+        }
+        Ok(Self::from_snapshot(
+            history_limit,
+            store,
+            snapshot,
+            topologies,
+        ))
+    }
+
+    fn from_snapshot(
+        history_limit: usize,
+        store: Arc<dyn ControllerStateStore>,
+        snapshot: ControllerStoreSnapshot,
+        topologies: HashMap<u64, InstanceTopology>,
+    ) -> Self {
         assert!(history_limit > 0, "topology history limit must be positive");
         let (changed, _receiver) = watch::channel(0);
+        let persisted_placements = snapshot
+            .placements
+            .into_iter()
+            .map(|placement| (placement.worker_id.clone(), placement))
+            .collect();
         Self {
             inner: Arc::new(RwLock::new(Inner {
                 workers: HashMap::new(),
-                topologies: HashMap::new(),
+                topologies,
+                persisted_placements,
                 next_heartbeat_lease: 0,
                 next_drain_id: 0,
                 notification_sequence: 0,
                 history_limit,
             })),
             changed,
+            store,
         }
     }
 
@@ -255,13 +324,30 @@ impl ControllerV2State {
         let replaced_start_id = replaced
             .as_ref()
             .map(|worker| worker.registration.start_id.clone());
+        let replaced_instance_id = replaced
+            .as_ref()
+            .map(|worker| worker.registration.instance_id);
         let affected = replaced.as_ref().map(ready_keys).unwrap_or_default();
-        let (placement_generation, targets) = replaced
-            .map(|worker| (worker.placement_generation, worker.targets))
-            .unwrap_or_default();
+        let carried = replaced
+            .as_ref()
+            .filter(|worker| worker.registration.instance_id == instance_id)
+            .map(|worker| (worker.placement_generation, worker.targets.clone()))
+            .or_else(|| {
+                inner
+                    .persisted_placements
+                    .get(&worker_id)
+                    .filter(|placement| placement.instance_id == instance_id)
+                    .map(|placement| {
+                        (
+                            placement.generation,
+                            normalize_targets(placement.targets.clone()),
+                        )
+                    })
+            });
+        let (placement_generation, targets) = carried.unwrap_or_default();
 
         inner.workers.insert(
-            worker_id,
+            worker_id.clone(),
             WorkerRecord {
                 registration,
                 live: false,
@@ -276,8 +362,25 @@ impl ControllerV2State {
                 drains: VecDeque::new(),
             },
         );
-        if publish_routes(&mut inner, instance_id, affected) {
-            notify(&mut inner, &self.changed);
+        if let Some(replaced_instance_id) = replaced_instance_id {
+            match publish_routes(
+                &mut inner,
+                replaced_instance_id,
+                affected,
+                self.store.as_ref(),
+            )
+            .await
+            {
+                Ok(true) => notify(&mut inner, &self.changed),
+                Ok(false) => {}
+                Err(error) => {
+                    inner.workers.remove(&worker_id);
+                    if let Some(replaced) = replaced {
+                        inner.workers.insert(worker_id, replaced);
+                    }
+                    return Err(error);
+                }
+            }
         }
 
         let topology_version = inner
@@ -325,6 +428,11 @@ impl ControllerV2State {
             .ok_or(ControllerStateError::InvalidHeartbeatState)?;
         let mut inner = self.inner.write().await;
         ensure_current_start(&inner, worker_id, start_id)?;
+        let previous = inner
+            .workers
+            .get(worker_id)
+            .expect("validated worker must exist")
+            .clone();
 
         let (instance_id, became_live, state_changed, affected) = {
             let worker = inner
@@ -365,7 +473,17 @@ impl ControllerV2State {
                 ready_keys(worker),
             )
         };
-        let topology_changed = became_live && publish_routes(&mut inner, instance_id, affected);
+        let topology_changed = if became_live {
+            match publish_routes(&mut inner, instance_id, affected, self.store.as_ref()).await {
+                Ok(changed) => changed,
+                Err(error) => {
+                    inner.workers.insert(worker_id.to_owned(), previous);
+                    return Err(error);
+                }
+            }
+        } else {
+            false
+        };
         if topology_changed || state_changed {
             notify(&mut inner, &self.changed);
         }
@@ -380,6 +498,11 @@ impl ControllerV2State {
     ) -> Result<bool, ControllerStateError> {
         let mut inner = self.inner.write().await;
         ensure_current_start(&inner, worker_id, start_id)?;
+        let previous = inner
+            .workers
+            .get(worker_id)
+            .expect("validated worker must exist")
+            .clone();
         let (instance_id, affected) = {
             let worker = inner
                 .workers
@@ -395,8 +518,13 @@ impl ControllerV2State {
             worker.live = false;
             (worker.registration.instance_id, ready_keys(worker))
         };
-        if publish_routes(&mut inner, instance_id, affected) {
-            notify(&mut inner, &self.changed);
+        match publish_routes(&mut inner, instance_id, affected, self.store.as_ref()).await {
+            Ok(true) => notify(&mut inner, &self.changed),
+            Ok(false) => {}
+            Err(error) => {
+                inner.workers.insert(worker_id.to_owned(), previous);
+                return Err(error);
+            }
         }
         Ok(true)
     }
@@ -458,10 +586,10 @@ impl ControllerV2State {
         let normalized = normalize_targets(targets);
         let mut inner = self.inner.write().await;
         ensure_current_start(&inner, worker_id, start_id)?;
-        let (instance_id, affected, removed_ready, generation, changed, values) = {
+        let (instance_id, current_generation, current_targets, affected, removed_ready, maximum) = {
             let worker = inner
                 .workers
-                .get_mut(worker_id)
+                .get(worker_id)
                 .expect("validated worker must exist");
             let maximum = worker
                 .registration
@@ -469,13 +597,6 @@ impl ControllerV2State {
                 .as_ref()
                 .expect("registration validation requires a device")
                 .max_experts;
-            if normalized.len() > maximum as usize {
-                return Err(ControllerStateError::PlacementTooLarge {
-                    maximum,
-                    received: normalized.len(),
-                });
-            }
-            let changed = worker.targets != normalized;
             let mut affected: BTreeSet<ExpertKey> = worker.targets.keys().copied().collect();
             affected.extend(normalized.keys().copied());
             let removed_ready = worker
@@ -490,21 +611,90 @@ impl ControllerV2State {
                 })
                 .copied()
                 .collect::<BTreeSet<_>>();
-            if changed {
-                worker.placement_generation = worker.placement_generation.wrapping_add(1).max(1);
-                worker.targets = normalized;
-            }
             (
                 worker.registration.instance_id,
+                worker.placement_generation,
+                worker.targets.clone(),
                 affected,
                 removed_ready,
-                worker.placement_generation,
-                changed,
-                worker.targets.values().cloned().collect::<Vec<_>>(),
+                maximum,
             )
         };
+        if normalized.len() > maximum as usize {
+            return Err(ControllerStateError::PlacementTooLarge {
+                maximum,
+                received: normalized.len(),
+            });
+        }
+        let persisted_matches = inner
+            .persisted_placements
+            .get(worker_id)
+            .filter(|placement| placement.instance_id == instance_id)
+            .is_some_and(|placement| {
+                placement.generation == current_generation
+                    && normalize_targets(placement.targets.clone()) == current_targets
+            });
+        let changed = current_targets != normalized || !persisted_matches;
+        let generation = if changed {
+            current_generation
+                .checked_add(1)
+                .ok_or_else(|| {
+                    ControllerStateError::Persistence("placement generation is exhausted".into())
+                })?
+                .max(1)
+        } else {
+            current_generation
+        };
+        let values = normalized.values().cloned().collect::<Vec<_>>();
         if changed {
-            let topology_changed = publish_routes(&mut inner, instance_id, affected);
+            let previous_persisted = inner.persisted_placements.get(worker_id).cloned();
+            self.store
+                .save_placement(worker_id, instance_id, generation, &values)
+                .await
+                .map_err(|error| ControllerStateError::Persistence(error.to_string()))?;
+            {
+                let worker = inner
+                    .workers
+                    .get_mut(worker_id)
+                    .expect("validated worker must exist");
+                worker.placement_generation = generation;
+                worker.targets = normalized;
+            }
+            inner.persisted_placements.insert(
+                worker_id.to_owned(),
+                PersistedPlacement {
+                    worker_id: worker_id.to_owned(),
+                    instance_id,
+                    generation,
+                    targets: values.clone(),
+                },
+            );
+            let topology_changed = match publish_routes(
+                &mut inner,
+                instance_id,
+                affected,
+                self.store.as_ref(),
+            )
+            .await
+            {
+                Ok(changed) => changed,
+                Err(error) => {
+                    let worker = inner
+                        .workers
+                        .get_mut(worker_id)
+                        .expect("validated worker must exist");
+                    worker.placement_generation = current_generation;
+                    worker.targets = current_targets;
+                    if let Some(previous) = previous_persisted {
+                        inner
+                            .persisted_placements
+                            .insert(worker_id.to_owned(), previous);
+                    } else {
+                        inner.persisted_placements.remove(worker_id);
+                    }
+                    return Err(error);
+                }
+            };
             let drain_created = if removed_ready.is_empty() {
                 false
             } else {
@@ -551,6 +741,11 @@ impl ControllerV2State {
         let normalized = normalize_states(states)?;
         let mut inner = self.inner.write().await;
         ensure_current_start(&inner, worker_id, start_id)?;
+        let previous = inner
+            .workers
+            .get(worker_id)
+            .expect("validated worker must exist")
+            .clone();
 
         let (instance_id, affected) = {
             let worker = inner
@@ -602,8 +797,13 @@ impl ControllerV2State {
             (worker.registration.instance_id, affected)
         };
 
-        if publish_routes(&mut inner, instance_id, affected) {
-            notify(&mut inner, &self.changed);
+        match publish_routes(&mut inner, instance_id, affected, self.store.as_ref()).await {
+            Ok(true) => notify(&mut inner, &self.changed),
+            Ok(false) => {}
+            Err(error) => {
+                inner.workers.insert(worker_id.to_owned(), previous);
+                return Err(error);
+            }
         }
         Ok(StateReportResult::Applied)
     }
@@ -675,6 +875,11 @@ impl ControllerV2State {
     ) -> Result<bool, ControllerStateError> {
         let mut inner = self.inner.write().await;
         ensure_current_start(&inner, worker_id, start_id)?;
+        let previous = inner
+            .workers
+            .get(worker_id)
+            .expect("validated worker must exist")
+            .clone();
         let (instance_id, stop_all, affected) = {
             let worker = inner
                 .workers
@@ -700,8 +905,15 @@ impl ControllerV2State {
             };
             (worker.registration.instance_id, stop_all, affected)
         };
-        if stop_all && publish_routes(&mut inner, instance_id, affected) {
-            notify(&mut inner, &self.changed);
+        if stop_all {
+            match publish_routes(&mut inner, instance_id, affected, self.store.as_ref()).await {
+                Ok(true) => notify(&mut inner, &self.changed),
+                Ok(false) => {}
+                Err(error) => {
+                    inner.workers.insert(worker_id.to_owned(), previous);
+                    return Err(error);
+                }
+            }
         }
         Ok(true)
     }
@@ -948,9 +1160,14 @@ fn ready_keys(worker: &WorkerRecord) -> BTreeSet<ExpertKey> {
         .collect()
 }
 
-fn publish_routes(inner: &mut Inner, instance_id: u64, affected: BTreeSet<ExpertKey>) -> bool {
+async fn publish_routes(
+    inner: &mut Inner,
+    instance_id: u64,
+    affected: BTreeSet<ExpertKey>,
+    store: &dyn ControllerStateStore,
+) -> Result<bool, ControllerStateError> {
     if affected.is_empty() {
-        return false;
+        return Ok(false);
     }
 
     let mut changes = Vec::new();
@@ -972,15 +1189,14 @@ fn publish_routes(inner: &mut Inner, instance_id: u64, affected: BTreeSet<Expert
             (&left.worker_id, &left.start_id).cmp(&(&right.worker_id, &right.start_id))
         });
 
-        let topology = inner.topologies.entry(instance_id).or_default();
-        let previous = topology.routes.get(&key).cloned().unwrap_or_default();
+        let previous = inner
+            .topologies
+            .get(&instance_id)
+            .and_then(|topology| topology.routes.get(&key))
+            .cloned()
+            .unwrap_or_default();
         if previous == replicas {
             continue;
-        }
-        if replicas.is_empty() {
-            topology.routes.remove(&key);
-        } else {
-            topology.routes.insert(key, replicas.clone());
         }
         changes.push(RouteChange {
             layer_id: key.layer_id,
@@ -989,21 +1205,40 @@ fn publish_routes(inner: &mut Inner, instance_id: u64, affected: BTreeSet<Expert
         });
     }
     if changes.is_empty() {
-        return false;
+        return Ok(false);
     }
 
+    let previous_version = inner
+        .topologies
+        .get(&instance_id)
+        .map_or(0, |topology| topology.version);
+    let topology_version = store
+        .advance_topology_version(instance_id, previous_version)
+        .await
+        .map_err(|error| ControllerStateError::Persistence(error.to_string()))?;
+    let history_limit = inner.history_limit;
     let topology = inner.topologies.entry(instance_id).or_default();
-    let previous_version = topology.version;
-    topology.version = topology.version.wrapping_add(1).max(1);
+    for change in &changes {
+        let key = ExpertKey {
+            layer_id: change.layer_id,
+            expert_id: change.expert_id,
+        };
+        if change.replicas.is_empty() {
+            topology.routes.remove(&key);
+        } else {
+            topology.routes.insert(key, change.replicas.clone());
+        }
+    }
+    topology.version = topology_version;
     topology.history.push_back(TopologyRevision {
         previous_version,
-        topology_version: topology.version,
+        topology_version,
         changes,
     });
-    while topology.history.len() > inner.history_limit {
+    while topology.history.len() > history_limit {
         topology.history.pop_front();
     }
-    true
+    Ok(true)
 }
 
 fn notify(inner: &mut Inner, changed: &watch::Sender<u64>) {
@@ -1103,7 +1338,55 @@ fn update_messages(instance_id: u64, revision: &TopologyRevision) -> Vec<Topolog
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::proto::ek::control::v2::WorkerDevice;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    use async_trait::async_trait;
+
+    use crate::{controller::v2_store::ControllerStoreError, proto::ek::control::v2::WorkerDevice};
+
+    #[derive(Default)]
+    struct FailingTopologyStore {
+        inner: TransientControllerStateStore,
+        fail_next_advance: AtomicBool,
+    }
+
+    impl FailingTopologyStore {
+        fn fail_next_advance(&self) {
+            self.fail_next_advance.store(true, Ordering::SeqCst);
+        }
+    }
+
+    #[async_trait]
+    impl ControllerStateStore for FailingTopologyStore {
+        async fn load(&self) -> Result<ControllerStoreSnapshot, ControllerStoreError> {
+            self.inner.load().await
+        }
+
+        async fn save_placement(
+            &self,
+            worker_id: &str,
+            instance_id: u64,
+            generation: u64,
+            targets: &[TargetExpert],
+        ) -> Result<(), ControllerStoreError> {
+            self.inner
+                .save_placement(worker_id, instance_id, generation, targets)
+                .await
+        }
+
+        async fn advance_topology_version(
+            &self,
+            instance_id: u64,
+            current_version: u64,
+        ) -> Result<u64, ControllerStoreError> {
+            if self.fail_next_advance.swap(false, Ordering::SeqCst) {
+                return Err(ControllerStoreError::new("injected topology failure"));
+            }
+            self.inner
+                .advance_topology_version(instance_id, current_version)
+                .await
+        }
+    }
 
     fn registration(worker_id: &str, start_id: &str) -> RegisterWorkerRequest {
         RegisterWorkerRequest {
@@ -1208,6 +1491,128 @@ mod tests {
             state.open_heartbeat("worker-0", "start-0").await,
             Err(ControllerStateError::ReplacedWorker)
         );
+    }
+
+    #[tokio::test]
+    async fn restart_keeps_placement_but_requires_a_new_full_ready_report() {
+        let store = TransientControllerStateStore::shared();
+        let state = ControllerV2State::restore(8, store.clone()).await.unwrap();
+        register_live_worker(&state).await;
+        let placement = state
+            .set_targets("worker-0", "start-0", vec![target(1, 2)])
+            .await
+            .unwrap();
+        state
+            .apply_state_report(
+                "worker-0",
+                "start-0",
+                placement.generation,
+                1,
+                true,
+                vec![ready(1, 2)],
+            )
+            .await
+            .unwrap();
+        assert_eq!(state.topology_version(7).await, 1);
+        drop(state);
+
+        let restarted = ControllerV2State::restore(8, store).await.unwrap();
+        assert_eq!(restarted.topology_version(7).await, 2);
+        let messages = restarted.topology_messages(7, 1).await.unwrap();
+        let topology_message::Message::Snapshot(snapshot) = messages[0].message.as_ref().unwrap()
+        else {
+            panic!("restart must publish an empty snapshot");
+        };
+        assert_eq!(snapshot.topology_version, 2);
+        assert!(snapshot.routes.is_empty());
+
+        let response = restarted
+            .register(registration("worker-0", "start-1"))
+            .await
+            .unwrap();
+        assert_eq!(response.response.current_placement_generation, 1);
+        assert_eq!(response.response.current_topology_version, 2);
+        let lease = restarted
+            .open_heartbeat("worker-0", "start-1")
+            .await
+            .unwrap();
+        restarted
+            .heartbeat(
+                "worker-0",
+                "start-1",
+                lease,
+                1,
+                WorkerRunState::WorkerRunning as i32,
+            )
+            .await
+            .unwrap();
+        let unchanged = restarted
+            .set_targets("worker-0", "start-1", vec![target(1, 2)])
+            .await
+            .unwrap();
+        assert!(!unchanged.changed);
+        assert_eq!(unchanged.generation, 1);
+        assert_eq!(restarted.topology_version(7).await, 2);
+
+        restarted
+            .apply_state_report(
+                "worker-0",
+                "start-1",
+                unchanged.generation,
+                1,
+                true,
+                vec![ready(1, 2)],
+            )
+            .await
+            .unwrap();
+        assert_eq!(restarted.topology_version(7).await, 3);
+    }
+
+    #[tokio::test]
+    async fn topology_persistence_failure_does_not_expose_ready_state() {
+        let store = Arc::new(FailingTopologyStore::default());
+        let state = ControllerV2State::restore(8, store.clone()).await.unwrap();
+        register_live_worker(&state).await;
+        let placement = state
+            .set_targets("worker-0", "start-0", vec![target(1, 2)])
+            .await
+            .unwrap();
+
+        store.fail_next_advance();
+        let failed = state
+            .apply_state_report(
+                "worker-0",
+                "start-0",
+                placement.generation,
+                1,
+                true,
+                vec![ready(1, 2)],
+            )
+            .await;
+        assert!(matches!(failed, Err(ControllerStateError::Persistence(_))));
+        assert!(
+            state
+                .ready_experts("worker-0", "start-0")
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(state.topology_version(7).await, 0);
+
+        assert_eq!(
+            state
+                .apply_state_report(
+                    "worker-0",
+                    "start-0",
+                    placement.generation,
+                    1,
+                    true,
+                    vec![ready(1, 2)],
+                )
+                .await,
+            Ok(StateReportResult::Applied)
+        );
+        assert_eq!(state.topology_version(7).await, 1);
     }
 
     #[tokio::test]
