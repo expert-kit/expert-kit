@@ -1,0 +1,40 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "expertkit-torch"
+version = "0.1.0"
+description = "Expert Kit routed-MoE integration for Hugging Face Transformers"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "expertkit-transport==0.1.0",
+    "torch==2.11.0",
+    "transformers==4.57.3",
+]
+
+[project.scripts]
+ek-qwen-smoke = "expertkit_torch.qwen_smoke:main"
+
+[tool.uv.sources]
+expertkit-transport = { path = "../../ek-transport", editable = true }
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3,<9",
+    "ruff>=0.11,<1",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "qwen: requires a supported Qwen model and a running Expert Kit deployment",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]

@@ -6,7 +6,6 @@ import math
 import threading
 
 import torch
-
 from expertkit_transport.adapters.grpc import BlockingGrpcRoutedMoEClient
 
 
@@ -69,9 +68,7 @@ class RoutedMoEClient:
                 raise RuntimeError("Routed-MoE client is closed")
             if self._transport is not None:
                 if resolved_device != self._device or dtype != self._dtype:
-                    raise ValueError(
-                        "Frontend device and activation dtype changed after startup"
-                    )
+                    raise ValueError("Frontend device and activation dtype changed after startup")
                 return
             transport = BlockingGrpcRoutedMoEClient(
                 self._controller_endpoint,
