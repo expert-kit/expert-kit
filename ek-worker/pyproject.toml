@@ -18,7 +18,7 @@ dependencies = [
 ]
 
 [project.scripts]
-expertkit-worker = "expertkit_worker.cli:main"
+ek-worker = "expertkit_worker.cli:main"
 
 [project.optional-dependencies]
 ggml = [

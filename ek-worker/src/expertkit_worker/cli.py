@@ -5,7 +5,6 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
-import os
 from collections.abc import Sequence
 
 import structlog
@@ -19,10 +18,9 @@ logger = structlog.get_logger(__name__)
 
 
 def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="expertkit-worker")
+    parser = argparse.ArgumentParser(prog="ek-worker")
     parser.add_argument(
         "--config",
-        default=os.environ.get("EK_CONFIG"),
         help="Path to the Python Worker YAML configuration",
     )
     return parser
@@ -44,7 +42,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     arguments = _parser().parse_args(argv)
     if not arguments.config:
-        _parser().error("--config or EK_CONFIG is required")
+        _parser().error("--config is required")
     try:
         config = load_config(arguments.config)
     except (ConfigFileError, ValidationError) as error:

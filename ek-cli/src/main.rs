@@ -209,26 +209,30 @@ fn get_command_name(cmd: &Command) -> &'static str {
 
 const DEFAULT_THREAD_NUM: usize = 6;
 
-fn run_python_worker(config: Option<String>) -> ! {
-    let config = config.or_else(|| env::var("EK_CONFIG").ok());
+fn python_worker_command(config: Option<String>) -> Result<ProcessCommand, &'static str> {
     let Some(config) = config else {
-        eprintln!("The Python Worker requires --config or EK_CONFIG");
-        std::process::exit(2);
+        return Err("The Python Worker requires --config");
     };
-    let python = env::var("EK_PYTHON").unwrap_or_else(|_| "python3".to_string());
-    let mut command = ProcessCommand::new(python);
-    command
-        .arg("-m")
-        .arg("expertkit_worker")
-        .arg("--config")
-        .arg(config);
+    let mut command = ProcessCommand::new("ek-worker");
+    command.arg("--config").arg(config);
+    Ok(command)
+}
+
+fn run_python_worker(config: Option<String>) -> ! {
+    let mut command = match python_worker_command(config) {
+        Ok(command) => command,
+        Err(error) => {
+            eprintln!("{error}");
+            std::process::exit(2);
+        }
+    };
 
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
 
         let error = command.exec();
-        eprintln!("Failed to start the Python Worker: {error}");
+        eprintln!("Failed to start ek-worker: {error}");
         std::process::exit(1);
     }
     #[cfg(not(unix))]
@@ -236,7 +240,7 @@ fn run_python_worker(config: Option<String>) -> ! {
         match command.status() {
             Ok(status) => std::process::exit(status.code().unwrap_or(1)),
             Err(error) => {
-                eprintln!("Failed to start the Python Worker: {error}");
+                eprintln!("Failed to start ek-worker: {error}");
                 std::process::exit(1);
             }
         }
@@ -330,5 +334,29 @@ fn main() {
     if let Err(e) = res {
         eprintln!("Error: {e}");
         std::process::exit(1);
+    }
+}
+
+#[cfg(test)]
+mod worker_launcher_tests {
+    use super::*;
+
+    #[test]
+    fn builds_the_active_environment_worker_command() {
+        let command = python_worker_command(Some("/tmp/worker.yaml".to_owned())).unwrap();
+
+        assert_eq!(command.get_program(), "ek-worker");
+        assert_eq!(
+            command.get_args().collect::<Vec<_>>(),
+            ["--config", "/tmp/worker.yaml"]
+        );
+    }
+
+    #[test]
+    fn requires_an_explicit_worker_config() {
+        assert_eq!(
+            python_worker_command(None).unwrap_err(),
+            "The Python Worker requires --config"
+        );
     }
 }

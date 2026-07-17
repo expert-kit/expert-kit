@@ -68,3 +68,10 @@ def test_main_returns_failure_after_runtime_error(monkeypatch: pytest.MonkeyPatc
 
 def test_main_returns_configuration_error_for_missing_file(tmp_path: Path) -> None:
     assert cli.main(["--config", str(tmp_path / "missing.yaml")]) == 2
+
+
+def test_main_requires_explicit_config() -> None:
+    with pytest.raises(SystemExit) as caught:
+        cli.main([])
+
+    assert caught.value.code == 2
