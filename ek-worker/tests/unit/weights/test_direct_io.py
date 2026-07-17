@@ -12,6 +12,7 @@ from expertkit_worker.weights.direct_io import (
     DirectIOError,
     cleanup_temporary_files,
     expert_file_path,
+    initialize_direct_io_directory,
     read_direct,
     write_direct_atomic,
 )
@@ -113,6 +114,23 @@ def test_cleanup_removes_only_weight_temporary_files(tmp_path: Path) -> None:
     assert cleanup_temporary_files(tmp_path) == 1
     assert abandoned.exists() is False
     assert other.read_bytes() == b"complete"
+
+
+@pytest.mark.direct_io
+def test_initialize_cleans_abandoned_files_and_leaves_no_probe(tmp_path: Path) -> None:
+    abandoned = tmp_path / ".ek-weight-tmp-dead"
+    abandoned.write_bytes(b"partial")
+
+    try:
+        initialize_direct_io_directory(tmp_path)
+    except OSError as error:
+        if error.errno in {errno.EINVAL, errno.ENOTSUP, errno.EOPNOTSUPP}:
+            pytest.skip("test filesystem does not support strict direct I/O")
+        raise
+
+    assert abandoned.exists() is False
+    assert list(tmp_path.glob(".ek-weight-probe-*")) == []
+    assert list(tmp_path.glob(".ek-weight-tmp-*")) == []
 
 
 def test_expert_file_path_keeps_existing_layout(tmp_path: Path) -> None:

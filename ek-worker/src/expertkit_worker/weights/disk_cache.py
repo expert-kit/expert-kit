@@ -12,6 +12,7 @@ from pathlib import Path
 from expertkit_worker.weights.direct_io import (
     AlignedWeightBuffer,
     expert_file_path,
+    initialize_direct_io_directory,
     read_direct,
     write_direct_atomic,
 )
@@ -20,6 +21,11 @@ from expertkit_worker.weights.dram_cache import WeightKey
 
 class WeightDiskCache(ABC):
     """Read and invalidate local per-expert SafeTensors files asynchronously."""
+
+    async def initialize(self) -> None:
+        """Validate resources needed by this cache before service registration."""
+
+        return None
 
     @abstractmethod
     async def read(self, key: WeightKey, *, max_bytes: int) -> AlignedWeightBuffer:
@@ -58,7 +64,24 @@ class DirectIOWeightDiskCache(WeightDiskCache):
             max_workers=max_concurrent_operations,
             thread_name_prefix="ek-weight-io",
         )
+        self._model_directory = expert_file_path(root, model_name, 0, 0).parent
+        self._initialize_lock = asyncio.Lock()
+        self._initialized = False
         self._closed = False
+
+    async def initialize(self) -> None:
+        """Probe the configured filesystem once through the production I/O path."""
+
+        if self._initialized:
+            return
+        async with self._initialize_lock:
+            if self._initialized:
+                return
+            await self._run_blocking(
+                initialize_direct_io_directory,
+                self._model_directory,
+            )
+            self._initialized = True
 
     async def read(self, key: WeightKey, *, max_bytes: int) -> AlignedWeightBuffer:
         """Read one complete cache file without using the file page cache."""

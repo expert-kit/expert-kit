@@ -11,6 +11,7 @@ import torch
 
 from expertkit_worker.config import WorkerConfig
 from expertkit_worker.factory import _split_address, build_worker_application
+from expertkit_worker.weights import DirectIOWeightDiskCache
 
 
 def _config(cache_path: Path, *, backend: str = "torch") -> WorkerConfig:
@@ -84,6 +85,32 @@ def test_factory_rejects_fused_before_device_initialization(tmp_path: Path) -> N
             await build_worker_application(_config(tmp_path, backend="fused"))
 
     asyncio.run(scenario())
+
+
+def test_factory_probes_direct_io_before_returning_application(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    initialized = False
+
+    async def fail_initialize(_cache: DirectIOWeightDiskCache) -> None:
+        nonlocal initialized
+        initialized = True
+        raise OSError("direct I/O probe failed")
+
+    monkeypatch.setattr(DirectIOWeightDiskCache, "initialize", fail_initialize)
+    monkeypatch.setattr(torch.cuda, "set_device", lambda _device: None)
+    monkeypatch.setattr(
+        "expertkit_worker.factory._memory_info",
+        lambda _device: (2**40, 2**40),
+    )
+
+    async def scenario() -> None:
+        with pytest.raises(OSError, match="direct I/O probe failed"):
+            await build_worker_application(_config(tmp_path))
+
+    asyncio.run(scenario())
+    assert initialized is True
 
 
 @pytest.mark.cuda

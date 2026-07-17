@@ -192,6 +192,12 @@ async def build_worker_application(config: WorkerConfig) -> WorkerApplication:
     transfer: HttpWeightTransfer | None = None
     disk_cache: DirectIOWeightDiskCache | None = None
     try:
+        disk_cache = DirectIOWeightDiskCache(
+            root=config.weight_manager.disk_cache.path,
+            model_name=config.model.name,
+            max_concurrent_operations=config.weight_manager.max_concurrent_loads,
+        )
+        await disk_cache.initialize()
         adapter = _create_weight_adapter(
             config,
             source_dtype=weight_dtype,
@@ -261,11 +267,6 @@ async def build_worker_application(config: WorkerConfig) -> WorkerApplication:
             available_bytes_after_fixed_positions=available_bytes,
         )
 
-        disk_cache = DirectIOWeightDiskCache(
-            root=config.weight_manager.disk_cache.path,
-            model_name=config.model.name,
-            max_concurrent_operations=config.weight_manager.max_concurrent_loads,
-        )
         transfer = HttpWeightTransfer(
             max_connections=config.weight_manager.max_concurrent_loads,
         )

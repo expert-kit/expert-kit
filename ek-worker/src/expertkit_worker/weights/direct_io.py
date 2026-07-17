@@ -11,6 +11,7 @@ from contextlib import suppress
 from pathlib import Path
 
 _TEMPORARY_PREFIX = ".ek-weight-tmp-"
+_PROBE_PREFIX = ".ek-weight-probe-"
 
 
 class DirectIOError(OSError):
@@ -138,7 +139,7 @@ def write_direct_atomic(path: Path, source: AlignedWeightBuffer) -> None:
 
     direct_flag = _require_direct_io()
     path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.parent / f"{_TEMPORARY_PREFIX}{uuid.uuid4().hex}"
+    temporary = path.parent / f"{_TEMPORARY_PREFIX}{os.getpid()}-{uuid.uuid4().hex}"
     file_descriptor = os.open(
         temporary,
         os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC | direct_flag,
@@ -178,16 +179,71 @@ def write_direct_atomic(path: Path, source: AlignedWeightBuffer) -> None:
 
 
 def cleanup_temporary_files(directory: Path) -> int:
-    """Remove abandoned files created by atomic direct-I/O writeback."""
+    """Remove abandoned writeback and startup-probe files.
+
+    Temporary files owned by a live process are left in place because Workers
+    serving the same model may share a disk-cache directory.
+    """
 
     if not directory.exists():
         return 0
     removed = 0
-    for path in directory.rglob(f"{_TEMPORARY_PREFIX}*"):
-        if path.is_file():
-            path.unlink()
-            removed += 1
+    for prefix in (_TEMPORARY_PREFIX, _PROBE_PREFIX):
+        for path in directory.rglob(f"{prefix}*"):
+            if not path.is_file() or _temporary_file_has_live_owner(path, prefix):
+                continue
+            with suppress(FileNotFoundError):
+                path.unlink()
+                removed += 1
     return removed
+
+
+def initialize_direct_io_directory(directory: Path) -> None:
+    """Create, clean, and validate one strict direct-I/O cache directory."""
+
+    directory.mkdir(parents=True, exist_ok=True)
+    cleanup_temporary_files(directory)
+    probe_path = directory / f"{_PROBE_PREFIX}{os.getpid()}-{uuid.uuid4().hex}"
+    source = AlignedWeightBuffer(mmap.PAGESIZE)
+    loaded: AlignedWeightBuffer | None = None
+    expected = bytes(index % 251 for index in range(source.logical_size))
+    source_view = source.view()
+    try:
+        source_view[:] = expected
+    finally:
+        source_view.release()
+    try:
+        write_direct_atomic(probe_path, source)
+        loaded = read_direct(probe_path, max_bytes=source.logical_size)
+        loaded_view = loaded.view()
+        try:
+            if bytes(loaded_view) != expected:
+                raise DirectIOError("direct-I/O startup probe returned different bytes")
+        finally:
+            loaded_view.release()
+    finally:
+        if loaded is not None:
+            loaded.close()
+        source.close()
+        with suppress(FileNotFoundError):
+            probe_path.unlink()
+
+
+def _temporary_file_has_live_owner(path: Path, prefix: str) -> bool:
+    owner_text = path.name.removeprefix(prefix).partition("-")[0]
+    try:
+        owner_pid = int(owner_text)
+    except ValueError:
+        return False
+    if owner_pid <= 0:
+        return False
+    try:
+        os.kill(owner_pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
 
 
 def expert_file_path(root: Path, model_name: str, layer_id: int, expert_id: int) -> Path:
