@@ -55,3 +55,23 @@ class WeightAdapter[CpuWeightT, ReadyWeightT](ABC):
     @abstractmethod
     def conversion_temporary_bytes(self) -> int:
         """Return conservative temporary device bytes used during conversion."""
+
+    def initialize_ready_storage(self, max_experts: int) -> None:
+        """Initialize optional fixed Backend storage for the derived capacity.
+
+        Backends whose ready objects own independent allocations use the default
+        no-op. A fixed-slot Backend allocates its process-lifetime storage here,
+        before the Worker registers with the Controller.
+        """
+
+        if isinstance(max_experts, bool) or not isinstance(max_experts, int) or max_experts <= 0:
+            raise ValueError("max_experts must be a positive integer")
+
+    def release_ready_weight(self, ready_weight: ReadyWeightT) -> None:
+        """Release Backend-managed capacity after a ready object is withdrawn.
+
+        This hook must not wait for device work. Weight Manager invokes it only
+        after ready-weight usage reaches zero.
+        """
+
+        del ready_weight

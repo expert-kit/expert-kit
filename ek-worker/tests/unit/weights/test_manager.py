@@ -108,6 +108,10 @@ class _FakeWriteback:
 
 
 class _FakeAdapter(WeightAdapter[object, object]):
+    def __init__(self) -> None:
+        self.initialized_capacities: list[int] = []
+        self.released: list[object] = []
+
     @property
     def backend_name(self) -> str:
         return "fake"
@@ -137,6 +141,12 @@ class _FakeAdapter(WeightAdapter[object, object]):
     def conversion_temporary_bytes(self) -> int:
         return 0
 
+    def initialize_ready_storage(self, max_experts: int) -> None:
+        self.initialized_capacities.append(max_experts)
+
+    def release_ready_weight(self, ready_weight: object) -> None:
+        self.released.append(ready_weight)
+
 
 def _make_manager(
     loader: _FakeLoader,
@@ -145,21 +155,53 @@ def _make_manager(
     device_weight_capacity_bytes: int = 64,
     changes: list[ExpertStateChange] | None = None,
     byte_changes: list[int] | None = None,
+    adapter: _FakeAdapter | None = None,
 ) -> tuple[WeightManager[object, object], _FakeWriteback]:
     writeback = _FakeWriteback()
+    selected_adapter = adapter or _FakeAdapter()
     manager = WeightManager(
         num_layers=2,
         experts_per_layer=4,
         device="cuda:0",
         device_weight_capacity_bytes=device_weight_capacity_bytes,
         max_concurrent_loads=max_concurrent_loads,
-        adapter=_FakeAdapter(),
+        adapter=selected_adapter,
         loader=loader,
         writeback=writeback,
         state_changed=None if changes is None else changes.append,
         device_bytes_changed=None if byte_changes is None else byte_changes.append,
     )
     return manager, writeback
+
+
+def test_manager_initializes_and_releases_backend_ready_storage() -> None:
+    async def scenario() -> None:
+        loader = _FakeLoader()
+        adapter = _FakeAdapter()
+        manager, _ = _make_manager(loader, adapter=adapter)
+        manager.start()
+
+        assert adapter.initialized_capacities == [4]
+        await manager.apply_targets(1, [_target(0, 0), _target(1, 1)])
+        await _await_with_loop_yields(manager.wait_for_idle())
+        retained = manager.acquire_many(0, (0,))
+        await manager.apply_targets(2, [_target(1, 1)])
+
+        removal = asyncio.create_task(manager.remove_after_drain(2, (WeightKey(0, 0),)))
+        await asyncio.sleep(0)
+        assert adapter.released == []
+
+        retained.close()
+        assert await _await_with_loop_yields(removal) is True
+        assert adapter.released == [("ready", WeightKey(0, 0))]
+
+        await _await_with_loop_yields(manager.close())
+        assert adapter.released == [
+            ("ready", WeightKey(0, 0)),
+            ("ready", WeightKey(1, 1)),
+        ]
+
+    run(scenario())
 
 
 def _target(layer_id: int, expert_id: int, *peers: str) -> TargetExpert:

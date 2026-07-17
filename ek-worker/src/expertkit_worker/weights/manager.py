@@ -151,6 +151,7 @@ class WeightManager[CpuWeightT, ReadyWeightT]:
         max_experts = device_weight_capacity_bytes // ready_weight_bytes
         if max_experts <= 0:
             raise ValueError("device weight capacity cannot fit one expert")
+        adapter.initialize_ready_storage(max_experts)
 
         self._num_layers = num_layers
         self._experts_per_layer = experts_per_layer
@@ -411,7 +412,11 @@ class WeightManager[CpuWeightT, ReadyWeightT]:
             self._ready.begin_withdrawal(key.layer_id, key.expert_id)
             await loop.run_in_executor(
                 self._conversion_executor,
-                partial(self._ready.finish_withdrawal, key.layer_id, key.expert_id),
+                partial(
+                    self._finish_withdrawal_and_release,
+                    key.layer_id,
+                    key.expert_id,
+                ),
             )
         self._conversion_executor.shutdown(wait=True, cancel_futures=True)
         async with self._lock:
@@ -479,7 +484,7 @@ class WeightManager[CpuWeightT, ReadyWeightT]:
                 await loop.run_in_executor(
                     self._conversion_executor,
                     partial(
-                        self._ready.finish_withdrawal,
+                        self._finish_withdrawal_and_release,
                         key.layer_id,
                         key.expert_id,
                     ),
@@ -558,8 +563,13 @@ class WeightManager[CpuWeightT, ReadyWeightT]:
                                 ),
                             )
                             return
-                        if not cancelled:
-                            await self._finish_ready(key, ready_weight)
+                        if cancelled:
+                            self._adapter.release_ready_weight(ready_weight)
+                        else:
+                            cancelled = await self._finish_ready_without_leaking_on_cancel(
+                                key,
+                                ready_weight,
+                            )
                     finally:
                         if cpu_lease.source in {
                             WeightSource.PEER,
@@ -593,38 +603,64 @@ class WeightManager[CpuWeightT, ReadyWeightT]:
     async def _finish_ready(self, key: WeightKey, ready_weight: ReadyWeightT) -> None:
         changes: list[ExpertStateChange] = []
         loaded_device_bytes: int | None = None
-        async with self._lock:
-            if self._closed or key not in self._targets or key in self._ready_keys:
-                return
-            next_loaded_bytes = self._loaded_device_bytes + self._ready_weight_bytes
-            if next_loaded_bytes > self._device_weight_capacity_bytes:
-                failure = WeightLoadFailure(
-                    WeightSource.DRAM,
-                    WeightLoadStage.PLACE,
-                    WeightLoadErrorCode.INTERNAL,
-                    False,
-                    "ready expert exceeds the derived device weight capacity",
-                )
-                change = self._set_state_locked(
-                    key,
-                    ExpertState(key, ExpertStateKind.FAILED, failure),
-                )
-                if change is not None:
-                    changes.append(change)
-            else:
-                self._ready.publish(key.layer_id, key.expert_id, ready_weight)
-                self._ready_keys.add(key)
-                self._loaded_device_bytes += self._ready_weight_bytes
-                loaded_device_bytes = self._loaded_device_bytes
-                change = self._set_state_locked(
-                    key,
-                    ExpertState(key, ExpertStateKind.READY),
-                )
-                if change is not None:
-                    changes.append(change)
+        published = False
+        try:
+            async with self._lock:
+                if self._closed or key not in self._targets or key in self._ready_keys:
+                    return
+                next_loaded_bytes = self._loaded_device_bytes + self._ready_weight_bytes
+                if next_loaded_bytes > self._device_weight_capacity_bytes:
+                    failure = WeightLoadFailure(
+                        WeightSource.DRAM,
+                        WeightLoadStage.PLACE,
+                        WeightLoadErrorCode.INTERNAL,
+                        False,
+                        "ready expert exceeds the derived device weight capacity",
+                    )
+                    change = self._set_state_locked(
+                        key,
+                        ExpertState(key, ExpertStateKind.FAILED, failure),
+                    )
+                    if change is not None:
+                        changes.append(change)
+                else:
+                    self._ready.publish(key.layer_id, key.expert_id, ready_weight)
+                    published = True
+                    self._ready_keys.add(key)
+                    self._loaded_device_bytes += self._ready_weight_bytes
+                    loaded_device_bytes = self._loaded_device_bytes
+                    change = self._set_state_locked(
+                        key,
+                        ExpertState(key, ExpertStateKind.READY),
+                    )
+                    if change is not None:
+                        changes.append(change)
+        finally:
+            if not published:
+                self._adapter.release_ready_weight(ready_weight)
         self._emit(changes)
         if loaded_device_bytes is not None:
             self._emit_device_bytes(loaded_device_bytes)
+
+    async def _finish_ready_without_leaking_on_cancel(
+        self,
+        key: WeightKey,
+        ready_weight: ReadyWeightT,
+    ) -> bool:
+        """Finish the ready transition even if target replacement cancels its load."""
+
+        work = asyncio.create_task(self._finish_ready(key, ready_weight))
+        cancelled = False
+        while True:
+            try:
+                await asyncio.shield(work)
+                return cancelled
+            except asyncio.CancelledError:
+                cancelled = True
+
+    def _finish_withdrawal_and_release(self, layer_id: int, expert_id: int) -> None:
+        ready_weight = self._ready.finish_withdrawal(layer_id, expert_id)
+        self._adapter.release_ready_weight(ready_weight)
 
     async def _finish_failure(self, key: WeightKey, failure: WeightLoadFailure) -> None:
         changes: list[ExpertStateChange] = []
