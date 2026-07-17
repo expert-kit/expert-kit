@@ -96,7 +96,7 @@ class FakeManager:
         self.generation = 0
         self.states = states
         self.targets: tuple[TargetExpert, ...] = ()
-        self.removals: list[tuple[int, tuple[WeightKey, ...]]] = []
+        self.removals: list[tuple[int, tuple[WeightKey, ...], bool]] = []
         self.shutting_down = False
 
     async def begin_shutdown(self) -> bool:
@@ -125,9 +125,11 @@ class FakeManager:
         self,
         placement_generation: int,
         keys: Iterable[WeightKey],
+        *,
+        whole_worker_shutdown: bool = False,
     ) -> bool:
         resolved = tuple(keys)
-        self.removals.append((placement_generation, resolved))
+        self.removals.append((placement_generation, resolved, whole_worker_shutdown))
         retained = {state.key: state for state in self.states}
         for key in resolved:
             removed = ExpertState(key, ExpertStateKind.REMOVED)
@@ -273,7 +275,7 @@ class DrainRpc:
         self.sent.append(await anext(requests))
         yield _target_part(4, ())
         self.sent.append(await anext(requests))
-        experts = () if self.stop_all else ((0, 2),)
+        experts = ((0, 2),)
         yield _drain_part(
             drain_id=12,
             generation=4,
@@ -283,8 +285,7 @@ class DrainRpc:
         if self.wait_forever_after_drain:
             await asyncio.Event().wait()
         else:
-            if not self.stop_all:
-                self.sent.append(await anext(requests))
+            self.sent.append(await anext(requests))
             self.sent.append(await anext(requests))
 
 
@@ -319,7 +320,7 @@ def test_drain_reports_removed_before_completion() -> None:
         assert rpc.sent[3].drain_complete.drain_id == 12
         assert receiver.begun == [(((0, 2),), 9, False)]
         assert receiver.expert_idle == [((0, 2),)]
-        assert manager.removals == [(4, (WeightKey(0, 2),))]
+        assert manager.removals == [(4, (WeightKey(0, 2),), False)]
         await session.close()
 
     run(scenario())
@@ -396,6 +397,7 @@ def test_whole_worker_drain_waits_for_every_admitted_batch() -> None:
         await session.wait_shutdown_completion_sent()
 
         assert manager.shutting_down is True
+        assert manager.removals == [(4, (WeightKey(0, 2),), True)]
         assert receiver.all_idle == 1
         assert receiver.all_idle_deadline == 40.0
         assert session.shutdown_deadline == 40.0

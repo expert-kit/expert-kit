@@ -105,6 +105,7 @@ class WeightManagerStats:
 class _RemovalRequest:
     placement_generation: int
     keys: tuple[WeightKey, ...]
+    whole_worker_shutdown: bool
 
 
 class WeightManagerFatalError(RuntimeError):
@@ -298,8 +299,10 @@ class WeightManager[CpuWeightT, ReadyWeightT]:
         self,
         placement_generation: int,
         keys: Iterable[WeightKey],
+        *,
+        whole_worker_shutdown: bool = False,
     ) -> bool:
-        """Withdraw unassigned ready objects after Transport admission is idle.
+        """Withdraw drained ready objects after Transport admission is idle.
 
         Returns:
             ``False`` when the authorization belongs to an older placement
@@ -308,12 +311,17 @@ class WeightManager[CpuWeightT, ReadyWeightT]:
         Warning:
             The caller must first stop matching Transport admission and wait for
             waiting and active batches to drain. Existing Backend references are
-            still waited here before an object becomes ``REMOVED``.
+            still waited here before an object becomes ``REMOVED``. Assigned
+            experts may be removed only during an authorized whole-Worker shutdown.
         """
+
+        if not isinstance(whole_worker_shutdown, bool):
+            raise TypeError("whole_worker_shutdown must be a Boolean")
 
         request = _RemovalRequest(
             placement_generation=self._validate_placement_generation(placement_generation),
             keys=self._validate_weight_keys(keys),
+            whole_worker_shutdown=whole_worker_shutdown,
         )
         while True:
             async with self._removal_lock:
@@ -460,7 +468,7 @@ class WeightManager[CpuWeightT, ReadyWeightT]:
             if request.placement_generation > self._placement_generation:
                 raise ValueError("drain generation is newer than current placement")
             assigned = tuple(key for key in request.keys if key in self._targets)
-            if assigned:
+            if assigned and not request.whole_worker_shutdown:
                 raise ValueError("cannot remove an expert in the current target list")
 
             ready_keys = tuple(key for key in request.keys if key in self._ready_keys)

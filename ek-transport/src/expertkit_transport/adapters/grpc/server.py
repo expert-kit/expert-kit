@@ -369,9 +369,9 @@ class GrpcWorkerServer(WorkerBatchReceiver):
         if (
             isinstance(min_topology_version, bool)
             or not isinstance(min_topology_version, int)
-            or not 0 < min_topology_version <= _UINT64_MAX
+            or not 0 <= min_topology_version <= _UINT64_MAX
         ):
-            raise ValueError("min_topology_version must be a positive uint64")
+            raise ValueError("min_topology_version must be a uint64")
         if not isinstance(stop_all, bool):
             raise ValueError("stop_all must be a Boolean")
         if not selected and not stop_all:

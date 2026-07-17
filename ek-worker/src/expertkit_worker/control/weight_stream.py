@@ -48,8 +48,10 @@ class _WeightManager(Protocol):
         self,
         placement_generation: int,
         keys: Iterable[WeightKey],
+        *,
+        whole_worker_shutdown: bool = False,
     ) -> bool:
-        """Make drained unassigned experts unavailable."""
+        """Make drained experts unavailable after Transport admission is idle."""
 
 
 class _WeightControlRpc(Protocol):
@@ -406,6 +408,7 @@ class WeightControlSession:
             removed = await self._manager.remove_after_drain(
                 authorization.placement_generation,
                 keys,
+                whole_worker_shutdown=authorization.stop_accepting_all_computation,
             )
             if not removed:
                 raise RuntimeError("Controller drain uses an obsolete placement generation")

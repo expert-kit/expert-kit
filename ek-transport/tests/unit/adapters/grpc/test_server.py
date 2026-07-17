@@ -485,7 +485,7 @@ def test_whole_worker_drain_rejects_every_new_batch() -> None:
             routing_weights=torch.tensor([[1.0, 0.0], [1.0, 0.0]], dtype=torch.float32),
             distinct_expert_ids=(2,),
         )
-        await server.begin_drain((), min_topology_version=15, stop_all=True)
+        await server.begin_drain((), min_topology_version=0, stop_all=True)
 
         with pytest.raises(TransportError) as caught:
             await await_with_loop_yields(
@@ -497,7 +497,7 @@ def test_whole_worker_drain_rejects_every_new_batch() -> None:
             )
 
         assert caught.value.code is TransportErrorCode.DRAINING
-        assert caught.value.min_topology_version == 15
+        assert caught.value.min_topology_version == 0
         assert server.pending_count == 0
         client.output_buffers.release(output)
         await await_with_loop_yields(close_pair(server, client))

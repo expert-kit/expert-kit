@@ -209,6 +209,105 @@ pub struct WorkerLifecycleServiceImpl {
     heartbeat_timeout: Duration,
 }
 
+struct HeartbeatLeaseGuard {
+    state: ControllerV2State,
+    hooks: Arc<dyn WorkerLifecycleHooks>,
+    worker_id: String,
+    start_id: String,
+    lease: u64,
+    graceful: bool,
+    state_closed: bool,
+    hook_completed: bool,
+}
+
+impl HeartbeatLeaseGuard {
+    fn new(
+        state: ControllerV2State,
+        hooks: Arc<dyn WorkerLifecycleHooks>,
+        worker_id: String,
+        start_id: String,
+        lease: u64,
+    ) -> Self {
+        Self {
+            state,
+            hooks,
+            worker_id,
+            start_id,
+            lease,
+            graceful: false,
+            state_closed: false,
+            hook_completed: false,
+        }
+    }
+
+    async fn close(&mut self) -> Result<(), Status> {
+        if !self.state_closed {
+            let unavailable = self
+                .state
+                .close_heartbeat(&self.worker_id, &self.start_id, self.lease)
+                .await
+                .map_err(state_status)?;
+            self.state_closed = true;
+            if !unavailable {
+                self.hook_completed = true;
+            }
+        }
+        if !self.hook_completed {
+            self.hooks
+                .unavailable(&self.worker_id, &self.start_id, self.graceful)
+                .await?;
+            self.hook_completed = true;
+        }
+        Ok(())
+    }
+}
+
+impl Drop for HeartbeatLeaseGuard {
+    fn drop(&mut self) {
+        if self.hook_completed {
+            return;
+        }
+        let state = self.state.clone();
+        let hooks = self.hooks.clone();
+        let worker_id = self.worker_id.clone();
+        let start_id = self.start_id.clone();
+        let lease = self.lease;
+        let graceful = self.graceful;
+        let state_closed = self.state_closed;
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            runtime.spawn(async move {
+                let unavailable = if state_closed {
+                    true
+                } else {
+                    match state.close_heartbeat(&worker_id, &start_id, lease).await {
+                        Ok(unavailable) => unavailable,
+                        Err(error) => {
+                            tracing::error!(
+                                worker_id,
+                                start_id,
+                                error = %error,
+                                "failed to close a cancelled Worker heartbeat lease"
+                            );
+                            false
+                        }
+                    }
+                };
+                if unavailable
+                    && let Err(error) = hooks.unavailable(&worker_id, &start_id, graceful).await
+                {
+                    tracing::error!(
+                        worker_id,
+                        start_id,
+                        graceful,
+                        error = %error,
+                        "failed to apply cancelled Worker heartbeat cleanup"
+                    );
+                }
+            });
+        }
+    }
+}
+
 impl WorkerLifecycleServiceImpl {
     pub fn new(
         state: ControllerV2State,
@@ -241,6 +340,13 @@ impl WorkerLifecycleServiceImpl {
             .open_heartbeat(&worker_id, &start_id)
             .await
             .map_err(state_status)?;
+        let mut lease_guard = HeartbeatLeaseGuard::new(
+            self.state.clone(),
+            self.hooks.clone(),
+            worker_id.clone(),
+            start_id.clone(),
+            lease,
+        );
         let mut last_sequence = 0;
         let mut graceful = false;
         let mut next = Some(first);
@@ -287,22 +393,14 @@ impl WorkerLifecycleServiceImpl {
                 && !graceful
             {
                 graceful = true;
+                lease_guard.graceful = true;
                 if let Err(status) = self.hooks.shutting_down(&worker_id, &start_id).await {
                     break Err(status);
                 }
             }
         };
 
-        if self
-            .state
-            .close_heartbeat(&worker_id, &start_id, lease)
-            .await
-            .map_err(state_status)?
-        {
-            self.hooks
-                .unavailable(&worker_id, &start_id, graceful)
-                .await?;
-        }
+        lease_guard.close().await?;
         stream_result?;
         Ok(HeartbeatSummary { last_sequence })
     }
@@ -557,6 +655,58 @@ mod tests {
         let error = service.run_heartbeat(messages).await.unwrap_err();
         assert_eq!(error.code(), tonic::Code::DeadlineExceeded);
         assert!(hooks.events.lock().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn cancelled_heartbeat_handler_still_marks_worker_unavailable() {
+        let state = ControllerV2State::new(8);
+        let hooks = Arc::new(FakeHooks::default());
+        let service =
+            WorkerLifecycleServiceImpl::new(state.clone(), hooks.clone(), Duration::from_secs(1));
+        state.register(registration()).await.unwrap();
+        let (sender, receiver) = mpsc::channel(2);
+        sender
+            .send(Ok(heartbeat(1, WorkerRunState::WorkerRunning)))
+            .await
+            .unwrap();
+        let task =
+            tokio::spawn(async move { service.run_heartbeat(ReceiverStream::new(receiver)).await });
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if hooks
+                    .events
+                    .lock()
+                    .await
+                    .iter()
+                    .any(|event| event == "heartbeat:worker-0")
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if hooks
+                    .events
+                    .lock()
+                    .await
+                    .iter()
+                    .any(|event| event == "unavailable:worker-0:false")
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        drop(sender);
     }
 
     #[tokio::test]

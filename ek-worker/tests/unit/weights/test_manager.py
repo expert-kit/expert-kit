@@ -10,6 +10,7 @@ from typing import Any
 import pytest
 
 from expertkit_worker.weights import (
+    ExpertState,
     ExpertStateChange,
     ExpertStateKind,
     TargetExpert,
@@ -458,6 +459,34 @@ def test_remove_after_drain_validates_generation_and_current_targets() -> None:
             await manager.remove_after_drain(2, (key,))
 
         await _await_with_loop_yields(manager.wait_for_idle())
+        await _await_with_loop_yields(manager.close())
+
+    run(scenario())
+
+
+def test_whole_worker_shutdown_removes_current_targets_after_drain() -> None:
+    async def scenario() -> None:
+        loader = _FakeLoader()
+        changes: list[ExpertStateChange] = []
+        manager, _ = _make_manager(loader, changes=changes)
+        manager.start()
+        key = WeightKey(0, 0)
+        await manager.apply_targets(1, [_target(0, 0)])
+        await _await_with_loop_yields(manager.wait_for_idle())
+
+        assert await manager.begin_shutdown() is True
+        assert await manager.remove_after_drain(
+            1,
+            (key,),
+            whole_worker_shutdown=True,
+        )
+        with pytest.raises(WeightsNotReady):
+            manager.acquire_many(0, (0,))
+        assert changes[-1] == ExpertStateChange(
+            1,
+            ExpertState(key, ExpertStateKind.REMOVED),
+        )
+
         await _await_with_loop_yields(manager.close())
 
     run(scenario())
