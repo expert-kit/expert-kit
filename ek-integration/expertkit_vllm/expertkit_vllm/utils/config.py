@@ -1,42 +1,39 @@
+"""Validated process configuration for the vLLM integration."""
+
+from __future__ import annotations
+
+import math
 import os
 from dataclasses import dataclass
-from transformers import PretrainedConfig
-from typing import Optional
 
-@dataclass
+
+@dataclass(frozen=True, slots=True)
 class EkClientConfig:
-    ek_mode: str = "expert_mode"  # or "moe_mode"
-    ek_addr: str = "localhost:5002"
-    ek_debug_mode: bool = False
-    ek_client_timeout: int = 2  # seconds
-    ek_model_name: str = ""
+    """Hold the Controller route and model instance used by this vLLM process."""
 
-def collect_ek_client_cfg(cfg: Optional[PretrainedConfig]=None) -> EkClientConfig:
-    # init cfg from file and env variables
-    ek_cfg = EkClientConfig()
+    controller_endpoint: str
+    instance_id: int
+    timeout_seconds: float
 
-    # try get config from model config
-    if cfg is not None:
-        ek_cfg.ek_mode = getattr(cfg, "ek_mode", ek_cfg.ek_mode)
-        ek_cfg.ek_addr = getattr(cfg, "ek_backend_addr", ek_cfg.ek_addr)
-        ek_cfg.ek_debug_mode = getattr(cfg, "ek_debug_mode", ek_cfg.ek_debug_mode)
-        ek_cfg.ek_client_timeout = getattr(cfg, "ek_client_timeout", ek_cfg.ek_client_timeout)
-        ek_cfg.ek_model_name = getattr(cfg, "ek_model_name", cfg.model_name_or_path)
 
-    # then from environment variables
-    ek_cfg.ek_mode = os.getenv("EK_MODE", ek_cfg.ek_mode)
-    ek_cfg.ek_addr = os.getenv("EK_ADDR", ek_cfg.ek_addr)
-    ek_cfg.ek_debug_mode = os.getenv("EK_DEBUG_MODE", str(ek_cfg.ek_debug_mode)) == "1"
-    ek_cfg.ek_client_timeout = os.getenv("EK_CLIENT_TIMEOUT", int(ek_cfg.ek_client_timeout))
-    ek_cfg.ek_model_name = os.getenv("EK_MODEL_NAME", ek_cfg.ek_model_name)
+def collect_ek_client_config() -> EkClientConfig:
+    """Read and validate the small configuration surface exposed to vLLM."""
 
-    if not ek_cfg.ek_model_name:
-        raise ValueError("EK_MODEL_NAME must be set in config or environment variables")
-
-    # type essure
-    ek_cfg.ek_client_timeout = int(ek_cfg.ek_client_timeout)
-    ek_cfg.ek_debug_mode = bool(ek_cfg.ek_debug_mode)
-    ek_cfg.ek_mode = str(ek_cfg.ek_mode)
-    ek_cfg.ek_addr = str(ek_cfg.ek_addr)
-
-    return ek_cfg
+    endpoint = os.getenv("EK_ADDR", "localhost:5002").strip()
+    if not endpoint:
+        raise ValueError("EK_ADDR must not be empty")
+    try:
+        instance_id = int(os.environ["EK_INSTANCE_ID"])
+    except KeyError as error:
+        raise ValueError("EK_INSTANCE_ID must be set") from error
+    except ValueError as error:
+        raise ValueError("EK_INSTANCE_ID must be an integer") from error
+    if instance_id <= 0:
+        raise ValueError("EK_INSTANCE_ID must be positive")
+    try:
+        timeout_seconds = float(os.getenv("EK_CLIENT_TIMEOUT", "6"))
+    except ValueError as error:
+        raise ValueError("EK_CLIENT_TIMEOUT must be numeric") from error
+    if not math.isfinite(timeout_seconds) or timeout_seconds <= 0:
+        raise ValueError("EK_CLIENT_TIMEOUT must be finite and positive")
+    return EkClientConfig(endpoint, instance_id, timeout_seconds)

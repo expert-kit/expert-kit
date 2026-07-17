@@ -1,4 +1,4 @@
-from setuptools import setup, find_packages
+from setuptools import find_packages, setup
 
 setup(
     name="expertkit-vllm",
@@ -7,14 +7,8 @@ setup(
     author="ExpertMesh Team",
     packages=find_packages(),
     install_requires=[
-        "vllm>=0.14.1",
-        "torch>=2.0.0",
-        "grpcio>=1.44.0",
-        "protobuf>=5.29.0",
+        "expertkit-transport==0.1.0",
+        "vllm==0.25.1",
     ],
-    entry_points={
-        "vllm.general_plugins": [
-            "register_expertkit = expertkit_vllm.plugin:register"
-        ]
-    },
+    entry_points={"vllm.general_plugins": ["register_expertkit = expertkit_vllm.plugin:register"]},
 )
