@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sys
 import warnings
+from dataclasses import dataclass
 
 import torch
 from google.protobuf.message import DecodeError
@@ -33,6 +34,14 @@ _PROTO_TO_TRANSPORT_ERROR = {wire: code for code, wire in _TRANSPORT_TO_PROTO_ER
 
 class GrpcProtocolError(ValueError):
     """Report malformed or inconsistent gRPC computation data."""
+
+
+@dataclass(frozen=True, slots=True)
+class DecodedRequest:
+    """Hold one decoded batch and the bytes backing its Tensor views."""
+
+    batch: WorkerBatch
+    retained_tensor_bytes: int
 
 
 def _require_little_endian() -> None:
@@ -154,6 +163,12 @@ def encode_request(batch: WorkerBatch, spec: GrpcBatchSpec) -> bytes:
 def decode_request(payload: bytes, spec: GrpcBatchSpec) -> WorkerBatch:
     """Validate serialized v2 input before constructing Host Tensor views."""
 
+    return decode_request_with_size(payload, spec).batch
+
+
+def decode_request_with_size(payload: bytes, spec: GrpcBatchSpec) -> DecodedRequest:
+    """Decode input and report the bytes retained by its Tensor views."""
+
     _require_little_endian()
     if len(payload) > calculate_message_limits(spec).request_bytes:
         raise GrpcProtocolError("request exceeds the configured gRPC message limit")
@@ -207,15 +222,18 @@ def decode_request(payload: bytes, spec: GrpcBatchSpec) -> WorkerBatch:
         routing_weights,
         spec.experts_per_layer,
     )
-    return WorkerBatch(
-        instance_id=request.instance_id,
-        layer_id=request.layer_id,
-        topology_version=request.topology_version,
-        hidden_states=hidden_states,
-        token_indices=None,
-        expert_ids=expert_ids,
-        routing_weights=routing_weights,
-        distinct_expert_ids=distinct,
+    return DecodedRequest(
+        batch=WorkerBatch(
+            instance_id=request.instance_id,
+            layer_id=request.layer_id,
+            topology_version=request.topology_version,
+            hidden_states=hidden_states,
+            token_indices=None,
+            expert_ids=expert_ids,
+            routing_weights=routing_weights,
+            distinct_expert_ids=distinct,
+        ),
+        retained_tensor_bytes=hidden_bytes + expert_bytes + routing_bytes,
     )
 
 

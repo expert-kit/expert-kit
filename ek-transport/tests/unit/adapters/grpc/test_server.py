@@ -363,7 +363,7 @@ def test_application_pending_limit_returns_busy_and_cancellation_releases_input(
         assert caught.value.code is TransportErrorCode.BUSY
         assert caught.value.retryable is True
         assert server.pending_count == 1
-        assert server.pending_retained_bytes > 0
+        assert server.pending_retained_bytes == 44
 
         first.cancel()
         with pytest.raises(asyncio.CancelledError):
@@ -376,6 +376,67 @@ def test_application_pending_limit_returns_busy_and_cancellation_releases_input(
         client.output_buffers.release(first_output)
         client.output_buffers.release(second_output)
         await close_pair(server, client)
+
+    run(scenario())
+
+
+def test_maximum_batch_accounts_only_retained_decoded_tensor_bytes() -> None:
+    async def scenario() -> None:
+        server, client = await start_pair()
+        output = prepare_output(client)
+        batch = WorkerBatch(
+            instance_id=7,
+            layer_id=2,
+            topology_version=11,
+            hidden_states=torch.ones((4, 3), dtype=torch.float16),
+            token_indices=None,
+            expert_ids=torch.tensor(
+                [[0, 1], [2, 3], [4, 5], [6, 7]],
+                dtype=torch.int32,
+            ),
+            routing_weights=torch.full((4, 2), 0.5, dtype=torch.float32),
+            distinct_expert_ids=tuple(range(8)),
+        )
+        submission = asyncio.create_task(
+            client.submit(batch, output, monotonic_deadline=float("inf"))
+        )
+        await await_with_loop_yields(server._wait_pending_count(1))
+
+        assert server.pending_retained_bytes == (
+            calculate_message_limits(batch_spec()).retained_request_tensor_bytes
+        )
+        received = await server.take()
+        assert server.pending_retained_bytes == 0
+        await await_with_loop_yields(received.complete(received.batch.hidden_states))
+        await await_with_loop_yields(submission)
+
+        client.output_buffers.release(output)
+        await close_pair(server, client)
+
+    run(scenario())
+
+
+def test_server_close_clears_pending_retained_bytes() -> None:
+    async def scenario() -> None:
+        server, client = await start_pair()
+        output = prepare_output(client)
+        submission = asyncio.create_task(
+            client.submit(
+                worker_batch(),
+                output,
+                monotonic_deadline=float("inf"),
+            )
+        )
+        await await_with_loop_yields(server._wait_pending_count(1))
+        assert server.pending_retained_bytes == 44
+
+        await server.close()
+        assert server.pending_count == 0
+        assert server.pending_retained_bytes == 0
+        result = await asyncio.gather(submission, return_exceptions=True)
+        assert isinstance(result[0], TransportError)
+        client.output_buffers.release(output)
+        await client.close()
 
     run(scenario())
 
@@ -499,6 +560,7 @@ def test_whole_worker_drain_rejects_every_new_batch() -> None:
         assert caught.value.code is TransportErrorCode.DRAINING
         assert caught.value.min_topology_version == 0
         assert server.pending_count == 0
+        assert server.pending_retained_bytes == 0
         client.output_buffers.release(output)
         await await_with_loop_yields(close_pair(server, client))
 
@@ -635,6 +697,7 @@ def test_server_rejects_malformed_wire_requests_with_native_status(payload: byte
             await execute(payload)
         assert caught.value.code() is grpc.StatusCode.INVALID_ARGUMENT
         assert server.pending_count == 0
+        assert server.pending_retained_bytes == 0
         await channel.close()
         await server.close()
 

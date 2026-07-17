@@ -18,7 +18,7 @@ import torch
 
 from expertkit_transport.adapters.grpc.codec import (
     GrpcProtocolError,
-    decode_request,
+    decode_request_with_size,
     encode_error_response,
     encode_success_response,
 )
@@ -248,7 +248,7 @@ class GrpcWorkerServer(WorkerBatchReceiver):
         self._maximum_concurrent_rpcs = max_active_batches + max_pending_batches
         self._pending = _PendingArea(
             max_pending_batches,
-            max_pending_batches * self._limits.request_bytes,
+            max_pending_batches * self._limits.retained_request_tensor_bytes,
         )
         self._executor = ThreadPoolExecutor(
             max_workers=resolved_cpu_workers,
@@ -447,15 +447,21 @@ class GrpcWorkerServer(WorkerBatchReceiver):
             self._record_rejection(TransportErrorCode.UNAVAILABLE.value)
             await context.abort(grpc.StatusCode.UNAVAILABLE, "Worker is shutting down")
         try:
-            batch = await self._run_cpu(decode_request, payload, self._spec)
+            decoded = await self._run_cpu(decode_request_with_size, payload, self._spec)
         except GrpcProtocolError as error:
             self._record_rejection(TransportErrorCode.PROTOCOL.value)
             await context.abort(grpc.StatusCode.INVALID_ARGUMENT, str(error))
             raise AssertionError("context.abort must terminate the handler") from error
+        del payload
 
         remaining = context.time_remaining()
         deadline = math.inf if remaining is None else self._clock() + max(0.0, remaining)
-        item = _GrpcWorkItem(self, batch, deadline, len(payload))
+        item = _GrpcWorkItem(
+            self,
+            decoded.batch,
+            deadline,
+            decoded.retained_tensor_bytes,
+        )
         rejection = await self._admit(item)
         if rejection is not None:
             self._record_rejection(rejection.code.value)

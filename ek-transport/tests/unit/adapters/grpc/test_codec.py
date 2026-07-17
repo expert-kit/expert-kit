@@ -15,6 +15,7 @@ from expertkit_transport.adapters.grpc import (
     encode_request,
     encode_success_response,
 )
+from expertkit_transport.adapters.grpc.codec import decode_request_with_size
 from expertkit_transport.contracts import (
     TransportError,
     TransportErrorCode,
@@ -79,6 +80,22 @@ def test_request_fields_contain_little_endian_raw_tensors() -> None:
         "0000e04000000041000010410000803f0000004000004040"
     )
     assert request.expert_ids == bytes.fromhex("01000000ffffffff0000000003000000")
+
+
+def test_decoded_request_reports_exact_tensor_backing_bytes() -> None:
+    decoded = decode_request_with_size(
+        encode_request(worker_batch(), spec()),
+        spec(),
+    )
+
+    tensors = (
+        decoded.batch.hidden_states,
+        decoded.batch.expert_ids,
+        decoded.batch.routing_weights,
+    )
+    assert decoded.retained_tensor_bytes == sum(
+        tensor.numel() * tensor.element_size() for tensor in tensors
+    )
 
 
 @pytest.mark.parametrize(
