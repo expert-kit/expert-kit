@@ -332,17 +332,17 @@ where
 mod test {
     use std::sync::Arc;
 
-    use ek_base::utils::workspace_root;
     use tokio::task::JoinSet;
 
-    use crate::safetensor::transformer::{TransformerModelDesc, TransformerPretrained};
+    use crate::safetensor::{
+        test_fixture::synthetic_qwen_model,
+        transformer::{TransformerModelDesc, TransformerPretrained},
+    };
 
     #[tokio::test]
     async fn test_get_layer() {
-        let root = workspace_root();
-        let test_model = root.join("ek-db").join("resources").join("ds-tiny");
         let desc = TransformerModelDesc {
-            root: test_model.clone(),
+            root: synthetic_qwen_model(),
             ..TransformerModelDesc::default()
         };
         let pretrained: TransformerPretrained =
@@ -362,10 +362,8 @@ mod test {
 
     #[tokio::test]
     async fn test_get_expert() {
-        let root = workspace_root();
-        let test_model = root.join("ek-db").join("resources").join("ds-tiny");
         let desc = TransformerModelDesc {
-            root: test_model.clone(),
+            root: synthetic_qwen_model(),
             ..TransformerModelDesc::default()
         };
         let pretrained: TransformerPretrained =
@@ -391,10 +389,8 @@ mod test {
 
     #[tokio::test]
     async fn pressure_test() {
-        let root = workspace_root();
-        let test_model = root.join("ek-db").join("resources").join("ds-tiny");
         let desc = TransformerModelDesc {
-            root: test_model.clone(),
+            root: synthetic_qwen_model(),
             ..TransformerModelDesc::default()
         };
         let pretrained: TransformerPretrained =

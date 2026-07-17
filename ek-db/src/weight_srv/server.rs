@@ -79,21 +79,16 @@ pub async fn listen<A: ToSocketAddrs>(
 
 #[cfg(test)]
 mod test {
-    use std::mem::transmute;
-
     use crate::safetensor::transformer::VitalMeta;
 
     use super::*;
 
+    use crate::safetensor::test_fixture::synthetic_qwen_model;
     use actix_web::{App, body::to_bytes, http::header::ContentType, test};
-    use ek_base::utils::workspace_root;
 
     async fn test_wm() -> &'static WeightManager<'static> {
-        let root = workspace_root();
-        let test_model: PathBuf = root.join("ek-db").join("resources").join("ds-tiny");
-        let tm = vec![test_model.clone()];
-        let tm: &'static [PathBuf] = unsafe { transmute(tm.as_slice()) };
-        load_manager(tm, None).await
+        let roots: &'static [PathBuf; 1] = Box::leak(Box::new([synthetic_qwen_model()]));
+        load_manager(roots, None).await
     }
 
     #[actix_web::test]
@@ -102,7 +97,7 @@ mod test {
         let app =
             test::init_service(App::new().app_data(web::Data::new(wm)).service(load_layer)).await;
         let req = test::TestRequest::default()
-            .uri("/weight/ds-tiny/model.layers.9.mlp.experts.94.down_proj.weight")
+            .uri("/weight/qwen-test/model.layers.9.mlp.experts.94.down_proj.weight")
             .insert_header(ContentType::plaintext())
             .to_request();
         let resp = test::call_service(&app, req).await;
@@ -122,7 +117,7 @@ mod test {
         let app =
             test::init_service(App::new().app_data(web::Data::new(wm)).service(load_expert)).await;
         let req = test::TestRequest::default()
-            .uri("/expert/ds-tiny/3/32")
+            .uri("/expert/qwen-test/3/32")
             .insert_header(ContentType::plaintext())
             .to_request();
         let resp = test::call_service(&app, req).await;
@@ -159,7 +154,7 @@ mod test {
         )
         .await;
         let req = test::TestRequest::default()
-            .uri("/meta/vital/ds-tiny")
+            .uri("/meta/vital/qwen-test")
             .insert_header(ContentType::plaintext())
             .to_request();
         let resp = test::call_service(&app, req).await;
@@ -169,7 +164,7 @@ mod test {
         let bytes = to_bytes(body).await.unwrap();
         let vital: VitalMeta = serde_json::from_slice(bytes.as_ref()).unwrap();
         assert_eq!(vital.routed_experts, 256);
-        assert_eq!(vital.moe_layers, (3, 10));
+        assert_eq!(vital.moe_layers, (0, 10));
         assert_eq!(vital.hidden_dim, 16);
         assert_eq!(vital.inter_dim, 8);
     }

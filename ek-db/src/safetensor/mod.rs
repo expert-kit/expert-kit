@@ -1,4 +1,6 @@
 pub mod memcache;
+#[cfg(test)]
+pub(crate) mod test_fixture;
 pub mod transformer;
 
 use std::sync::Arc;
