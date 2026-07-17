@@ -260,6 +260,11 @@ dependencies = [
     { name = "torch" },
 ]
 
+[package.optional-dependencies]
+ggml = [
+    { name = "ggml-python" },
+]
+
 [package.dev-dependencies]
 dev = [
     { name = "pytest" },
@@ -271,12 +276,14 @@ dev = [
 requires-dist = [
     { name = "aiohttp", specifier = ">=3.11,<4" },
     { name = "expertkit-transport", editable = "../ek-transport" },
+    { name = "ggml-python", marker = "extra == 'ggml'", specifier = "==0.0.45" },
     { name = "grpcio", specifier = "==1.71.0" },
     { name = "pydantic", specifier = ">=2.11,<3" },
     { name = "pyyaml", specifier = ">=6,<7" },
     { name = "structlog", specifier = ">=25.4,<26" },
     { name = "torch", specifier = "==2.11.0" },
 ]
+provides-extras = ["ggml"]
 
 [package.metadata.requires-dev]
 dev = [
@@ -391,6 +398,16 @@ sdist = { url = "https://mirrors.tuna.tsinghua.edu.cn/pypi/web/packages/10/a1/ae
 wheels = [
     { url = "https://mirrors.tuna.tsinghua.edu.cn/pypi/web/packages/e5/22/4222d7ddf3da30f363edaa98e329c2bce6c65497c9cb2810931c8b2c0fbc/fsspec-2026.6.0-py3-none-any.whl", hash = "sha256:02e0b71817df9b2169dc30a16832045764def1191b43dcff5bb85bdee212d2a1", size = 203949 },
 ]
+
+[[package]]
+name = "ggml-python"
+version = "0.0.45"
+source = { registry = "https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple" }
+dependencies = [
+    { name = "numpy" },
+    { name = "typing-extensions" },
+]
+sdist = { url = "https://mirrors.tuna.tsinghua.edu.cn/pypi/web/packages/0f/0e/ef343189f9e31b651e57770d04a0e5fc64795d3ee9e8f46fe0fc5e0aa8e0/ggml_python-0.0.45.tar.gz", hash = "sha256:10aac52075cf3c7ef2b00d6c35b1c23f7b018dbeff8ae8df67339b4be1166f05", size = 3392650 }
 
 [[package]]
 name = "grpcio"

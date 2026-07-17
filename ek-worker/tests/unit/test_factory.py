@@ -64,10 +64,10 @@ def test_split_address_handles_ipv4_hostnames_and_ipv6() -> None:
     assert _split_address("[2001:db8::1]:5002") == ("2001:db8::1", 5002)
 
 
-def test_factory_rejects_unimplemented_optional_backend(tmp_path: Path) -> None:
+def test_factory_builds_and_closes_ggml_worker(tmp_path: Path) -> None:
     async def scenario() -> None:
-        with pytest.raises(NotImplementedError, match="ggml Backend"):
-            await build_worker_application(_config(tmp_path, backend="ggml"))
+        application = await build_worker_application(_config(tmp_path, backend="ggml"))
+        await application.close()
 
     asyncio.run(scenario())
 

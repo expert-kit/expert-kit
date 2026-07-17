@@ -20,6 +20,11 @@ dependencies = [
 [project.scripts]
 expertkit-worker = "expertkit_worker.cli:main"
 
+[project.optional-dependencies]
+ggml = [
+    "ggml-python==0.0.45",
+]
+
 [tool.uv.sources]
 expertkit-transport = { path = "../ek-transport", editable = true }
 

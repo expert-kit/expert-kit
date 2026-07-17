@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+from collections.abc import Callable
 from typing import Any
 
 import structlog
@@ -10,7 +12,7 @@ from expertkit_transport.adapters.grpc import GrpcBatchSpec, GrpcWorkerServer
 from expertkit_transport.contracts import WorkerPositionSpec
 
 from expertkit_worker.app import WorkerApplication
-from expertkit_worker.backends.torch import TorchBackend, TorchWeightAdapter
+from expertkit_worker.backends import ComputeBackend
 from expertkit_worker.config import (
     ActivationDType,
     BackendName,
@@ -36,6 +38,7 @@ from expertkit_worker.weights import (
     WeightManager,
     max_safetensors_file_bytes,
 )
+from expertkit_worker.weights.adapter import WeightAdapter
 from expertkit_worker.weights.dram_cache import DramCache
 from expertkit_worker.weights.loader import CachedCpuWeight
 from expertkit_worker.weights.transfer import HttpWeightTransfer
@@ -57,7 +60,7 @@ def _split_address(value: str) -> tuple[str, int]:
     return host, int(port)
 
 
-def _dram_cache_limit(config: WorkerConfig, adapter: TorchWeightAdapter) -> int:
+def _dram_cache_limit(config: WorkerConfig, adapter: WeightAdapter[Any, Any]) -> int:
     one_entry = (
         max_safetensors_file_bytes(adapter.source_tensor_bytes()) + adapter.cpu_extra_bytes()
     )
@@ -71,25 +74,107 @@ def _dram_cache_limit(config: WorkerConfig, adapter: TorchWeightAdapter) -> int:
     return one_entry * expert_count
 
 
+def _create_weight_adapter(
+    config: WorkerConfig,
+    *,
+    source_dtype: torch.dtype,
+    compute_dtype: torch.dtype,
+    device: torch.device,
+) -> WeightAdapter[Any, Any]:
+    if config.worker.backend is BackendName.TORCH:
+        from expertkit_worker.backends.torch import TorchWeightAdapter
+
+        return TorchWeightAdapter(
+            hidden_dim=config.model.hidden_dim,
+            intermediate_dim=config.model.expert_intermediate_dim,
+            source_dtype=source_dtype,
+            compute_dtype=compute_dtype,
+            device=device,
+        )
+    if config.worker.backend is BackendName.GGML:
+        try:
+            from expertkit_worker.backends.ggml import GgmlWeightAdapter
+        except ModuleNotFoundError as error:
+            if error.name == "ggml":
+                raise RuntimeError("the GGML Backend requires the locked ggml extra") from error
+            raise
+
+        return GgmlWeightAdapter(
+            hidden_dim=config.model.hidden_dim,
+            intermediate_dim=config.model.expert_intermediate_dim,
+            source_dtype=source_dtype,
+            compute_dtype=compute_dtype,
+        )
+    raise NotImplementedError("the fused Backend is not implemented in this build")
+
+
+def _create_backend(
+    config: WorkerConfig,
+    *,
+    dtype: torch.dtype,
+    device: torch.device,
+    acquire_many: Callable[[int, tuple[int, ...]], Any],
+) -> ComputeBackend:
+    if config.worker.backend is BackendName.TORCH:
+        from expertkit_worker.backends.torch import TorchBackend
+
+        return TorchBackend(
+            hidden_dim=config.model.hidden_dim,
+            intermediate_dim=config.model.expert_intermediate_dim,
+            top_k=config.model.top_k,
+            dtype=dtype,
+            device=device,
+            acquire_many=acquire_many,
+        )
+    if config.worker.backend is BackendName.GGML:
+        from expertkit_worker.backends.ggml import GgmlBackend
+
+        if config.ggml is None:
+            raise ValueError("ggml configuration is missing after validation")
+        return GgmlBackend(
+            hidden_dim=config.model.hidden_dim,
+            intermediate_dim=config.model.expert_intermediate_dim,
+            top_k=config.model.top_k,
+            dtype=dtype,
+            cpu_threads=config.ggml.cpu_threads,
+            acquire_many=acquire_many,
+        )
+    raise NotImplementedError("the fused Backend is not implemented in this build")
+
+
+def _memory_info(device: torch.device) -> tuple[int, int]:
+    if device.type == "cuda":
+        available, total = torch.cuda.mem_get_info(device)
+        return int(available), int(total)
+    if device.type != "cpu":
+        raise ValueError("Worker device must be CPU or CUDA")
+    try:
+        page_size = os.sysconf("SC_PAGE_SIZE")
+        available_pages = os.sysconf("SC_AVPHYS_PAGES")
+        total_pages = os.sysconf("SC_PHYS_PAGES")
+    except (OSError, ValueError) as error:
+        raise RuntimeError("cannot query available CPU memory") from error
+    if min(page_size, available_pages, total_pages) <= 0:
+        raise RuntimeError("the operating system returned invalid CPU memory information")
+    return int(available_pages * page_size), int(total_pages * page_size)
+
+
 async def build_worker_application(config: WorkerConfig) -> WorkerApplication:
-    """Build the Torch-first MVP Worker without starting network listeners.
+    """Build the selected MVP Worker without starting network listeners.
 
     Raises:
-        NotImplementedError: The selected optional Backend is not implemented yet.
+        NotImplementedError: The fused Backend remains disabled in this build.
+        RuntimeError: A selected Backend extra is absent or memory cannot be queried.
         ValueError: Startup resource planning or a component contract is invalid.
     """
 
     if not isinstance(config, WorkerConfig):
         raise TypeError("config must be a WorkerConfig")
-    if config.worker.backend is not BackendName.TORCH:
-        raise NotImplementedError(
-            f"the {config.worker.backend.value} Backend is not implemented in this build"
-        )
-
     activation_dtype = _DTYPE[config.model.activation_dtype]
     weight_dtype = _DTYPE[config.model.weight_dtype]
     device = torch.device(config.worker.device)
-    torch.cuda.set_device(device)
+    if device.type == "cuda":
+        torch.cuda.set_device(device)
 
     receiver: GrpcWorkerServer | None = None
     execution: WorkerExecution | None = None
@@ -98,9 +183,8 @@ async def build_worker_application(config: WorkerConfig) -> WorkerApplication:
     transfer: HttpWeightTransfer | None = None
     disk_cache: DirectIOWeightDiskCache | None = None
     try:
-        adapter = TorchWeightAdapter(
-            hidden_dim=config.model.hidden_dim,
-            intermediate_dim=config.model.expert_intermediate_dim,
+        adapter = _create_weight_adapter(
+            config,
             source_dtype=weight_dtype,
             compute_dtype=activation_dtype,
             device=device,
@@ -126,13 +210,11 @@ async def build_worker_application(config: WorkerConfig) -> WorkerApplication:
         def acquire_many(layer_id: int, expert_ids: tuple[int, ...]) -> Any:
             current = manager_holder[0]
             if current is None:
-                raise RuntimeError("Weight Manager is not installed in the Torch Backend")
+                raise RuntimeError("Weight Manager is not installed in the selected Backend")
             return current.acquire_many(layer_id, expert_ids)
 
-        backend = TorchBackend(
-            hidden_dim=config.model.hidden_dim,
-            intermediate_dim=config.model.expert_intermediate_dim,
-            top_k=config.model.top_k,
+        backend = _create_backend(
+            config,
             dtype=activation_dtype,
             device=device,
             acquire_many=acquire_many,
@@ -158,7 +240,7 @@ async def build_worker_application(config: WorkerConfig) -> WorkerApplication:
             active_batches=config.worker.max_active_batches_per_device,
             conversion_temporary_bytes=adapter.conversion_temporary_bytes(),
         )
-        available_bytes, total_bytes = torch.cuda.mem_get_info(device)
+        available_bytes, total_bytes = _memory_info(device)
         if int(config.worker.device_memory_limit) > total_bytes:
             raise ValueError("worker.device_memory_limit exceeds total device memory")
         validate_available_device_memory(
