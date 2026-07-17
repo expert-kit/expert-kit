@@ -91,6 +91,26 @@ class FakeTransfer(WeightTransfer):
         pass
 
 
+class BlockingTransfer(FakeTransfer):
+    """Hold one transfer so concurrent callers can join the same load."""
+
+    def __init__(self, results: dict[str, bytes | WeightTransferError]) -> None:
+        super().__init__(results)
+        self.started = asyncio.Event()
+        self.allow = asyncio.Event()
+
+    async def download(self, url: str, *, max_bytes: int) -> AlignedWeightBuffer:
+        self.calls.append(url)
+        self.started.set()
+        await self.allow.wait()
+        result = self.results[url]
+        if isinstance(result, WeightTransferError):
+            raise result
+        if len(result) > max_bytes:
+            raise AssertionError("fixture exceeds loader byte bound")
+        return make_buffer(result)
+
+
 class FakeDiskCache(WeightDiskCache):
     """Return configured local files while recording reads and invalidations."""
 
@@ -120,10 +140,32 @@ class FakeDiskCache(WeightDiskCache):
             view.release()
 
 
+class BlockingDiskCache(FakeDiskCache):
+    """Hold one disk read so concurrent callers overlap before cache insertion."""
+
+    def __init__(self, results: dict[WeightKey, bytes | OSError] | None = None) -> None:
+        super().__init__(results)
+        self.started = asyncio.Event()
+        self.allow = asyncio.Event()
+
+    async def read(self, key: WeightKey, *, max_bytes: int) -> AlignedWeightBuffer:
+        self.reads.append(key)
+        self.started.set()
+        await self.allow.wait()
+        result = self.results.get(key, FileNotFoundError("expert file does not exist"))
+        if isinstance(result, OSError):
+            raise result
+        if len(result) > max_bytes:
+            raise AssertionError("disk fixture exceeds loader byte bound")
+        return make_buffer(result)
+
+
 def make_loader(
     transfer: WeightTransfer,
     disk_cache: WeightDiskCache | None = None,
     source_results: list[tuple[str, bool]] | None = None,
+    *,
+    cache_entries: int = 1,
 ) -> CpuWeightLoader[object, object]:
     """Return a small Torch CPU loader with full parser-headroom capacity."""
 
@@ -135,7 +177,7 @@ def make_loader(
         device="cpu",
     )
     max_bytes = 8 + 16 * 1024 * 1024 + adapter.source_tensor_bytes()
-    cache: DramCache[CachedCpuWeight[object]] = DramCache(max_bytes)
+    cache: DramCache[CachedCpuWeight[object]] = DramCache(max_bytes * cache_entries)
     return CpuWeightLoader(
         model_name=_MODEL_NAME,
         disk_cache=FakeDiskCache() if disk_cache is None else disk_cache,
@@ -313,3 +355,72 @@ def test_loader_reports_all_failures_and_preserves_retryability() -> None:
         ]
 
     run(scenario())
+
+
+def test_concurrent_same_key_disk_loads_share_one_read_and_return_independent_leases() -> None:
+    key = WeightKey(2, 3)
+    disk = BlockingDiskCache({key: make_payload()})
+    loader = make_loader(FakeTransfer({}), disk, cache_entries=2)
+
+    async def scenario() -> None:
+        first = asyncio.create_task(loader.acquire(key))
+        second = asyncio.create_task(loader.acquire_local(key))
+        await asyncio.wait_for(disk.started.wait(), timeout=1)
+        assert disk.reads == [key]
+        disk.allow.set()
+
+        first_lease, second_lease = await asyncio.gather(first, second)
+        assert first_lease.cached is second_lease.cached
+        await first_lease.close()
+        assert second_lease.cached.value.gate_proj[0, 0].item() == 1
+        await second_lease.close()
+
+    run(scenario())
+    assert disk.reads == [key]
+
+
+def test_cancelling_one_waiter_does_not_cancel_a_shared_remote_load() -> None:
+    key = WeightKey(3, 4)
+    central_url = expert_url(_WEIGHT_SERVER, key)
+    transfer = BlockingTransfer({central_url: make_payload()})
+    loader = make_loader(transfer, cache_entries=2)
+
+    async def scenario() -> None:
+        cancelled = asyncio.create_task(loader.acquire(key))
+        retained = asyncio.create_task(loader.acquire(key))
+        await asyncio.wait_for(transfer.started.wait(), timeout=1)
+        cancelled.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await cancelled
+        assert retained.done() is False
+
+        transfer.allow.set()
+        lease = await asyncio.wait_for(retained, timeout=1)
+        assert lease.source is WeightSource.WEIGHT_SERVER
+        await lease.close()
+        assert loader._inflight == {}
+
+    run(scenario())
+    assert transfer.calls == [central_url]
+
+
+def test_concurrent_same_key_failures_are_shared_without_duplicate_source_attempts() -> None:
+    key = WeightKey(4, 5)
+    central_url = expert_url(_WEIGHT_SERVER, key)
+    transfer = BlockingTransfer({central_url: WeightNotFound("missing")})
+    loader = make_loader(transfer, cache_entries=2)
+
+    async def scenario() -> None:
+        first = asyncio.create_task(loader.acquire(key))
+        second = asyncio.create_task(loader.acquire(key))
+        await asyncio.wait_for(transfer.started.wait(), timeout=1)
+        transfer.allow.set()
+        results = await asyncio.gather(first, second, return_exceptions=True)
+
+        assert all(isinstance(result, WeightLoadFailed) for result in results)
+        failures = [result for result in results if isinstance(result, WeightLoadFailed)]
+        assert failures[0].failures == failures[1].failures
+        assert loader._inflight == {}
+
+    run(scenario())
+    assert transfer.calls == [central_url]

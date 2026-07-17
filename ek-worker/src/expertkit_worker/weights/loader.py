@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable
 from dataclasses import dataclass
 from enum import StrEnum
@@ -139,6 +140,25 @@ class _PreparationFailure:
     diagnostic: str
 
 
+@dataclass(frozen=True, slots=True)
+class _LoadPolicy:
+    local_only: bool
+    peer_endpoints: tuple[str, ...]
+
+
+@dataclass(slots=True)
+class _LoadResult[CpuWeightT]:
+    source: WeightSource
+    seed_lease: DramCacheLease[CachedCpuWeight[CpuWeightT]]
+
+
+@dataclass(slots=True)
+class _InflightLoad[CpuWeightT]:
+    policy: _LoadPolicy
+    task: asyncio.Task[_LoadResult[CpuWeightT]]
+    waiters: int = 0
+
+
 class CpuWeightLoader[CpuWeightT, ReadyWeightT]:
     """Load and cache validated CPU weights without performing device placement."""
 
@@ -166,6 +186,8 @@ class CpuWeightLoader[CpuWeightT, ReadyWeightT]:
         self._source_result = source_result or (lambda _source, _success: None)
         self._max_file_bytes = max_safetensors_file_bytes(adapter.source_tensor_bytes())
         self._reservation_bytes = self._max_file_bytes + adapter.cpu_extra_bytes()
+        self._inflight_lock = asyncio.Lock()
+        self._inflight: dict[WeightKey, _InflightLoad[CpuWeightT]] = {}
 
     @property
     def max_file_bytes(self) -> int:
@@ -187,31 +209,109 @@ class CpuWeightLoader[CpuWeightT, ReadyWeightT]:
     ) -> CpuWeightLease[CpuWeightT]:
         """Try DRAM, disk, each peer, and the central server once in that order."""
 
+        return await self._acquire(
+            key,
+            _LoadPolicy(
+                local_only=False,
+                peer_endpoints=self._normalize_peer_endpoints(peer_endpoints),
+            ),
+        )
+
+    async def acquire_local(self, key: WeightKey) -> CpuWeightLease[CpuWeightT]:
+        """Load from DRAM or disk only for the non-recursive peer endpoint."""
+
+        return await self._acquire(key, _LoadPolicy(local_only=True, peer_endpoints=()))
+
+    async def _acquire(
+        self,
+        key: WeightKey,
+        policy: _LoadPolicy,
+    ) -> CpuWeightLease[CpuWeightT]:
         cached = await self._cache.acquire(key)
         if cached is not None:
             self._record_source_result(WeightSource.DRAM, success=True)
             return CpuWeightLease(cached, WeightSource.DRAM)
 
+        while True:
+            inflight = await self._join_inflight(key, policy)
+            retry_with_own_policy = False
+            try:
+                try:
+                    result = await asyncio.shield(inflight.task)
+                except WeightLoadFailed:
+                    if inflight.policy == policy:
+                        raise
+                    retry_with_own_policy = True
+                else:
+                    cache_lease = await self._cache.acquire(key)
+                    if cache_lease is None:
+                        raise RuntimeError("completed CPU weight load is missing from DRAM cache")
+                    return CpuWeightLease(cache_lease, result.source)
+            finally:
+                await self._leave_inflight(key, inflight)
+            if not retry_with_own_policy:
+                raise AssertionError("in-flight CPU load exited without a result")
+
+    async def _join_inflight(
+        self,
+        key: WeightKey,
+        policy: _LoadPolicy,
+    ) -> _InflightLoad[CpuWeightT]:
+        async with self._inflight_lock:
+            inflight = self._inflight.get(key)
+            if inflight is None:
+                task = asyncio.create_task(
+                    self._populate_cache(key, policy),
+                    name=f"cpu-weight-load-{key.layer_id}-{key.expert_id}",
+                )
+                inflight = _InflightLoad(policy, task)
+                self._inflight[key] = inflight
+            inflight.waiters += 1
+            return inflight
+
+    async def _leave_inflight(
+        self,
+        key: WeightKey,
+        inflight: _InflightLoad[CpuWeightT],
+    ) -> None:
+        clean_up = False
+        async with self._inflight_lock:
+            if inflight.waiters <= 0:
+                raise RuntimeError("CPU weight in-flight waiter accounting underflow")
+            inflight.waiters -= 1
+            if inflight.waiters == 0 and self._inflight.get(key) is inflight:
+                self._inflight.pop(key)
+                if not inflight.task.done():
+                    inflight.task.cancel()
+                clean_up = True
+        if not clean_up:
+            return
+        outcome = (await asyncio.gather(inflight.task, return_exceptions=True))[0]
+        if isinstance(outcome, _LoadResult):
+            await outcome.seed_lease.close()
+
+    async def _populate_cache(
+        self,
+        key: WeightKey,
+        policy: _LoadPolicy,
+    ) -> _LoadResult[CpuWeightT]:
         reservation = await self._cache.reserve(self._reservation_bytes)
         try:
             cached = await self._cache.acquire(key)
             if cached is not None:
                 self._record_source_result(WeightSource.DRAM, success=True)
-                return CpuWeightLease(cached, WeightSource.DRAM)
+                return _LoadResult(WeightSource.DRAM, cached)
 
             failures: list[WeightLoadFailure] = []
             prepared = await self._load_disk(key, failures)
             source = WeightSource.DISK
-            if prepared is None:
-                attempted_endpoints: set[str] = set()
-                for endpoint in peer_endpoints:
-                    normalized = endpoint.rstrip("/")
-                    if not normalized or normalized in attempted_endpoints:
-                        continue
-                    attempted_endpoints.add(normalized)
+            attempted_endpoints: set[str] = set()
+            if prepared is None and not policy.local_only:
+                for endpoint in policy.peer_endpoints:
+                    attempted_endpoints.add(endpoint)
                     prepared = await self._load_http(
                         key,
-                        endpoint=normalized,
+                        endpoint=endpoint,
                         source=WeightSource.PEER,
                         failures=failures,
                     )
@@ -231,42 +331,25 @@ class CpuWeightLoader[CpuWeightT, ReadyWeightT]:
 
             if prepared is None:
                 raise WeightLoadFailed(key, tuple(failures))
-            cache_lease = await reservation.commit(
+            seed_lease = await reservation.commit(
                 key,
                 prepared.entry,
                 actual_bytes=prepared.entry.byte_count,
             )
-            return CpuWeightLease(cache_lease, source)
+            return _LoadResult(source, seed_lease)
         finally:
             await reservation.cancel()
 
-    async def acquire_local(self, key: WeightKey) -> CpuWeightLease[CpuWeightT]:
-        """Load from DRAM or disk only for the non-recursive peer endpoint."""
-
-        cached = await self._cache.acquire(key)
-        if cached is not None:
-            self._record_source_result(WeightSource.DRAM, success=True)
-            return CpuWeightLease(cached, WeightSource.DRAM)
-
-        reservation = await self._cache.reserve(self._reservation_bytes)
-        try:
-            cached = await self._cache.acquire(key)
-            if cached is not None:
-                self._record_source_result(WeightSource.DRAM, success=True)
-                return CpuWeightLease(cached, WeightSource.DRAM)
-
-            failures: list[WeightLoadFailure] = []
-            prepared = await self._load_disk(key, failures)
-            if prepared is None:
-                raise WeightLoadFailed(key, tuple(failures))
-            cache_lease = await reservation.commit(
-                key,
-                prepared.entry,
-                actual_bytes=prepared.entry.byte_count,
-            )
-            return CpuWeightLease(cache_lease, WeightSource.DISK)
-        finally:
-            await reservation.cancel()
+    @staticmethod
+    def _normalize_peer_endpoints(peer_endpoints: tuple[str, ...]) -> tuple[str, ...]:
+        normalized: list[str] = []
+        seen: set[str] = set()
+        for endpoint in peer_endpoints:
+            candidate = endpoint.rstrip("/")
+            if candidate and candidate not in seen:
+                normalized.append(candidate)
+                seen.add(candidate)
+        return tuple(normalized)
 
     async def _load_disk(
         self,

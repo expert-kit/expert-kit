@@ -244,3 +244,43 @@ def test_peer_server_returns_busy_when_request_limit_is_full() -> None:
             await server.close()
 
     run(scenario())
+
+
+def test_peer_server_coalesces_concurrent_requests_for_the_same_disk_weight() -> None:
+    async def scenario() -> None:
+        key = WeightKey(1, 2)
+        payload = make_payload()
+        disk = FakeDiskCache({key: payload})
+        disk.allow.clear()
+        server: PeerWeightServer[object, object] = PeerWeightServer(
+            model_name=_MODEL_NAME,
+            num_layers=4,
+            experts_per_layer=8,
+            host="127.0.0.1",
+            port=0,
+            max_concurrent_requests=2,
+            loader=make_loader(disk, UnexpectedTransfer()),
+        )
+        client = HttpWeightTransfer(max_connections=2)
+        await server.start()
+        await client.start()
+        try:
+            url = peer_url(server, "Qwen%2FTest%20Model/1/2")
+            first = asyncio.create_task(client.download(url, max_bytes=len(payload)))
+            await asyncio.wait_for(disk.started.wait(), timeout=1)
+            second = asyncio.create_task(client.download(url, max_bytes=len(payload)))
+            async with asyncio.timeout(1):
+                while server._active_requests < 2:
+                    await asyncio.sleep(0)
+            disk.allow.set()
+
+            received = await asyncio.gather(first, second)
+            for buffer in received:
+                buffer.close()
+            assert disk.reads == [key]
+        finally:
+            disk.allow.set()
+            await client.close()
+            await server.close()
+
+    run(scenario())
