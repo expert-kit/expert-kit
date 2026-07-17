@@ -10,20 +10,17 @@ static PROGRESSIVE_LOADING: LazyLock<Mutex<HashSet<String>>> =
 
 /// Serializes the coverage-check + assignment phase of progressive_assign.
 /// Without this, two workers starting simultaneously both see "128/128 uncovered"
-/// and assign the same top-frequency experts, leaving a coverage gap.
+/// and assign the same expert subset, leaving a coverage gap.
 static ASSIGN_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
 /// Returns true if the given hostname is currently mid-progressive-load.
 pub async fn is_progressive_loading(hostname: &str) -> bool {
     PROGRESSIVE_LOADING.lock().await.contains(hostname)
 }
-use ek_db::{
-    safetensor::{ExpertKey, transformer::VitalMeta},
-    weight_srv::client::WeightSrvClient,
-};
+use ek_db::{safetensor::ExpertKey, weight_srv::client::WeightSrvClient};
 
 use crate::{
-    controller::{dispatcher::DISPATCHER, elastic::frequency::get_freq_tracker},
+    controller::dispatcher::DISPATCHER,
     state::{
         io::{StateReader, StateReaderImpl},
         models::NewExpert,
@@ -31,8 +28,7 @@ use crate::{
     },
 };
 
-/// Automatically assign experts to a newly registered worker, progressively
-/// in frequency-sorted stripes.
+/// Automatically assign experts to a newly registered worker in bounded stripes.
 ///
 /// Called as a background task when a worker sends its first heartbeat.
 /// Exits immediately if `scaling.auto_assign` is false (default).
@@ -166,7 +162,7 @@ pub async fn progressive_assign(new_hostname: &str) {
     // Hold ASSIGN_LOCK while reading coverage and writing ALL expert
     // assignments to the DB.  Without this, two workers starting
     // simultaneously both read "128/128 uncovered", assign the same
-    // top-frequency experts, and leave a coverage gap.  The lock ensures
+    // expert subset, and leave a coverage gap. The lock ensures
     // the second worker sees the first worker's DB rows and fills gaps.
     //
     // The lock is released BEFORE progressive dispatching (stripe-by-stripe
@@ -181,12 +177,11 @@ pub async fn progressive_assign(new_hostname: &str) {
         // --- Build coverage-aware expert index list ---
         //
         // First priority: assign experts with ZERO replicas (coverage gaps).
-        // Second priority: fill remaining capacity with frequency-sorted experts
-        // (redundancy for hot experts).
+        // Second priority: fill remaining capacity in stable expert-index order.
         //
         // This ensures two partial-capacity nodes together cover the full model
         // before duplicating anything.
-        let freq_indices = frequency_sorted_indices(&model_name, vital.routed_experts, &vital);
+        let expert_indices: Vec<usize> = (0..vital.routed_experts).collect();
 
         // Count active replicas per expert index (aggregated across all layers).
         // An expert index with zero replicas on any layer is "uncovered".
@@ -210,16 +205,12 @@ pub async fn progressive_assign(new_hostname: &str) {
             }
         }
 
-        // Sort: zero-replica first, then by frequency (descending) within each group
-        let mut prioritized: Vec<usize> = freq_indices;
+        // Sort zero-replica experts first, then preserve stable expert-index order.
+        let mut prioritized: Vec<usize> = expert_indices;
         prioritized.sort_by(|&a, &b| {
             replica_counts[a]
                 .cmp(&replica_counts[b])
-                .then_with(|| {
-                    // Lower index in freq_indices = higher frequency = should come first
-                    // But we already have freq order, so just keep stable
-                    std::cmp::Ordering::Equal
-                })
+                .then_with(|| a.cmp(&b))
         });
 
         let zero_replica_count = replica_counts.iter().filter(|&&c| c == 0).count();
@@ -242,7 +233,7 @@ pub async fn progressive_assign(new_hostname: &str) {
 
         // Insert ALL expert assignments as "scheduled" under the lock.
         // "scheduled" experts are visible for coverage queries but NOT
-        // dispatched to workers or included in the routing table.
+        // dispatched to workers or published in Frontend topology.
         let scheduled_state = serde_json::json!({"status": "scheduled"});
         for &expert_idx in &sorted_indices[..target_per_layer] {
             for layer in vital.moe_layers.0..vital.moe_layers.1 {
@@ -279,11 +270,10 @@ pub async fn progressive_assign(new_hostname: &str) {
     // All expert DB rows exist as "scheduled".  Each stripe promotes a
     // batch from "scheduled" → "pending", then triggers the worker.
     // The worker loads pending experts and reports them as "loaded" via
-    // heartbeat.  This lets the worker start serving the hottest experts
-    // first, without waiting for the full set.
+    // heartbeat. This lets the worker start serving the first ready stripe
+    // without waiting for the full assigned set.
 
-    // Register this node as actively loading — prevents ElasticManager from
-    // selecting it as a replication target until the stripe loop completes.
+    // Exclude this node from concurrent recovery placement until loading ends.
     PROGRESSIVE_LOADING
         .lock()
         .await
@@ -315,9 +305,7 @@ pub async fn progressive_assign(new_hostname: &str) {
             Ok(experts) => {
                 let dispatchable: Vec<_> = experts
                     .into_iter()
-                    .filter(|e| {
-                        e.state.get("status").and_then(|s| s.as_str()) != Some("scheduled")
-                    })
+                    .filter(|e| e.state.get("status").and_then(|s| s.as_str()) != Some("scheduled"))
                     .collect();
                 DISPATCHER
                     .lock()
@@ -353,40 +341,6 @@ pub async fn progressive_assign(new_hostname: &str) {
     );
 }
 
-/// Returns expert indices 0..routed_experts sorted by descending aggregate
-/// frequency across all MoE layers.  Falls back to sequential order when
-/// the frequency tracker has no committed ticks yet (cold start).
-fn frequency_sorted_indices(
-    model_name: &str,
-    routed_experts: usize,
-    vital: &VitalMeta,
-) -> Vec<usize> {
-    let freq = get_freq_tracker();
-    if !freq.has_data() {
-        return (0..routed_experts).collect();
-    }
-
-    let n_layers = vital.moe_layers.1.saturating_sub(vital.moe_layers.0);
-    if n_layers == 0 {
-        return (0..routed_experts).collect();
-    }
-
-    let mut scores: Vec<(usize, u64)> = (0..routed_experts)
-        .map(|idx| {
-            let total: u64 = (vital.moe_layers.0..vital.moe_layers.1)
-                .map(|layer| {
-                    let key = format!("{}/l{}-e{}", model_name, layer, idx);
-                    freq.rate_in_window(&key)
-                })
-                .sum();
-            (idx, total / n_layers as u64)
-        })
-        .collect();
-
-    scores.sort_by(|a, b| b.1.cmp(&a.1));
-    scores.into_iter().map(|(idx, _)| idx).collect()
-}
-
 fn target_per_layer(max_experts: usize, layer_count: usize, routed_experts: usize) -> usize {
     if layer_count == 0 {
         return 0;
@@ -397,22 +351,6 @@ fn target_per_layer(max_experts: usize, layer_count: usize, routed_experts: usiz
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn make_vital(layers: (usize, usize), routed: usize) -> VitalMeta {
-        VitalMeta {
-            moe_layers: layers,
-            routed_experts: routed,
-            hidden_dim: 1024,
-            inter_dim: 512,
-        }
-    }
-
-    #[test]
-    fn cold_start_sequential() {
-        let vital = make_vital((0, 4), 8);
-        let result = frequency_sorted_indices("test_model", 8, &vital);
-        assert_eq!(result, vec![0, 1, 2, 3, 4, 5, 6, 7]);
-    }
 
     #[test]
     fn reported_capacity_is_shared_across_layers() {

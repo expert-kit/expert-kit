@@ -1,15 +1,11 @@
 use std::{env, mem::transmute, path::PathBuf, process::Command as ProcessCommand};
-mod bench;
 mod db;
 mod doctor;
 mod model;
 mod pretrain;
 mod schedule;
-mod wm_server;
 
-mod onnx;
 mod weight_index;
-use bench::execute_bench;
 use db::execute_db;
 use doctor::doctor_main;
 use ek_base::config::get_ek_settings_base;
@@ -24,10 +20,8 @@ use weight_index::{WeightIndexCommand, execute_weight_index};
 use tokio::runtime::Runtime;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
-use ek_db::weight_srv;
-use wm_server::wm_server_main;
-
 use clap::{Parser, Subcommand};
+use ek_db::weight_srv;
 use model::execute_model;
 use opentelemetry_sdk::{
     Resource,
@@ -92,25 +86,10 @@ enum Command {
         command: schedule::ScheduleCommand,
     },
 
-    #[command(about = "onnx operations")]
-    Onnx {
-        #[command(subcommand)]
-        command: onnx::OnnxCommand,
-    },
-
     #[command(about = "expert weight index operations")]
     Weight {
         #[command(subcommand)]
         command: WeightIndexCommand,
-    },
-
-    #[command(about = "run standalone peer weight HTTP server")]
-    WmServer {},
-
-    #[command(about = "benchmark expert weight loading")]
-    Bench {
-        #[command(subcommand)]
-        command: bench::BenchCommand,
     },
 }
 
@@ -300,7 +279,6 @@ fn main() {
         // Must place tracing subscriber init in tokio runtime block
         init_tracing_subscriber(command_name);
         match cli.command {
-            Command::Onnx { command } => onnx::execute_onnx(command).await,
             Command::Pretrain { command } => execute_pretrain(command).await,
             Command::Worker {} => unreachable!("Worker command is replaced before Tokio startup"),
             Command::Controller {} => controller_main().await,
@@ -326,8 +304,6 @@ fn main() {
             Command::DB { command } => execute_db(command).await,
             Command::Model { command } => execute_model(command).await,
             Command::Schedule { command } => execute_schedule(command).await,
-            Command::WmServer {} => wm_server_main().await,
-            Command::Bench { command } => execute_bench(command).await,
         }
     });
 

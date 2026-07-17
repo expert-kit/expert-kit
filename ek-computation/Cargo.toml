@@ -10,53 +10,20 @@ repository = { workspace = true }
 [dependencies]
 ek-base = { workspace = true }
 ek-db = { workspace = true }
-ek-ggml = { workspace = true }
-actix-web = { workspace = true }
 async-trait = { workspace = true }
-clap = { workspace = true }
-dashmap = { workspace = true }
 diesel = { workspace = true }
 diesel-async = { workspace = true }
-env_logger = { workspace = true }
-half = { workspace = true }
-ibverbs = { workspace = true }
-lazy_static = { workspace = true }
 log = { workspace = true }
-memoffset = { workspace = true }
-mime = { workspace = true }
-ndarray = { workspace = true }
-ndarray-rand = { workspace = true }
-nix = { workspace = true }
-ort = { workspace = true }
-ort-sys = { workspace = true }
-prometheus = { workspace = true }
 prost = { workspace = true }
 rand = { workspace = true }
-rand_distr = { workspace = true }
-safetensors = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-serde_arrays = { workspace = true }
-tch = { workspace = true }
 tokio = { workspace = true }
 tokio-stream = { workspace = true }
-tokio-util = { workspace = true }
 tonic = { workspace = true }
-tower = { workspace = true }
 tracing = { workspace = true }
-tracing-opentelemetry = { workspace = true }
 url = { workspace = true }
 
 [build-dependencies]
 protoc-bin-vendored = { workspace = true }
 tonic-build = { workspace = true }
-
-[dev-dependencies]
-criterion = { workspace = true }
-
-[lib]
-crate-type = ["cdylib", "staticlib", "rlib"]
-
-[[bench]]
-name = "main"
-harness = false

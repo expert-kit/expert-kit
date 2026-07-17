@@ -10,10 +10,7 @@ use tokio::sync::{
 };
 use tonic::async_trait;
 
-use crate::{
-    controller::elastic::frequency::get_freq_tracker,
-    state::models::{Expert, NodeWithExperts},
-};
+use crate::state::models::{Expert, NodeWithExperts};
 
 #[async_trait]
 /// Dispatcher trait for propagate the latest mapping between nodes and their experts
@@ -65,53 +62,15 @@ impl DispatcherImpl {
 #[async_trait]
 impl Dispatcher for DispatcherImpl {
     async fn update(&mut self, state: Vec<NodeWithExperts>) {
-        // Build replica count map: expert_id → number of nodes currently hosting it.
-        // Used as a popularity proxy: more replicas → more activation frequency.
-        let mut replica_count: HashMap<&str, usize> = HashMap::new();
-        for nwe in &state {
-            for expert in &nwe.experts {
-                *replica_count.entry(expert.expert_id.as_str()).or_default() += 1;
-            }
-        }
-
         for data in &state {
             let node = &data.node;
-            // Sort experts for frequency-ordered progressive start.
-            // If the frequency tracker has history, use actual request rates.
-            // Otherwise fall back to replica-count as a popularity proxy.
-            //
-            // Filter out "scheduled" experts — they have DB rows for coverage
-            // tracking but have not been promoted to "pending" yet and must
-            // not be sent to the worker.
             let mut experts: Vec<Expert> = data
                 .experts
                 .iter()
-                .filter(|e| {
-                    e.state.get("status").and_then(|s| s.as_str()) != Some("scheduled")
-                })
+                .filter(|e| e.state.get("status").and_then(|s| s.as_str()) != Some("scheduled"))
                 .cloned()
                 .collect();
-            let freq = get_freq_tracker();
-            if freq.has_data() {
-                experts.sort_by(|a, b| {
-                    let ra = freq.rate_in_window(&a.expert_id);
-                    let rb = freq.rate_in_window(&b.expert_id);
-                    if ra == 0 && rb == 0 {
-                        // Both cold: use replica count as tiebreaker
-                        let ca = replica_count.get(a.expert_id.as_str()).copied().unwrap_or(0);
-                        let cb = replica_count.get(b.expert_id.as_str()).copied().unwrap_or(0);
-                        cb.cmp(&ca)
-                    } else {
-                        rb.cmp(&ra)
-                    }
-                });
-            } else {
-                experts.sort_by(|a, b| {
-                    let ca = replica_count.get(a.expert_id.as_str()).copied().unwrap_or(0);
-                    let cb = replica_count.get(b.expert_id.as_str()).copied().unwrap_or(0);
-                    cb.cmp(&ca)
-                });
-            }
+            experts.sort_by(|a, b| a.expert_id.cmp(&b.expert_id));
 
             let fp = fingerprint(&experts);
             if self.last_fingerprint.get(&node.hostname) == Some(&fp) {

@@ -167,11 +167,10 @@ impl StateWriterImpl {
 
     pub async fn delete_experts_by_node(&self, node_id: i32) -> EKResult<usize> {
         let mut conn = POOL.get().await?;
-        let count = diesel::delete(
-            schema::expert::table.filter(schema::expert::node_id.eq(node_id)),
-        )
-        .execute(&mut conn)
-        .await?;
+        let count =
+            diesel::delete(schema::expert::table.filter(schema::expert::node_id.eq(node_id)))
+                .execute(&mut conn)
+                .await?;
         Ok(count)
     }
 
@@ -198,11 +197,10 @@ impl StateWriterImpl {
         if node_ids.is_empty() {
             return Ok(0);
         }
-        let count = diesel::delete(
-            schema::expert::table.filter(schema::expert::node_id.eq_any(&node_ids)),
-        )
-        .execute(&mut conn)
-        .await?;
+        let count =
+            diesel::delete(schema::expert::table.filter(schema::expert::node_id.eq_any(&node_ids)))
+                .execute(&mut conn)
+                .await?;
         log::info!("Cleaned {count} stale expert rows for node {hostname}");
         Ok(count)
     }
@@ -424,7 +422,10 @@ impl StateWriterImpl {
         let node = match reader.node_by_hostname(hostname).await? {
             Some(n) => n,
             None => {
-                log::warn!("Cannot update expert load states: node {} not found", hostname);
+                log::warn!(
+                    "Cannot update expert load states: node {} not found",
+                    hostname
+                );
                 return Ok(0);
             }
         };

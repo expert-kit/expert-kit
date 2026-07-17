@@ -1,7 +1,7 @@
 use crate::{proto::ek::object::v1::ExpertSlice, schema, state::pool::POOL};
 
 use super::models::{self, NewExpert, NewInstance, NewModel, NewNode};
-use diesel::{BoolExpressionMethods, ExpressionMethods, OptionalExtension, QueryDsl, SelectableHelper};
+use diesel::{ExpressionMethods, OptionalExtension, QueryDsl, SelectableHelper};
 use diesel_async::RunQueryDsl;
 use ek_base::error::EKResult;
 use models::{Expert, Instance, Model, Node};
@@ -105,29 +105,6 @@ impl StateReaderImpl {
         let res = schema::node::table
             .inner_join(schema::expert::table)
             .filter(schema::expert::dsl::expert_id.eq(expert_id))
-            .select(Node::as_select())
-            .distinct()
-            .load(&mut conn)
-            .await?;
-        Ok(res)
-    }
-
-    /// Like `node_by_expert` but only returns nodes where the expert
-    /// is in "loaded" state (or null for backwards compat).  Used by
-    /// the controller registry to avoid routing to nodes that haven't
-    /// finished loading the expert yet.
-    pub async fn node_by_expert_loaded(&self, expert_id: &str) -> EKResult<Vec<Node>> {
-        let mut conn = POOL.get().await?;
-        let loaded_state = serde_json::json!({"status": "loaded"});
-
-        let res = schema::node::table
-            .inner_join(schema::expert::table)
-            .filter(schema::expert::dsl::expert_id.eq(expert_id))
-            .filter(
-                schema::expert::dsl::state
-                    .eq(&loaded_state)
-                    .or(schema::expert::dsl::state.eq(serde_json::Value::Null)),
-            )
             .select(Node::as_select())
             .distinct()
             .load(&mut conn)

@@ -2,9 +2,6 @@
 mod inner {
     pub mod ek {
         pub mod worker {
-            pub mod v1 {
-                tonic::include_proto!("ek.worker.v1");
-            }
             pub mod v2 {
                 tonic::include_proto!("ek.worker.v2");
             }
@@ -24,10 +21,6 @@ mod inner {
             }
         }
     }
-
-    pub mod pbonnx {
-        tonic::include_proto!("onnx");
-    }
 }
 
-pub use inner::{ek, pbonnx};
+pub use inner::ek;

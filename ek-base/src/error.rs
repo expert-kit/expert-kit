@@ -14,20 +14,8 @@ pub enum EKError {
     #[error("error related to safe tensor conversion `{0}`")]
     SafeTensorError(#[from] safetensors::SafeTensorError),
 
-    #[error("error related to tch-rs")]
-    TchError(#[from] Box<tch::TchError>),
-
     #[error("tonic errors")]
     TonicError(Box<tonic::Status>),
-
-    #[error("tensor name not found")]
-    SafeTensorNotFound,
-
-    #[error("expert not found in the computation node")]
-    ExpertNotFound(string::String),
-
-    #[error("expert weight not found in tensor bundle")]
-    ExpertWeightNotFound(string::String),
 
     #[error("NotFound `{0}`")]
     NotFound(string::String),
@@ -40,9 +28,6 @@ pub enum EKError {
 
     #[error("deadpool error")]
     DeadPoolError(#[from] PoolError),
-
-    #[error("db error")]
-    DBError(),
 
     #[error("join error")]
     TokioJoinError(#[from] JoinError),
@@ -65,20 +50,11 @@ pub enum EKError {
     #[error("reqwest error {0}")]
     ReqwestError(#[from] Box<reqwest::Error>),
 
-    #[error("onnx error {0}")]
-    OnnxError(#[from] Box<ort::Error>),
-
-    #[error("OpenDAL error {0}")]
+    #[error("runtime error: {0}")]
     RuntimeError(string::String),
 }
 
 pub type EKResult<T> = std::result::Result<T, EKError>;
-
-impl From<tch::TchError> for EKError {
-    fn from(err: tch::TchError) -> Self {
-        EKError::TchError(Box::new(err))
-    }
-}
 
 impl From<tonic::Status> for EKError {
     fn from(err: tonic::Status) -> Self {
@@ -101,12 +77,6 @@ impl From<tonic::transport::Error> for EKError {
 impl From<reqwest::Error> for EKError {
     fn from(err: reqwest::Error) -> Self {
         EKError::ReqwestError(Box::new(err))
-    }
-}
-
-impl From<ort::Error> for EKError {
-    fn from(err: ort::Error) -> Self {
-        EKError::OnnxError(Box::new(err))
     }
 }
 

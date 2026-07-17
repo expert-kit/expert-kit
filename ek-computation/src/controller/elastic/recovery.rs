@@ -4,11 +4,7 @@ use std::{
 };
 
 use crate::{
-    controller::{
-        dispatcher::DISPATCHER,
-        elastic::frequency::get_freq_tracker,
-        scheduler::remaining_expert_capacity,
-    },
+    controller::{dispatcher::DISPATCHER, scheduler::remaining_expert_capacity},
     state::{
         io::{StateReader, StateReaderImpl},
         models::{Expert, NewExpert, Node},
@@ -247,8 +243,7 @@ pub async fn recover_unique_experts(dead_hostname: &str) {
     //
     // Include both direct-assignment targets and eviction targets so workers
     // that received evict-then-place changes also get notified.
-    let mut trigger_hostnames: HashSet<&str> =
-        assignments.keys().map(|s| s.as_str()).collect();
+    let mut trigger_hostnames: HashSet<&str> = assignments.keys().map(|s| s.as_str()).collect();
     trigger_hostnames.extend(eviction_targets.iter().map(|s| s.as_str()));
 
     for hostname in &trigger_hostnames {
@@ -260,9 +255,7 @@ pub async fn recover_unique_experts(dead_hostname: &str) {
             Ok(experts) => {
                 let dispatchable: Vec<_> = experts
                     .into_iter()
-                    .filter(|e| {
-                        e.state.get("status").and_then(|s| s.as_str()) != Some("scheduled")
-                    })
+                    .filter(|e| e.state.get("status").and_then(|s| s.as_str()) != Some("scheduled"))
                     .collect();
                 DISPATCHER
                     .lock()
@@ -293,8 +286,8 @@ pub async fn recover_unique_experts(dead_hostname: &str) {
 
 /// Evict replicated (non-unique) experts from full target nodes to make room
 /// for unplaced unique experts.  An expert is safe to evict if it has at least
-/// one other active replica.  Among candidates, the least-frequently-accessed
-/// expert is evicted first.
+/// one other active replica. Among candidates, an expert with the most active
+/// replicas is evicted first, with the expert identifier as a stable tie-breaker.
 ///
 /// Returns `(still_unplaced, affected_hostnames)`.
 async fn evict_and_place(
@@ -341,9 +334,6 @@ async fn evict_and_place(
 
     // ── Phase 2: Match unplaced experts to eviction candidates ────────────
 
-    let freq = get_freq_tracker();
-    let has_freq = freq.has_data();
-
     let mut evictions: Vec<(i32, String)> = Vec::new(); // (node_id, victim_expert_id)
     let mut placements: Vec<NewExpert> = Vec::new();
     let mut still_unplaced: Vec<String> = Vec::new();
@@ -377,18 +367,13 @@ async fn evict_and_place(
                 })
                 .collect();
 
-            // Sort: evict least valuable first
-            if has_freq {
-                // Lowest frequency first
-                candidates.sort_by_key(|e| freq.rate_in_window(&e.expert_id));
-            } else {
-                // Most replicas first (safest to lose one copy)
-                candidates.sort_by(|a, b| {
-                    let ra = replica_counts.get(&a.expert_id).copied().unwrap_or(0);
-                    let rb = replica_counts.get(&b.expert_id).copied().unwrap_or(0);
-                    rb.cmp(&ra)
-                });
-            }
+            candidates.sort_by(|a, b| {
+                let a_replicas = replica_counts.get(&a.expert_id).copied().unwrap_or(0);
+                let b_replicas = replica_counts.get(&b.expert_id).copied().unwrap_or(0);
+                b_replicas
+                    .cmp(&a_replicas)
+                    .then_with(|| a.expert_id.cmp(&b.expert_id))
+            });
 
             if let Some(victim) = candidates.first() {
                 log::info!(

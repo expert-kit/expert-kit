@@ -18,16 +18,11 @@ diesel-async = { workspace = true }
 diesel_migrations = { workspace = true }
 env_logger = { workspace = true }
 indicatif = { workspace = true }
-libc = { workspace = true }
 log = { workspace = true }
-num_cpus = { workspace = true }
 opentelemetry = { workspace = true }
 opentelemetry_sdk = { workspace = true }
 opentelemetry-otlp = { workspace = true }
 opentelemetry-semantic-conventions = { workspace = true }
-ort = { workspace = true }
-ort-sys = { workspace = true }
-prost = { workspace = true }
 rand = { workspace = true }
 safetensors = { workspace = true }
 serde = { workspace = true }

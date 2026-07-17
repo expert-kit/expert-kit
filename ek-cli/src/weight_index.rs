@@ -113,8 +113,8 @@ async fn build_index(
     fs::create_dir_all(&model_cache_dir).await?;
 
     // --- Load existing index or start fresh (for idempotent re-runs) ---
-    let mut index = ExpertIndex::load(&model_root)?
-        .unwrap_or_else(|| ExpertIndex::new(model_name.clone()));
+    let mut index =
+        ExpertIndex::load(&model_root)?.unwrap_or_else(|| ExpertIndex::new(model_name.clone()));
 
     // --- Progress bar ---
     let pb = ProgressBar::new(total as u64);
@@ -144,12 +144,10 @@ async fn build_index(
 
             // Discover tensor names from the blob.
             let st = safetensors::SafeTensors::deserialize(&bytes)?;
-            let tensor_names: Vec<String> =
-                st.names().iter().map(|n| n.to_string()).collect();
+            let tensor_names: Vec<String> = st.names().iter().map(|n| n.to_string()).collect();
 
             // Discover source shard files from weight_map.
-            let shard_files =
-                derive_shard_files(&desc, &tensor_names);
+            let shard_files = derive_shard_files(&desc, &tensor_names);
 
             // Write blob to cache.
             fs::write(&blob_path, &bytes).await?;
@@ -180,12 +178,7 @@ async fn build_index(
     Ok(())
 }
 
-async fn bench(
-    model_root: PathBuf,
-    cache_dir: PathBuf,
-    samples: usize,
-    seed: u64,
-) -> EKResult<()> {
+async fn bench(model_root: PathBuf, cache_dir: PathBuf, samples: usize, seed: u64) -> EKResult<()> {
     let desc = TransformerModelDesc {
         root: model_root.clone(),
         ..Default::default()
@@ -200,10 +193,12 @@ async fn bench(
         .to_owned();
     let model_cache_dir = cache_dir.join(&model_name);
 
-    let index = ExpertIndex::load(&model_cache_dir)?
-        .ok_or_else(|| ek_base::error::EKError::NotFound(
-            format!("no ek-expert-index.json in {}; run `weight build` first", model_cache_dir.display())
-        ))?;
+    let index = ExpertIndex::load(&model_cache_dir)?.ok_or_else(|| {
+        ek_base::error::EKError::NotFound(format!(
+            "no ek-expert-index.json in {}; run `weight build` first",
+            model_cache_dir.display()
+        ))
+    })?;
 
     // Select `samples` experts using a simple LCG so selection is deterministic.
     let (moe_start, moe_end) = vital.moe_layers;
@@ -215,7 +210,9 @@ async fn bench(
     let mut experts: Vec<(usize, usize)> = Vec::with_capacity(sample_count);
     let mut seen = std::collections::HashSet::new();
     while experts.len() < sample_count {
-        lcg = lcg.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        lcg = lcg
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         let idx = (lcg >> 33) as usize % total;
         if seen.insert(idx) {
             let layer = moe_start + idx / num_experts;
@@ -224,8 +221,14 @@ async fn bench(
         }
     }
 
-    println!("Benchmarking {} experts — model={} samples={}", total, model_name, sample_count);
-    println!("{:<12} {:>10} {:>10} {:>10} {:>12}", "path", "mean(ms)", "p50(ms)", "p99(ms)", "total(ms)");
+    println!(
+        "Benchmarking {} experts — model={} samples={}",
+        total, model_name, sample_count
+    );
+    println!(
+        "{:<12} {:>10} {:>10} {:>10} {:>12}",
+        "path", "mean(ms)", "p50(ms)", "p99(ms)", "total(ms)"
+    );
     println!("{}", "-".repeat(58));
 
     // --- Fast path: read pre-extracted blob from cache dir ---

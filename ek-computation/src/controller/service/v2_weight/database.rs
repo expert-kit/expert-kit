@@ -8,7 +8,7 @@ use tokio::sync::mpsc;
 use tonic::Status;
 
 use crate::{
-    controller::{dispatcher::DISPATCHER, poller::request_immediate_poll, v2_state::ExpertKey},
+    controller::{dispatcher::DISPATCHER, v2_state::ExpertKey},
     proto::ek::control::v2::{RegisterWorkerRequest, TargetExpert},
     state::{
         io::{StateReader, StateReaderImpl},
@@ -100,7 +100,6 @@ impl WeightControlHooks for DatabaseWeightControlHooks {
             .update_expert_load_states(worker_id, &loaded)
             .await
             .map_err(internal_status)?;
-        request_immediate_poll();
         Ok(())
     }
 }

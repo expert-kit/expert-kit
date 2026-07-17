@@ -11,7 +11,6 @@ repository = { workspace = true }
 ek-base = { workspace = true }
 actix-web = { workspace = true }
 bytes = { workspace = true }
-dashmap = { workspace = true }
 log = { workspace = true }
 memmap2 = { workspace = true }
 opendal = { workspace = true }

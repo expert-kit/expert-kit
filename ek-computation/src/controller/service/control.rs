@@ -7,7 +7,6 @@ use rand::random;
 use tokio::task::JoinSet;
 
 use crate::{
-    controller::registry::get_registry,
     proto::ek::control::v1::{self},
     state::{
         io::StateReaderImpl,
@@ -36,8 +35,6 @@ impl v1::plan_service_server::PlanService for PlanServiceImpl {
         _request: tonic::Request<v1::RebalanceReq>,
     ) -> Result<tonic::Response<v1::RebalanceResp>, tonic::Status> {
         execute_rebalance().await?;
-        let registry = get_registry();
-        registry.lock().await.reset().await?;
         let resp = v1::RebalanceResp {};
         Ok(tonic::Response::new(resp))
     }
@@ -48,8 +45,6 @@ impl v1::plan_service_server::PlanService for PlanServiceImpl {
     ) -> Result<tonic::Response<v1::DuplicateResp>, tonic::Status> {
         let req = request.into_inner();
         execute_duplicate_schedule(req.hostnames).await?;
-        let registry = get_registry();
-        registry.lock().await.reset().await?;
         let resp = v1::DuplicateResp {};
         Ok(tonic::Response::new(resp))
     }
@@ -60,8 +55,6 @@ impl v1::plan_service_server::PlanService for PlanServiceImpl {
     ) -> Result<tonic::Response<v1::ManualResp>, tonic::Status> {
         let req = request.into_inner();
         execute_manual_schedule(req.hostnames, req.layers).await?;
-        let registry = get_registry();
-        registry.lock().await.reset().await?;
         let resp = v1::ManualResp {};
         Ok(tonic::Response::new(resp))
     }

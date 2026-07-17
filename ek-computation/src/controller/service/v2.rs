@@ -12,8 +12,6 @@ use crate::{
     controller::{
         elastic::{progressive, recovery::recover_unique_experts},
         poller::request_immediate_poll,
-        registry::get_registry,
-        routing_broadcaster::get_broadcaster,
         v2_state::{ControllerStateError, ControllerV2State, HeartbeatResult, RegistrationResult},
     },
     proto::ek::control::v2::{
@@ -121,10 +119,6 @@ impl WorkerLifecycleHooks for DatabaseLifecycleHooks {
             .node_update_seen(&registration.worker_id)
             .await
             .map_err(internal_status)?;
-        get_registry()
-            .lock()
-            .await
-            .reregister(&registration.worker_id);
 
         if new_start || result.replaced_start_id.is_some() {
             let worker_id = registration.worker_id.clone();
@@ -169,8 +163,6 @@ impl WorkerLifecycleHooks for DatabaseLifecycleHooks {
             .deactivate_node(worker_id)
             .await
             .map_err(internal_status)?;
-        get_registry().lock().await.deregister(worker_id).await;
-        get_broadcaster().remove_node(worker_id).await;
         request_immediate_poll();
 
         let worker_id_owned = worker_id.to_owned();
