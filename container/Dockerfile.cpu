@@ -74,7 +74,7 @@ EOF
 
 ENTRYPOINT [""]
 
-FROM ubuntu:24.04 AS ek-worker-runtime
+FROM ubuntu:24.04 AS ek-worker-cuda-runtime
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
@@ -91,5 +91,6 @@ COPY ek-worker/ /opt/expert-kit/ek-worker/
 RUN uv sync --project /opt/expert-kit/ek-worker --locked --no-dev
 
 ENV PATH="/opt/expert-kit/ek-worker/.venv/bin:${PATH}"
+ENV NVIDIA_DRIVER_CAPABILITIES=compute,utility
 WORKDIR /opt/expert-kit
 ENTRYPOINT [""]

@@ -67,7 +67,7 @@ services:
     networks:
       - expert-kit-network
   ek-worker:
-    image: ek-worker-runtime:latest
+    image: ek-worker-cuda-runtime:latest
     container_name: ek-worker
     restart: unless-stopped
     depends_on:
@@ -78,6 +78,15 @@ services:
     volumes:
       - ./worker.yaml:/etc/expert-kit/worker.yaml:ro
       - ../../data/worker-cache:/ek/worker_cache
+    environment:
+      CUDA_VISIBLE_DEVICES: "0"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["${EK_WORKER_GPU:-0}"]
+              capabilities: [gpu]
     networks:
       - expert-kit-network
 

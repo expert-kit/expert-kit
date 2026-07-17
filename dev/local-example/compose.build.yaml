@@ -79,7 +79,7 @@ services:
     build:
       context: ../../
       dockerfile: ./container/Dockerfile.cpu
-      target: ek-worker-runtime
+      target: ek-worker-cuda-runtime
     container_name: ek-worker
     restart: unless-stopped
     depends_on:
@@ -90,6 +90,15 @@ services:
     volumes:
       - ./worker.yaml:/etc/expert-kit/worker.yaml:ro
       - ../../data/worker-cache:/ek/worker_cache
+    environment:
+      CUDA_VISIBLE_DEVICES: "0"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["${EK_WORKER_GPU:-0}"]
+              capabilities: [gpu]
     networks:
       - expert-kit-network
 
