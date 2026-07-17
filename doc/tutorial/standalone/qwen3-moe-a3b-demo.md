@@ -1,148 +1,232 @@
-# Deploying Qwen3-30B-A3B with Expert-Kit
+# Run Qwen3-30B-A3B with the Python Worker
 
-## Overview
+This guide exercises the current Expert Kit path with the BF16
+`Qwen/Qwen3-30B-A3B` checkpoint. The model configuration has 48 routed layers,
+128 experts per layer, hidden size 2048, expert intermediate size 768, and top-k
+8. Those values come from the model's
+[`config.json`](https://huggingface.co/Qwen/Qwen3-30B-A3B/blob/main/config.json).
 
-`Qwen3-30B-A3B` is a powerful MoE (Mixture of Experts) model with advanced reasoning capabilities. This guide explains how to deploy and run Qwen3-30B-A3B using Expert-Kit.
+The final check sends one prompt and generates at most 20 new tokens. It is the
+small Torch Frontend check used by the Worker migration.
 
-> **Prerequisites**: Ensure you have sufficient hardware before beginning installation. The model requires less memory than larger models due to its MoE architecture that activates only 3.3B of its 30.5B parameters.
+## Before starting
 
-## Table of Contents
-- [Hardware Requirements](#hardware-requirements)
-- [Weight Requirements](#weight-requirements)
-- [Installation](#installation)
-- [Deployment](#deployment)
-- [Testing Your Deployment](#testing-your-deployment)
+You need:
 
-## Hardware Requirements
+- Linux hosts with Python 3.12, uv, Rust, Docker, and enough local storage for
+  the checkpoint and Worker disk caches.
+- One Frontend GPU for attention, routing, and non-expert model weights.
+- Enough Worker GPUs to hold every routed expert. The three BF16 FFN matrices
+  contain 54 GiB of expert data before allocator and runtime overhead. Each
+  Worker reports its actual expert capacity to the Controller.
+- A filesystem supporting Linux direct I/O for each Worker disk-cache path.
+- A trusted isolated network. The MVP uses plaintext gRPC and HTTP without TLS
+  or application authentication.
 
-Environments we have already tested:
+One Worker process serves one device. The example below uses four Worker
+processes on one host only to make the addresses concrete. Adjust the number of
+Workers, device budgets, hosts, and ports for the available hardware. A
+Frontend sharing one of those GPUs must leave enough memory outside the
+Worker's configured budget.
 
-| Component | Minimum Specifications |
-|-----------|----------------------|
-| RAM | 32GB+ |
-| CPU | Modern multi-core processor |
-| Accelerator | High-end consumer GPU (RTX 3090/4090) or dual mid-range GPUs (2x RTX 3060/4060Ti) |
-| Storage | 100GB+ SSD |
+## 1. Build the services and Python environments
 
-Note: The Qwen3-30B-A3B model can potentially run on systems with less powerful hardware compared to other models of similar capabilities due to its MoE architecture that activates only 3.3B parameters at inference time.
-
-## Weight Requirements
-The following model weight versions are compatible with Expert-Kit:
-
-| Weight Version | Size | Status | Compatibility | Download Link |
-|----------------|------|--------|---------------|--------------|
-| **Qwen3-30B-A3B** | ~60GB | ✅ Tested | Full compatibility | [Hugging Face](https://huggingface.co/Qwen/Qwen3-30B-A3B) |
-
-## Installation
-
-### 1. Set Up the Development Environment
-
-Source Code and Workspace Preparation
+Run from the repository root:
 
 ```bash
-# Clone the repository
-git clone https://github.com/expert-kit/expert-kit.git
-cd expert-kit
-
-# Create necessary directories
-# Directory for libtorch libraries
-mkdir -p vendor
-# Directory for checkpoint weights (managed by Expert-Kit)
-mkdir -p /tmp/expert-kit/cache
+cargo build --release --bin ek-cli
+uv sync --project ek-worker --locked
+uv sync --project ek-integration/expertkit_torch --locked
 ```
 
-Configure Essential Environment Variables
+Download the official BF16 checkpoint and set its absolute path:
 
 ```bash
-# Set required environment variables (add to ~/.bashrc or ~/.zshrc for persistence)
-## LibTorch configuration
-export LIBTORCH=$(realpath ./vendor/libtorch)
-export LD_LIBRARY_PATH=$(realpath ./vendor/libtorch/lib)
-export DYLD_FALLBACK_LIBRARY_PATH=$(realpath ./vendor/libtorch/lib)
-## Model weights location
-export QWEN3_30B_A3B_ROOT="$(realpath ./[place_to_store_weight]/qwen3-30b-a3b/)"
-## Configuration file path
-export EK_CONFIG="$(realpath ./dev/hello-world.config.yaml)"
+export QWEN_ROOT=/models/Qwen3-30B-A3B
 ```
 
-### 2. Install Dependencies
+The last path component, `Qwen3-30B-A3B`, is the model name used by the Weight
+Server, Controller config, and every Worker config.
+
+## 2. Create the Controller config
+
+Save the following as `/tmp/qwen-controller.yaml`:
+
+```yaml
+inference:
+  hidden_dim: 2048
+  intermediate_dim: 768
+  instance_name: qwen3-demo
+  model_name: Qwen3-30B-A3B
+
+db:
+  db_dsn: postgres://dev:dev@127.0.0.1:5432/dev
+  max_conn_size: 32
+
+weight:
+  server:
+    addr: http://127.0.0.1:6543
+  cache:
+    Fs:
+      path: /var/cache/expert-kit/weight-server
+
+controller:
+  listen: 0.0.0.0
+  broadcast: 127.0.0.1
+  ports:
+    intra: 5001
+    inter: 5002
+  fault_detection:
+    heartbeat_timeout_secs: 10
+    node_active_threshold_secs: 60
+    poller_interval_secs: 5
+```
+
+Port 5001 carries Worker registration, heartbeat, and weight control. Port 5002
+publishes Frontend topology. They are separate endpoints.
+
+## 3. Start metadata and the Weight Server
 
 ```bash
-# Download and install libtorch
-# For MacOS (ARM64):
-# wget https://download.pytorch.org/libtorch/cpu/libtorch-macos-arm64-2.7.0.zip -O /tmp/libtorch.zip
-# For Linux:
-wget https://download.pytorch.org/libtorch/cpu/libtorch-cxx11-abi-shared-with-deps-2.7.0%2Bcpu.zip -O /tmp/libtorch.zip
-
-# Extract libtorch
-unzip /tmp/libtorch.zip -d ./vendor/
-
-# Build Expert-Kit
-cargo build --release
+docker compose -f dev/meta-db.docker-compose.yaml up -d
+target/release/ek-cli --config /tmp/qwen-controller.yaml db migrate
+target/release/ek-cli --config /tmp/qwen-controller.yaml \
+  weight-server --model "$QWEN_ROOT"
 ```
 
-## Deployment
-
-### 1. Prepare model weights
-
-Download the model weights for inference.
-```bash
-# Download from Hugging Face
-huggingface-cli download Qwen/Qwen3-30B-A3B --local-dir ${QWEN3_30B_A3B_ROOT}
-```
-
-### 2. Start the Database and Weight Server
+Keep the Weight Server running. In another terminal, register the model:
 
 ```bash
-# Terminal 1: Start the metadata database
-docker-compose -f dev/meta-db.docker-compose.yaml up -d
-
-# Terminal 1: Run the weight server (keep this terminal open)
-cargo run --release --bin ek-cli weight-server --model "${QWEN3_30B_A3B_ROOT}"
+target/release/ek-cli --config /tmp/qwen-controller.yaml \
+  model upsert --name Qwen3-30B-A3B
 ```
 
-### 3. Initialize the Metadata
+## 4. Assign experts
+
+Create `/tmp/qwen-workers.yaml` with one entry for every Worker process. The IDs
+must match `worker.id` in the Python Worker files:
+
+```yaml
+nodes:
+  - id: qwen-worker-0
+    address: http://127.0.0.1:51051
+    channel: grpc
+    device: cuda:0
+  - id: qwen-worker-1
+    address: http://127.0.0.1:51151
+    channel: grpc
+    device: cuda:1
+  - id: qwen-worker-2
+    address: http://127.0.0.1:51251
+    channel: grpc
+    device: cuda:2
+  - id: qwen-worker-3
+    address: http://127.0.0.1:51351
+    channel: grpc
+    device: cuda:3
+```
+
+Create the model instance and static assignments:
 
 ```bash
-# Terminal 2: Prepare the database
-cargo run --release --bin ek-cli db migrate
-
-# Register the model
-## ⚠ Warning: Current version, model name parameter must match the last segment of the model path
-cargo run --release --bin ek-cli model upsert --name qwen3-30b-a3b
-
-# Schedule the experts (extract expert info from weight, and assign to worker)
-cargo run --release --bin ek-cli schedule static --inventory ./dev/local.inventory.yaml
+target/release/ek-cli --config /tmp/qwen-controller.yaml \
+  schedule static --inventory /tmp/qwen-workers.yaml
 ```
 
-### 3. Launch the Controller and Worker
+Read the numeric instance ID created by that command:
 
 ```bash
-# Terminal 2: Start the controller (keep this terminal open)
-cargo run --release --bin ek-cli controller
-
-# Terminal 3: Start the worker (keep this terminal open)
-cargo run --release --bin ek-cli worker
-# Note: After starting the worker, the terminal will display weight loading information
+docker compose -f dev/meta-db.docker-compose.yaml exec -T pg \
+  psql -U dev -d dev -Atc "SELECT id FROM instance WHERE name = 'qwen3-demo';"
 ```
 
-## Testing Your Deployment
+Use that value for `model.instance_id` in every Worker file and for the
+Frontend check.
+
+## 5. Configure and start the Python Workers
+
+Copy the Worker example once per device:
 
 ```bash
-# Terminal 4: Run an inference test
-# Set up the frontend Python environment
-uv sync
-
-# Navigate to the testing directory
-cd ek-integration/expertkit_torch/
-
-# Test with a simple script
-python3 -m expertkit_torch.models.qwen3_moe \
-  --model_path "${QWEN3_30B_A3B_ROOT}"
+cp ek-worker/examples/qwen3-30b-a3b.torch.yaml /tmp/qwen-worker-0.yaml
 ```
 
-example output:
+For every copy, set:
+
+- the same numeric `model.instance_id`;
+- a unique `worker.id` matching the inventory;
+- the process's `worker.device` and realistic `device_memory_limit`;
+- unique gRPC and peer listen ports;
+- advertised addresses reachable by the Frontend and other Workers;
+- a unique, writable, direct-I/O-compatible absolute disk-cache path;
+- Controller port 5001 and the Weight Server address.
+
+The sample's 20 GiB device budget is only an example. Worker startup subtracts
+fixed input/output buffers, Backend temporary memory, conversion memory, and
+allocator headroom before calculating `max_experts`. The sum of available
+Worker slots must cover all 6144 routed experts, and no Worker's static
+assignment may exceed its reported slots.
+
+Start the Controller:
+
+```bash
+target/release/ek-cli --config /tmp/qwen-controller.yaml controller
 ```
-<think>
-Okay, the user is asking about what an MoE model is. I need to explain this clearly. Let me start by recalling that MoE stands for Mixture of Experts. I remember it's a type of neural network architecture where different...
+
+Activate the Worker environment, then start one process per config in separate
+terminals:
+
+```bash
+source ek-worker/.venv/bin/activate
+target/release/ek-cli --config /tmp/qwen-worker-0.yaml worker
 ```
+
+Each Worker registers, receives its complete target list, and loads from its
+DRAM cache, disk cache, eligible peers, or the Weight Server in that order. A
+remote fetch is written to the disk cache by default. The Controller publishes
+an expert only after the Worker reports it ready.
+
+Do not start inference until every routed expert has at least one ready route.
+If a Worker rejects its assignment because `max_experts` is too small, add
+capacity and run the assignment again instead of increasing the configured
+budget past actual free device memory.
+
+## 6. Run the fixed Qwen check
+
+In the Torch Frontend environment, use Controller port 5002:
+
+```bash
+source ek-integration/expertkit_torch/.venv/bin/activate
+ek-qwen-smoke \
+  --model-path "$QWEN_ROOT" \
+  --controller-endpoint 127.0.0.1:5002 \
+  --instance-id 1
+```
+
+Replace `1` with the instance ID queried above. The command always uses one
+prompt and `max_new_tokens=20`. Success prints `Qwen smoke passed`, a generated
+token count between 1 and 20, and non-empty decoded text. It does not require an
+exact expected sentence.
+
+The same check is exposed as an environment-gated test:
+
+```bash
+cd ek-integration/expertkit_torch
+EK_QWEN_MODEL_PATH="$QWEN_ROOT" \
+EK_QWEN_CONTROLLER_ENDPOINT=127.0.0.1:5002 \
+EK_QWEN_INSTANCE_ID=1 \
+uv run pytest tests/test_qwen_generation.py -m qwen
+```
+
+## Current limits
+
+- Computation Transport is gRPC-only and copies Tensor bytes through Host
+  memory. There is no current SHM, RDMA, NCCL, or NVSHMEM path.
+- Torch is the only Backend targeted for full migration qualification.
+- GGML is experimental and CPU-only. The fused Backend is currently disabled.
+- The Controller does not relay computation as a fallback during topology
+  changes. Frontend requests can receive retryable failures until a replacement
+  topology is installed.
+- vLLM runtime qualification is deferred. This guide uses the Torch Frontend.
+- All internal traffic is plaintext and unauthenticated. Public or untrusted
+  network deployment is unsupported.

@@ -1,0 +1,54 @@
+# Replace instance_id, addresses, device, and memory budget for each Worker process.
+model:
+  instance_id: 1
+  name: Qwen3-30B-A3B
+  weight_version: main
+  num_layers: 48
+  experts_per_layer: 128
+  hidden_dim: 2048
+  expert_intermediate_dim: 768
+  top_k: 8
+  activation_dtype: bf16
+  weight_dtype: bf16
+
+worker:
+  id: qwen-worker-0
+  backend: torch
+  device: cuda:0
+  max_batch_tokens: 4096
+  max_active_batches_per_device: 1
+  device_memory_limit: 20GiB
+  shutdown_grace_secs: 30
+
+transport:
+  grpc:
+    listen: 0.0.0.0:51051
+    advertise: 127.0.0.1:51051
+
+controller:
+  endpoint: 127.0.0.1:5001
+  heartbeat_interval_secs: 3
+  heartbeat_timeout_secs: 10
+
+weight_manager:
+  max_concurrent_loads: 64
+  disk_cache:
+    path: /var/cache/expert-kit/worker-weights/qwen-worker-0
+    writeback: true
+  peer:
+    listen: 0.0.0.0:51052
+    advertise: http://127.0.0.1:51052
+  weight_server_endpoint: http://127.0.0.1:6543
+  state_report:
+    max_updates: 64
+    max_delay_ms: 50
+
+logging:
+  level: INFO
+  format: json
+
+observability:
+  prometheus:
+    enabled: false
+  tracing:
+    enabled: false

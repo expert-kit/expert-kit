@@ -63,6 +63,18 @@ def test_loads_valid_config_and_resolves_defaults(tmp_path: Path) -> None:
     assert config.observability.tracing.enabled is False
 
 
+def test_repository_qwen_example_remains_valid() -> None:
+    example_path = Path(__file__).parents[3] / "examples" / "qwen3-30b-a3b.torch.yaml"
+
+    config = load_config(example_path)
+
+    assert config.model.name == "Qwen3-30B-A3B"
+    assert config.model.num_layers == 48
+    assert config.model.experts_per_layer == 128
+    assert config.model.top_k == 8
+    assert config.transport.max_pending_batches_per_device == 1
+
+
 @pytest.mark.parametrize(
     ("replacement", "expected"),
     [
