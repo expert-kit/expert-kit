@@ -3,13 +3,17 @@
 from __future__ import annotations
 
 import math
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator, Mapping
+from contextlib import contextmanager
 
 import pytest
 import torch
 from expertkit_transport.adapters.grpc.worker_buffers import GrpcWorkerPositionBuffers
 from expertkit_transport.contracts import (
     ReceivedWorkerBatch,
+    TraceAttribute,
+    TraceContext,
+    TraceSpan,
     TransportError,
     TransportErrorCode,
     WorkerBatch,
@@ -38,6 +42,10 @@ class FakeReceivedBatch(ReceivedWorkerBatch):
         self.input_released = False
 
     @property
+    def trace_context(self) -> object | None:
+        return None
+
+    @property
     def batch(self) -> WorkerBatch:
         if self._batch is None:
             raise RuntimeError("input released")
@@ -60,6 +68,53 @@ class FakeReceivedBatch(ReceivedWorkerBatch):
 
     async def reject(self, error: TransportError) -> None:
         raise AssertionError("position tests do not send responses")
+
+
+class RecordingSpan:
+    def __init__(self, *, recording: bool = True) -> None:
+        self.attributes: dict[str, TraceAttribute] = {}
+        self.recording = recording
+
+    def set_attribute(self, key: str, value: TraceAttribute) -> None:
+        self.attributes[key] = value
+
+    def is_recording(self) -> bool:
+        return self.recording
+
+    def end(self) -> None:
+        pass
+
+
+class RecordingTracer:
+    def __init__(self) -> None:
+        self.names: list[str] = []
+
+    def current_span_is_recording(self) -> bool:
+        return True
+
+    def capture_context(self) -> TraceContext:
+        return object()
+
+    def start_span(
+        self,
+        name: str,
+        *,
+        context: TraceContext | None = None,
+        attributes: Mapping[str, TraceAttribute] | None = None,
+    ) -> TraceSpan:
+        self.names.append(name)
+        return RecordingSpan()
+
+    @contextmanager
+    def start_as_current_span(
+        self,
+        name: str,
+        *,
+        context: TraceContext | None = None,
+        attributes: Mapping[str, TraceAttribute] | None = None,
+    ) -> Iterator[TraceSpan]:
+        self.names.append(name)
+        yield RecordingSpan()
 
 
 class TrackingCompletion(BackendCompletion):
@@ -133,7 +188,12 @@ def worker_batch(dtype: torch.dtype = torch.float32) -> WorkerBatch:
     )
 
 
-def make_position(device: str, dtype: torch.dtype = torch.float32) -> ActivePosition:
+def make_position(
+    device: str,
+    dtype: torch.dtype = torch.float32,
+    *,
+    enable_cuda_timing: bool = False,
+) -> ActivePosition:
     spec = WorkerPositionSpec(
         max_batch_tokens=4,
         hidden_dim=3,
@@ -141,7 +201,11 @@ def make_position(device: str, dtype: torch.dtype = torch.float32) -> ActivePosi
         dtype=dtype,
         device=device,
     )
-    return ActivePosition(spec, GrpcWorkerPositionBuffers(spec))
+    return ActivePosition(
+        spec,
+        GrpcWorkerPositionBuffers(spec),
+        enable_cuda_timing=enable_cuda_timing,
+    )
 
 
 def test_cpu_position_reuses_fixed_inputs_and_output() -> None:
@@ -236,10 +300,17 @@ def test_position_maps_unclassified_backend_exception_to_fatal() -> None:
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
 def test_cuda_position_uses_one_stream_and_reuses_pinned_output() -> None:
-    position = make_position("cuda:0", torch.float16)
+    position = make_position("cuda:0", torch.float16, enable_cuda_timing=True)
     backend = DoublingBackend()
+    tracer = RecordingTracer()
+    batch_span = RecordingSpan()
 
-    first = position.execute(FakeReceivedBatch(worker_batch(torch.float16)), backend)
+    first = position.execute(
+        FakeReceivedBatch(worker_batch(torch.float16)),
+        backend,
+        tracer=tracer,
+        batch_span=batch_span,
+    )
     assert first.output is not None
     output_pointer = first.output.data_ptr()
     assert first.output.is_pinned()
@@ -249,13 +320,31 @@ def test_cuda_position_uses_one_stream_and_reuses_pinned_output() -> None:
     )
     first.release()
 
-    second = position.execute(FakeReceivedBatch(worker_batch(torch.float16)), backend)
+    unsampled_span = RecordingSpan(recording=False)
+    second = position.execute(
+        FakeReceivedBatch(worker_batch(torch.float16)),
+        backend,
+        tracer=tracer,
+        batch_span=unsampled_span,
+    )
     assert second.output is not None
     assert second.output.data_ptr() == output_pointer
     assert backend.input_pointers[0] == backend.input_pointers[1]
     assert backend.output_pointers[0] == backend.output_pointers[1]
     assert backend.streams[0] == backend.streams[1]
     assert backend.streams[0] is not None
+    for name in (
+        "expertkit.cuda.input_stage_ms",
+        "expertkit.cuda.backend_stage_ms",
+        "expertkit.cuda.output_stage_ms",
+        "expertkit.cuda.total_stage_ms",
+    ):
+        value = batch_span.attributes[name]
+        assert isinstance(value, float)
+        assert math.isfinite(value)
+        assert value >= 0
+    assert "worker.device.wait" in tracer.names
+    assert not any(name.startswith("expertkit.cuda.") for name in unsampled_span.attributes)
     second.release()
     assert position.device_bytes == 112
     assert position.host_staging_bytes == 112

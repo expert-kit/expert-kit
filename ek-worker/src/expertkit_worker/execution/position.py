@@ -4,12 +4,16 @@ from __future__ import annotations
 
 import time
 from collections.abc import Callable
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from threading import Lock
+from typing import Any
 
 import torch
 from expertkit_transport.contracts import (
     ReceivedWorkerBatch,
+    Tracer,
+    TraceSpan,
     TransportError,
     TransportErrorCode,
     WorkerBatch,
@@ -26,6 +30,12 @@ from expertkit_worker.backends import (
     ComputeBackend,
     InvalidBackendInput,
 )
+
+
+def _trace_span(tracer: Tracer | None, name: str) -> Any:
+    if tracer is None:
+        return nullcontext(None)
+    return tracer.start_as_current_span(name)
 
 
 def _request_end_error(
@@ -88,6 +98,8 @@ class ActivePosition:
         self,
         spec: WorkerPositionSpec,
         transport_buffers: WorkerPositionBuffers,
+        *,
+        enable_cuda_timing: bool = False,
     ) -> None:
         self._spec = spec
         self._transport_buffers = transport_buffers
@@ -116,9 +128,15 @@ class ActivePosition:
                 with torch.cuda.device(spec.device):
                     self._stream: torch.cuda.Stream | None = torch.cuda.Stream(device=spec.device)
                     self._event: torch.cuda.Event | None = torch.cuda.Event()
+                    self._timing_events: tuple[torch.cuda.Event, ...] | None = (
+                        tuple(torch.cuda.Event(enable_timing=True) for _ in range(4))
+                        if enable_cuda_timing
+                        else None
+                    )
             else:
                 self._stream = None
                 self._event = None
+                self._timing_events = None
         except BaseException:
             transport_buffers.close()
             raise
@@ -126,6 +144,12 @@ class ActivePosition:
         self._busy = False
         self._closed = False
         self._state_lock = Lock()
+
+    @property
+    def device(self) -> torch.device:
+        """Return the device owned by this active position."""
+
+        return self._spec.device
 
     @property
     def device_bytes(self) -> int:
@@ -154,6 +178,8 @@ class ActivePosition:
         backend: ComputeBackend,
         *,
         clock: Callable[[], float] = time.monotonic,
+        tracer: Tracer | None = None,
+        batch_span: TraceSpan | None = None,
     ) -> PositionResult:
         """Run one received batch in the current bounded execution thread.
 
@@ -188,6 +214,8 @@ class ActivePosition:
                         routing_weights,
                         output,
                         clock,
+                        tracer,
+                        batch_span,
                     )
                 return self._execute_cpu(
                     received,
@@ -198,6 +226,7 @@ class ActivePosition:
                     routing_weights,
                     output,
                     clock,
+                    tracer,
                 )
             except BackendRequestError:
                 raise
@@ -230,6 +259,7 @@ class ActivePosition:
         self._partial_output = None
         self._stream = None
         self._event = None
+        self._timing_events = None
 
     def _execute_cpu(
         self,
@@ -241,24 +271,29 @@ class ActivePosition:
         routing_weights: torch.Tensor,
         output: torch.Tensor,
         clock: Callable[[], float],
+        tracer: Tracer | None,
     ) -> PositionResult:
-        batch = self._copy_and_build_batch(
-            received,
-            source,
-            hidden,
-            expert_ids,
-            routing_weights,
-        )
+        with _trace_span(tracer, "worker.input.prepare"):
+            batch = self._copy_and_build_batch(
+                received,
+                source,
+                hidden,
+                expert_ids,
+                routing_weights,
+            )
         rejection = _request_end_error(received, clock)
         if rejection is not None:
             return self._set_result(None, rejection, None)
-        completion = self._submit(backend, batch, output)
+        with _trace_span(tracer, "worker.backend.submit"):
+            completion = self._submit(backend, batch, output)
         try:
-            self._wait_completion(completion)
+            with _trace_span(tracer, "worker.backend.wait"):
+                self._wait_completion(completion)
             rejection = _request_end_error(received, clock)
-            response_output = (
-                None if rejection is not None else self._transport_buffers.copy_output(output)
-            )
+            with _trace_span(tracer, "worker.output.prepare"):
+                response_output = (
+                    None if rejection is not None else self._transport_buffers.copy_output(output)
+                )
             return self._set_result(response_output, rejection, completion)
         except BaseException:
             completion.close()
@@ -274,37 +309,67 @@ class ActivePosition:
         routing_weights: torch.Tensor,
         output: torch.Tensor,
         clock: Callable[[], float],
+        tracer: Tracer | None,
+        batch_span: TraceSpan | None,
     ) -> PositionResult:
         stream = self._require_stream()
         event = self._require_event()
         completion: BackendCompletion | None = None
         response_output: torch.Tensor | None = None
         rejection: TransportError | None = None
+        timing_events = (
+            self._timing_events if batch_span is not None and batch_span.is_recording() else None
+        )
         try:
             with torch.cuda.device(self._spec.device), torch.cuda.stream(stream):
-                batch = self._copy_and_build_batch(
-                    received,
-                    source,
-                    hidden,
-                    expert_ids,
-                    routing_weights,
-                )
+                if timing_events is not None:
+                    timing_events[0].record(stream)
+                with _trace_span(tracer, "worker.input.prepare"):
+                    batch = self._copy_and_build_batch(
+                        received,
+                        source,
+                        hidden,
+                        expert_ids,
+                        routing_weights,
+                    )
+                if timing_events is not None:
+                    timing_events[1].record(stream)
                 rejection = _request_end_error(received, clock)
                 if rejection is None:
-                    completion = self._submit(backend, batch, output)
+                    with _trace_span(tracer, "worker.backend.submit"):
+                        completion = self._submit(backend, batch, output)
+                if timing_events is not None:
+                    timing_events[2].record(stream)
+                if completion is not None:
                     rejection = _request_end_error(received, clock)
                     if rejection is None:
-                        response_output = self._transport_buffers.copy_output(output)
+                        with _trace_span(tracer, "worker.output.prepare"):
+                            response_output = self._transport_buffers.copy_output(output)
+                if timing_events is not None:
+                    timing_events[3].record(stream)
                 event.record(stream)
 
             try:
-                event.synchronize()
+                with _trace_span(tracer, "worker.device.wait"):
+                    event.synchronize()
             except torch.OutOfMemoryError as error:
                 raise BackendFatalError(BackendFatalReason.DEVICE_OOM, str(error)) from error
             except Exception as error:
                 raise BackendFatalError(BackendFatalReason.ASYNC_EXECUTION, str(error)) from error
+            if timing_events is not None and batch_span is not None:
+                input_ms = timing_events[0].elapsed_time(timing_events[1])
+                backend_ms = timing_events[1].elapsed_time(timing_events[2])
+                output_ms = timing_events[2].elapsed_time(timing_events[3])
+                batch_span.set_attribute("expertkit.cuda.input_stage_ms", input_ms)
+                batch_span.set_attribute("expertkit.cuda.backend_stage_ms", backend_ms)
+                batch_span.set_attribute("expertkit.cuda.output_stage_ms", output_ms)
+                batch_span.set_attribute(
+                    "expertkit.cuda.total_stage_ms",
+                    input_ms + backend_ms + output_ms,
+                )
             if completion is not None:
-                self._wait_completion(completion)
+                with _trace_span(tracer, "worker.backend.wait"):
+                    self._wait_completion(completion)
             final_rejection = _request_end_error(received, clock)
             if final_rejection is not None:
                 rejection = final_rejection

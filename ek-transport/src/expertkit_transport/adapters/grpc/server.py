@@ -8,7 +8,7 @@ import time
 from collections import Counter, deque
 from collections.abc import Callable, Iterable, Sequence
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import suppress
+from contextlib import nullcontext, suppress
 from enum import StrEnum
 from functools import partial
 from typing import Any
@@ -30,6 +30,9 @@ from expertkit_transport.adapters.grpc.worker_buffers import GrpcWorkerPositionB
 from expertkit_transport.contracts import (
     ReceivedWorkerBatch,
     ReceiverClosed,
+    TraceContext,
+    Tracer,
+    TraceSpan,
     TransportError,
     TransportErrorCode,
     WorkerBatch,
@@ -52,6 +55,16 @@ _NATIVE_ERROR_STATUS = {
 
 def _identity(payload: bytes) -> bytes:
     return payload
+
+
+def _batch_trace_attributes(batch: WorkerBatch) -> dict[str, str | int]:
+    return {
+        "expertkit.instance_id": batch.instance_id,
+        "expertkit.layer_id": batch.layer_id,
+        "expertkit.topology_version": batch.topology_version,
+        "expertkit.token_count": batch.token_count,
+        "expertkit.assignment_count": batch.token_count * batch.top_k,
+    }
 
 
 def _validate_drain_experts(
@@ -97,6 +110,7 @@ class _GrpcWorkItem(ReceivedWorkerBatch):
         batch: WorkerBatch,
         monotonic_deadline: float,
         retained_bytes: int,
+        trace_context: TraceContext | None,
     ) -> None:
         self._owner = owner
         self._batch: WorkerBatch | None = batch
@@ -105,9 +119,15 @@ class _GrpcWorkItem(ReceivedWorkerBatch):
         self.distinct_expert_ids = batch.distinct_expert_ids
         self._deadline = monotonic_deadline
         self.retained_bytes = retained_bytes
+        self._trace_context = trace_context
+        self._wait_span: TraceSpan | None = None
         self.state = _CallState.WAITING
         self._cancelled = False
         self.response: asyncio.Future[bytes] = asyncio.get_running_loop().create_future()
+
+    @property
+    def trace_context(self) -> TraceContext | None:
+        return self._trace_context
 
     @property
     def batch(self) -> WorkerBatch:
@@ -138,6 +158,27 @@ class _GrpcWorkItem(ReceivedWorkerBatch):
         """Serialize one structured computation rejection."""
 
         await self._owner._complete_error(self, error)
+
+    def start_wait_span(self, tracer: Tracer) -> None:
+        """Start queue timing after successful admission."""
+
+        if self._wait_span is not None:
+            raise RuntimeError("gRPC waiting span is already active")
+        self._wait_span = tracer.start_span(
+            "worker.request.wait",
+            context=self._trace_context,
+            attributes=_batch_trace_attributes(self.batch),
+        )
+
+    def finish_wait_span(self, outcome: str) -> None:
+        """Finish queue timing on take, cancellation, or receiver close."""
+
+        span = self._wait_span
+        if span is None:
+            return
+        self._wait_span = None
+        span.set_attribute("expertkit.outcome", outcome)
+        span.end()
 
 
 class _PendingArea:
@@ -223,6 +264,7 @@ class GrpcWorkerServer(WorkerBatchReceiver):
         cpu_workers: int | None = None,
         clock: Callable[[], float] = time.monotonic,
         interceptors: Sequence[grpc.aio.ServerInterceptor] = (),
+        tracer: Tracer | None = None,
         on_rejection: Callable[[str], None] | None = None,
         on_pending_changed: Callable[[int], None] | None = None,
     ) -> None:
@@ -256,6 +298,7 @@ class GrpcWorkerServer(WorkerBatchReceiver):
         )
         self._clock = clock
         self._interceptors = tuple(interceptors)
+        self._tracer = tracer
         self._on_rejection = on_rejection or (lambda _reason: None)
         self._on_pending_changed = on_pending_changed or (lambda _count: None)
         self._server: grpc.aio.Server | None = None
@@ -329,6 +372,7 @@ class GrpcWorkerServer(WorkerBatchReceiver):
         """Move one waiting batch directly into Worker execution ownership."""
 
         item = await self._pending.take()
+        item.finish_wait_span("active")
         async with self._state_condition:
             self._active_count += 1
             self._record_pending_count()
@@ -446,8 +490,18 @@ class GrpcWorkerServer(WorkerBatchReceiver):
         if self._closing:
             self._record_rejection(TransportErrorCode.UNAVAILABLE.value)
             await context.abort(grpc.StatusCode.UNAVAILABLE, "Worker is shutting down")
+        trace_enabled = self._tracer is not None and self._tracer.current_span_is_recording()
+        trace_context = self._tracer.capture_context() if trace_enabled else None
         try:
-            decoded = await self._run_cpu(decode_request_with_size, payload, self._spec)
+            with self._trace_span(
+                "worker.request.decode",
+                attributes={"expertkit.request_bytes": len(payload)},
+                enabled=trace_enabled,
+            ) as span:
+                decoded = await self._run_cpu(decode_request_with_size, payload, self._spec)
+                if span is not None:
+                    for key, value in _batch_trace_attributes(decoded.batch).items():
+                        span.set_attribute(key, value)
         except GrpcProtocolError as error:
             self._record_rejection(TransportErrorCode.PROTOCOL.value)
             await context.abort(grpc.StatusCode.INVALID_ARGUMENT, str(error))
@@ -461,11 +515,13 @@ class GrpcWorkerServer(WorkerBatchReceiver):
             decoded.batch,
             deadline,
             decoded.retained_tensor_bytes,
+            trace_context,
         )
         rejection = await self._admit(item)
         if rejection is not None:
             self._record_rejection(rejection.code.value)
-            return await self._run_cpu(encode_error_response, rejection, self._spec)
+            with self._trace_span("worker.response.encode", enabled=trace_enabled):
+                return await self._run_cpu(encode_error_response, rejection, self._spec)
 
         try:
             return await asyncio.shield(item.response)
@@ -493,6 +549,8 @@ class GrpcWorkerServer(WorkerBatchReceiver):
                     retryable=True,
                     diagnostic="Worker Transport waiting area is full",
                 )
+            if self._tracer is not None and item.trace_context is not None:
+                item.start_wait_span(self._tracer)
             for expert_id in item.distinct_expert_ids:
                 self._admitted_experts[(item.layer_id, expert_id)] += 1
             self._record_pending_count()
@@ -519,6 +577,7 @@ class GrpcWorkerServer(WorkerBatchReceiver):
             item._cancelled = True
             self._state_condition.notify_all()
         if await self._pending.cancel_waiting(item):
+            item.finish_wait_span("cancelled")
             self._record_pending_count()
             await self._release_admitted(item, was_active=False)
 
@@ -539,11 +598,15 @@ class GrpcWorkerServer(WorkerBatchReceiver):
             if not item.cancelled:
                 if partial_output.ndim != 2 or partial_output.shape[0] != item.token_count:
                     raise ValueError("partial output token count does not match the received batch")
-                payload = await self._run_cpu(
-                    encode_success_response,
-                    partial_output,
-                    self._spec,
-                )
+                with self._trace_span(
+                    "worker.response.encode",
+                    enabled=item.trace_context is not None,
+                ):
+                    payload = await self._run_cpu(
+                        encode_success_response,
+                        partial_output,
+                        self._spec,
+                    )
                 if not item.cancelled and not item.response.done():
                     item.response.set_result(payload)
         except BaseException as error:
@@ -563,7 +626,11 @@ class GrpcWorkerServer(WorkerBatchReceiver):
             if not item.cancelled:
                 status = _NATIVE_ERROR_STATUS.get(error.code)
                 if status is None:
-                    payload = await self._run_cpu(encode_error_response, error, self._spec)
+                    with self._trace_span(
+                        "worker.response.encode",
+                        enabled=item.trace_context is not None,
+                    ):
+                        payload = await self._run_cpu(encode_error_response, error, self._spec)
                     if not item.cancelled and not item.response.done():
                         item.response.set_result(payload)
                 elif not item.response.done():
@@ -607,6 +674,17 @@ class GrpcWorkerServer(WorkerBatchReceiver):
         if item.state is not _CallState.ACTIVE:
             raise RuntimeError("Worker batch completion requires one active received batch")
 
+    def _trace_span(
+        self,
+        name: str,
+        *,
+        attributes: dict[str, str | int] | None = None,
+        enabled: bool = True,
+    ) -> Any:
+        if self._tracer is None or not enabled:
+            return nullcontext(None)
+        return self._tracer.start_as_current_span(name, attributes=attributes)
+
     def _record_rejection(self, reason: str) -> None:
         with suppress(Exception):
             self._on_rejection(reason)
@@ -623,6 +701,7 @@ class GrpcWorkerServer(WorkerBatchReceiver):
         self._record_pending_count()
         for item in waiting:
             item._cancelled = True
+            item.finish_wait_span("closed")
             await self._release_admitted(item, was_active=False)
         loop = asyncio.get_running_loop()
         await loop.run_in_executor(

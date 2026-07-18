@@ -247,6 +247,7 @@ async def build_worker_application(config: WorkerConfig) -> WorkerApplication:
             max_active_batches=config.worker.max_active_batches_per_device,
             max_pending_batches=config.transport.max_pending_batches_per_device,
             interceptors=observability.grpc_interceptors,
+            tracer=observability.tracer,
             on_rejection=metrics.batch_rejected,
             on_pending_changed=metrics.pending_batches_changed,
         )
@@ -279,6 +280,7 @@ async def build_worker_application(config: WorkerConfig) -> WorkerApplication:
             position_spec=position_spec,
             active_positions=config.worker.max_active_batches_per_device,
             metrics=metrics,
+            tracer=observability.tracer,
         )
         resource_plan = plan_device_resources(
             device_memory_limit_bytes=int(config.worker.device_memory_limit),

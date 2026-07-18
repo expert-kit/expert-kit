@@ -15,6 +15,12 @@ from expertkit_transport.contracts.receiver import (
     WorkerPositionSpec,
 )
 from expertkit_transport.contracts.routing import validate_and_convert_routing
+from expertkit_transport.contracts.tracing import (
+    TraceAttribute,
+    TraceContext,
+    Tracer,
+    TraceSpan,
+)
 from expertkit_transport.contracts.transport import WorkerTransport
 
 __all__ = [
@@ -25,6 +31,10 @@ __all__ = [
     "ReceivedWorkerBatch",
     "ReceiverClosed",
     "RoutedLayerBatch",
+    "TraceAttribute",
+    "TraceContext",
+    "TraceSpan",
+    "Tracer",
     "TransportError",
     "TransportErrorCode",
     "WorkerBatch",

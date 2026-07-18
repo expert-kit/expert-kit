@@ -40,6 +40,7 @@ from opentelemetry.proto.collector.trace.v1 import (
 
 _EXECUTE_METHOD = "/ek.worker.v2.ComputationService/Execute"
 _TRACE_ID = "0123456789abcdef0123456789abcdef"
+_REMOTE_PARENT_SPAN_ID = "0123456789abcdef"
 
 
 def _unused_port() -> int:
@@ -122,6 +123,7 @@ def test_prometheus_listener_exposes_low_cardinality_worker_metrics() -> None:
             }
         )
         observability = create_observability(config, worker_id="worker-0")
+        assert observability.tracer is None
         await observability.start()
         try:
             metrics = observability.metrics
@@ -180,6 +182,7 @@ def test_tracing_extracts_parent_context_and_exports_off_the_rpc_path() -> None:
             max_active_batches=1,
             max_pending_batches=1,
             interceptors=observability.grpc_interceptors,
+            tracer=observability.tracer,
         )
         execution = WorkerExecution(
             server,
@@ -187,6 +190,7 @@ def test_tracing_extracts_parent_context_and_exports_off_the_rpc_path() -> None:
             instance_id=7,
             position_spec=WorkerPositionSpec(2, 2, 1, torch.float32, "cpu"),
             active_positions=1,
+            tracer=observability.tracer,
         )
         channel: grpc.aio.Channel | None = None
         await observability.start()
@@ -201,7 +205,7 @@ def test_tracing_extracts_parent_context_and_exports_off_the_rpc_path() -> None:
             )
             payload = await execute(
                 encode_request(_batch(), _spec()),
-                metadata=(("traceparent", f"00-{_TRACE_ID}-0123456789abcdef-01"),),
+                metadata=(("traceparent", f"00-{_TRACE_ID}-{_REMOTE_PARENT_SPAN_ID}-01"),),
             )
             torch.testing.assert_close(
                 decode_response(payload, 1, _spec()),
@@ -227,8 +231,35 @@ def test_tracing_extracts_parent_context_and_exports_off_the_rpc_path() -> None:
             for scope in resource.scope_spans
             for span in scope.spans
         ]
-        assert any(span.trace_id == bytes.fromhex(_TRACE_ID) for span in spans), [
+        traced = [span for span in spans if span.trace_id == bytes.fromhex(_TRACE_ID)]
+        assert traced, [
             (span.name, span.trace_id.hex(), span.parent_span_id.hex()) for span in spans
         ]
+        by_name = {span.name: span for span in traced}
+        expected = {
+            "worker.request.decode",
+            "worker.request.wait",
+            "worker.batch.execute",
+            "worker.input.prepare",
+            "worker.backend.submit",
+            "worker.backend.wait",
+            "worker.output.prepare",
+            "worker.response.encode",
+        }
+        assert expected <= by_name.keys()
+
+        server_span = next(
+            span for span in traced if span.parent_span_id == bytes.fromhex(_REMOTE_PARENT_SPAN_ID)
+        )
+        for name in ("worker.request.decode", "worker.request.wait", "worker.batch.execute"):
+            assert by_name[name].parent_span_id == server_span.span_id
+        for name in (
+            "worker.input.prepare",
+            "worker.backend.submit",
+            "worker.backend.wait",
+            "worker.output.prepare",
+            "worker.response.encode",
+        ):
+            assert by_name[name].parent_span_id == by_name["worker.batch.execute"].span_id
 
     asyncio.run(scenario())

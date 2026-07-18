@@ -10,6 +10,7 @@ import torch
 
 from expertkit_transport.contracts.batches import WorkerBatch
 from expertkit_transport.contracts.errors import TransportError
+from expertkit_transport.contracts.tracing import TraceContext
 
 
 class ReceiverClosed(RuntimeError):
@@ -72,6 +73,11 @@ class WorkerPositionBuffers(ABC):
 
 class ReceivedWorkerBatch(ABC):
     """Represent one admitted batch until computation and response finish."""
+
+    @property
+    @abstractmethod
+    def trace_context(self) -> TraceContext | None:
+        """Return optional Host-only tracing context captured by Transport."""
 
     @property
     @abstractmethod

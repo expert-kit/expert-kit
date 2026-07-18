@@ -116,6 +116,25 @@ observability:
 Prometheus serves `/metrics`. The OpenTelemetry exporter uses asynchronous,
 sampled plaintext OTLP over gRPC.
 
+For each sampled computation call, the automatic gRPC server span contains
+Worker child spans for request decoding, waiting for an active position, active
+batch execution, input preparation, Backend submission and completion, output
+preparation, device completion waiting, and response encoding. CUDA execution
+adds the following attributes to `worker.batch.execute`:
+
+- `expertkit.cuda.input_stage_ms`
+- `expertkit.cuda.backend_stage_ms`
+- `expertkit.cuda.output_stage_ms`
+- `expertkit.cuda.total_stage_ms`
+
+These values use CUDA Events on the Worker's existing stream and are read only
+after the response path's existing completion wait. Tracing does not add a CUDA
+synchronization. The stage values include any stream idle time between their
+recorded boundaries, so they describe Worker stream stages rather than pure
+copy-engine or kernel-only time. Unsampled requests skip custom spans and CUDA
+timing. An incoming standard `traceparent` remains on the Host and parents the
+Worker spans; it is not part of the computation payload or any Tensor.
+
 ## Transport and security limits
 
 The current computation path uses only plaintext gRPC. It serializes Tensor

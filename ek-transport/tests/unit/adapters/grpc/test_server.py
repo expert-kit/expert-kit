@@ -2,7 +2,8 @@
 
 import asyncio
 import time
-from collections.abc import Awaitable
+from collections.abc import Awaitable, Iterator, Mapping
+from contextlib import contextmanager
 from dataclasses import replace
 
 import grpc
@@ -18,11 +19,70 @@ from expertkit_transport.adapters.grpc.spec import calculate_message_limits
 from expertkit_transport.contracts import (
     OutputSpec,
     ReceiverClosed,
+    TraceAttribute,
+    TraceContext,
+    Tracer,
+    TraceSpan,
     TransportError,
     TransportErrorCode,
     WorkerBatch,
     WorkerPositionSpec,
 )
+
+
+class RecordingSpan:
+    def __init__(self, name: str) -> None:
+        self.name = name
+        self.attributes: dict[str, TraceAttribute] = {}
+        self.ended = False
+
+    def set_attribute(self, key: str, value: TraceAttribute) -> None:
+        self.attributes[key] = value
+
+    def is_recording(self) -> bool:
+        return True
+
+    def end(self) -> None:
+        self.ended = True
+
+
+class RecordingTracer:
+    def __init__(self, *, recording: bool = True) -> None:
+        self.spans: list[RecordingSpan] = []
+        self.context = object()
+        self.recording = recording
+
+    def current_span_is_recording(self) -> bool:
+        return self.recording
+
+    def capture_context(self) -> TraceContext:
+        return self.context
+
+    def start_span(
+        self,
+        name: str,
+        *,
+        context: TraceContext | None = None,
+        attributes: Mapping[str, TraceAttribute] | None = None,
+    ) -> TraceSpan:
+        span = RecordingSpan(name)
+        span.attributes.update(attributes or {})
+        self.spans.append(span)
+        return span
+
+    @contextmanager
+    def start_as_current_span(
+        self,
+        name: str,
+        *,
+        context: TraceContext | None = None,
+        attributes: Mapping[str, TraceAttribute] | None = None,
+    ) -> Iterator[TraceSpan]:
+        span = self.start_span(name, context=context, attributes=attributes)
+        try:
+            yield span
+        finally:
+            span.end()
 
 
 def batch_spec() -> GrpcBatchSpec:
@@ -63,12 +123,14 @@ async def start_pair(
     max_pending_batches: int = 1,
     client_in_flight: int = 2,
     pending_changes: list[int] | None = None,
+    tracer: Tracer | None = None,
 ) -> tuple[GrpcWorkerServer, GrpcWorkerTransport]:
     server = GrpcWorkerServer(
         "127.0.0.1:0",
         batch_spec(),
         max_active_batches=max_active_batches,
         max_pending_batches=max_pending_batches,
+        tracer=tracer,
         on_pending_changed=None if pending_changes is None else pending_changes.append,
     )
     await server.start()
@@ -270,6 +332,31 @@ def test_server_hands_one_validated_batch_directly_to_execution() -> None:
     run(scenario())
 
 
+def test_unsampled_request_does_not_create_custom_spans() -> None:
+    async def scenario() -> None:
+        tracer = RecordingTracer(recording=False)
+        server, client = await start_pair(tracer=tracer)
+        output = prepare_output(client)
+        submission = asyncio.create_task(
+            client.submit(
+                worker_batch(),
+                output,
+                monotonic_deadline=float("inf"),
+            )
+        )
+
+        received = await server.take()
+        await received.complete(received.batch.hidden_states)
+        await submission
+
+        assert received.trace_context is None
+        assert tracer.spans == []
+        client.output_buffers.release(output)
+        await close_pair(server, client)
+
+    run(scenario())
+
+
 @pytest.mark.parametrize(
     ("code", "expected"),
     [
@@ -341,7 +428,8 @@ def test_server_delivers_structured_execution_rejection() -> None:
 
 def test_application_pending_limit_returns_busy_and_cancellation_releases_input() -> None:
     async def scenario() -> None:
-        server, client = await start_pair(client_in_flight=2)
+        tracer = RecordingTracer()
+        server, client = await start_pair(client_in_flight=2, tracer=tracer)
         first_output = prepare_output(client)
         second_output = prepare_output(client)
         first = asyncio.create_task(
@@ -372,6 +460,10 @@ def test_application_pending_limit_returns_busy_and_cancellation_releases_input(
             await server._wait_pending_count(0)
         assert server.pending_retained_bytes == 0
         assert server.admitted_count(2, 0) == 0
+        waiting = [span for span in tracer.spans if span.name == "worker.request.wait"]
+        assert len(waiting) == 1
+        assert waiting[0].ended is True
+        assert waiting[0].attributes["expertkit.outcome"] == "cancelled"
 
         client.output_buffers.release(first_output)
         client.output_buffers.release(second_output)
@@ -418,7 +510,8 @@ def test_maximum_batch_accounts_only_retained_decoded_tensor_bytes() -> None:
 
 def test_server_close_clears_pending_retained_bytes() -> None:
     async def scenario() -> None:
-        server, client = await start_pair()
+        tracer = RecordingTracer()
+        server, client = await start_pair(tracer=tracer)
         output = prepare_output(client)
         submission = asyncio.create_task(
             client.submit(
@@ -433,6 +526,10 @@ def test_server_close_clears_pending_retained_bytes() -> None:
         await server.close()
         assert server.pending_count == 0
         assert server.pending_retained_bytes == 0
+        waiting = [span for span in tracer.spans if span.name == "worker.request.wait"]
+        assert len(waiting) == 1
+        assert waiting[0].ended is True
+        assert waiting[0].attributes["expertkit.outcome"] in {"cancelled", "closed"}
         result = await asyncio.gather(submission, return_exceptions=True)
         assert isinstance(result[0], TransportError)
         client.output_buffers.release(output)

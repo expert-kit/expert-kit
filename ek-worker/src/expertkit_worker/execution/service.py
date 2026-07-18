@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
@@ -13,6 +14,8 @@ import structlog
 from expertkit_transport.contracts import (
     ReceivedWorkerBatch,
     ReceiverClosed,
+    Tracer,
+    TraceSpan,
     TransportError,
     TransportErrorCode,
     WorkerBatchReceiver,
@@ -73,6 +76,7 @@ class WorkerExecution:
         active_positions: int,
         clock: Callable[[], float] = time.monotonic,
         metrics: WorkerMetrics | None = None,
+        tracer: Tracer | None = None,
     ) -> None:
         if isinstance(instance_id, bool) or not isinstance(instance_id, int) or instance_id <= 0:
             raise ValueError("instance_id must be a positive integer")
@@ -92,11 +96,18 @@ class WorkerExecution:
         self._instance_id = instance_id
         self._clock = clock
         self._metrics = metrics or NoopWorkerMetrics()
+        self._tracer = tracer
         self._positions: list[ActivePosition] = []
         try:
             for _ in range(active_positions):
                 buffers = receiver.allocate_position_buffers(position_spec)
-                self._positions.append(ActivePosition(position_spec, buffers))
+                self._positions.append(
+                    ActivePosition(
+                        position_spec,
+                        buffers,
+                        enable_cuda_timing=tracer is not None,
+                    )
+                )
         except BaseException:
             for position in self._positions:
                 position.close()
@@ -202,6 +213,32 @@ class WorkerExecution:
         received: ReceivedWorkerBatch,
         position: ActivePosition,
     ) -> BackendFatalError | None:
+        if self._tracer is None or received.trace_context is None:
+            return await self._process_batch(received, position, None)
+        batch = received.batch
+        attributes = {
+            "expertkit.instance_id": batch.instance_id,
+            "expertkit.layer_id": batch.layer_id,
+            "expertkit.topology_version": batch.topology_version,
+            "expertkit.token_count": batch.token_count,
+            "expertkit.assignment_count": batch.token_count * batch.top_k,
+            "expertkit.backend": type(self._backend).__name__,
+            "expertkit.device": str(position.device),
+        }
+        span_context = self._tracer.start_as_current_span(
+            "worker.batch.execute",
+            context=received.trace_context,
+            attributes=attributes,
+        )
+        with span_context as span:
+            return await self._process_batch(received, position, span)
+
+    async def _process_batch(
+        self,
+        received: ReceivedWorkerBatch,
+        position: ActivePosition,
+        span: TraceSpan | None,
+    ) -> BackendFatalError | None:
         try:
             batch = received.batch
             if batch.instance_id != self._instance_id:
@@ -215,7 +252,7 @@ class WorkerExecution:
                 )
                 self._metrics.batch_rejected(TransportErrorCode.INVALID_REQUEST.value)
                 return None
-            result = await self._run_position(position, received)
+            result = await self._run_position(position, received, span)
         except BackendRequestError as error:
             rejection = _request_error(error)
             logger.warning(
@@ -256,17 +293,23 @@ class WorkerExecution:
         self,
         position: ActivePosition,
         received: ReceivedWorkerBatch,
+        span: TraceSpan | None,
     ) -> PositionResult:
         loop = asyncio.get_running_loop()
-        work = loop.run_in_executor(
-            self._executor,
-            partial(
-                position.execute,
-                received,
-                self._backend,
-                clock=self._clock,
-            ),
+        tracer = self._tracer if span is not None else None
+        execute = partial(
+            position.execute,
+            received,
+            self._backend,
+            clock=self._clock,
+            tracer=tracer,
+            batch_span=span,
         )
+        if tracer is None:
+            work = loop.run_in_executor(self._executor, execute)
+        else:
+            context = contextvars.copy_context()
+            work = loop.run_in_executor(self._executor, context.run, execute)
         try:
             return await asyncio.shield(work)
         except asyncio.CancelledError:
