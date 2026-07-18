@@ -221,6 +221,7 @@ def test_two_workers_execute_and_aggregate_one_routed_layer() -> None:
                     [[0.35, 0.65, 0.0], [0.5, 0.2, 0.3], [0.8, 0.0, 0.0]],
                     dtype=torch.float32,
                 ),
+                distinct_expert_ids=(0, 1),
             )
 
             async with asyncio.timeout(5):

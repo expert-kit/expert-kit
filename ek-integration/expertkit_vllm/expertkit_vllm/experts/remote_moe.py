@@ -238,7 +238,7 @@ class RemoteMoERunner(nn.Module):
             topk_indices_dtype=torch.int32,
             input_ids=input_ids,
         )
-        expert_ids, routing_weights = validate_and_convert_routing(
+        expert_ids, routing_weights, distinct_expert_ids = validate_and_convert_routing(
             expert_ids,
             routing_weights,
             experts_per_layer=self.num_experts,
@@ -248,6 +248,7 @@ class RemoteMoERunner(nn.Module):
             hidden_states=hidden_states,
             expert_ids=expert_ids,
             routing_weights=routing_weights,
+            distinct_expert_ids=distinct_expert_ids,
             timeout_seconds=self.client_config.timeout_seconds,
         )
 

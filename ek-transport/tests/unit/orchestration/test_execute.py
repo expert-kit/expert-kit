@@ -7,6 +7,7 @@ from collections.abc import Awaitable, Callable
 import pytest
 import torch
 
+import expertkit_transport.orchestration.execute as execute_module
 from expertkit_transport.buffers import OutputPool, TorchOutputBufferProvider
 from expertkit_transport.contracts import (
     OutputBufferProvider,
@@ -147,6 +148,7 @@ def routed_batch(
     dtype: torch.dtype = torch.float16,
 ) -> RoutedLayerBatch:
     token_count = expert_ids.shape[0]
+    distinct_expert_ids = tuple(sorted(set(expert_ids[expert_ids >= 0].tolist())))
     return RoutedLayerBatch(
         instance_id=7,
         layer_id=2,
@@ -157,6 +159,7 @@ def routed_batch(
             torch.full(expert_ids.shape, 0.25, dtype=torch.float32),
             torch.zeros(expert_ids.shape, dtype=torch.float32),
         ),
+        distinct_expert_ids=distinct_expert_ids,
     )
 
 
@@ -184,6 +187,37 @@ async def close_pools(pools: dict[WorkerIdentity, OutputPool]) -> None:
 
 def run(coroutine: Awaitable[None]) -> None:
     asyncio.run(coroutine)
+
+
+def test_single_complete_worker_bypasses_fp32_dispatch(monkeypatch) -> None:
+    async def scenario() -> None:
+        transport = ScriptedTransport([1.5])
+        worker = target("worker-a", transport)
+        snapshot = TopologySnapshot(
+            instance_id=7,
+            version=11,
+            routes={(2, 0): (worker,)},
+        )
+        pools = pools_for((worker,))
+
+        async def unexpected_dispatch(*args: object, **kwargs: object) -> tuple[object, ...]:
+            raise AssertionError("a complete single-Worker result must bypass FP32 dispatch")
+
+        monkeypatch.setattr(execute_module, "dispatch_once", unexpected_dispatch)
+        result = await execute_module.execute_routed_layer(
+            routed_batch(torch.tensor([[0], [0]], dtype=torch.int32)),
+            FakeTopologyProvider(snapshot),
+            RoundRobinSelector(),
+            pools,
+            monotonic_deadline=float("inf"),
+        )
+
+        assert result.dtype is torch.float16
+        torch.testing.assert_close(result, torch.full((2, 4), 1.5, dtype=torch.float16))
+        assert transport.calls[0].token_indices is None
+        await close_pools(pools)
+
+    run(scenario())
 
 
 def test_retry_keeps_successes_once_and_prefers_replacement() -> None:

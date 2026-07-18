@@ -87,4 +87,5 @@ def test_routed_layer_requires_fixed_external_dtypes() -> None:
             hidden_states=torch.zeros((2, 8), dtype=torch.bfloat16),
             expert_ids=torch.zeros((2, 2), dtype=torch.int64),
             routing_weights=torch.zeros((2, 2), dtype=torch.float32),
+            distinct_expert_ids=(0,),
         )

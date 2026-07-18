@@ -70,6 +70,41 @@ async def _dispatch_plan(
     return None
 
 
+async def dispatch_complete_plan(
+    plan: WorkerBatchPlan,
+    pool: OutputPool,
+    *,
+    monotonic_deadline: float,
+) -> tuple[torch.Tensor | None, FailedWorkerBatch | None]:
+    """Return one complete Worker result without FP32 scatter aggregation."""
+
+    batch = plan.batch
+    if batch.token_indices is not None:
+        raise ValueError("a complete Worker plan must select every source token")
+    if pool.spec.hidden_dim != batch.hidden_dim:
+        raise ValueError("output pool hidden dimension does not match the Worker batch")
+    if pool.spec.dtype != batch.hidden_states.dtype:
+        raise ValueError("output pool dtype does not match the activation dtype")
+    if pool.spec.device != batch.hidden_states.device:
+        raise ValueError("output pool and Worker batch must be on the same device")
+    if pool.spec.max_batch_tokens < batch.token_count:
+        raise ValueError("output pool is too small for the physical Worker batch")
+
+    result = torch.empty_like(batch.hidden_states)
+    try:
+        async with pool.lease(monotonic_deadline=monotonic_deadline) as lease:
+            await plan.target.transport.submit(
+                batch,
+                lease.output,
+                monotonic_deadline=monotonic_deadline,
+            )
+            result.copy_(lease.output.tensor[: batch.token_count])
+            lease.mark_consumed()
+    except TransportError as error:
+        return None, FailedWorkerBatch(plan=plan, error=error)
+    return result, None
+
+
 async def dispatch_once(
     plans: tuple[WorkerBatchPlan, ...],
     pools: Mapping[WorkerIdentity, OutputPool],

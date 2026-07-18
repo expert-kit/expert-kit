@@ -66,6 +66,7 @@ def test_forwards_final_assignments_once_with_wire_dtypes(monkeypatch) -> None:
     assert len(transport.calls) == 1
     assert transport.calls[0]["expert_ids"].dtype is torch.int32  # type: ignore[union-attr]
     assert transport.calls[0]["routing_weights"].dtype is torch.float32  # type: ignore[union-attr]
+    assert transport.calls[0]["distinct_expert_ids"] == (1, 3)
     routed.close()
     assert transport.closed is True
 

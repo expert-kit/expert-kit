@@ -47,9 +47,11 @@ class ConcurrentAsyncClient:
         hidden_states: torch.Tensor,
         expert_ids: torch.Tensor,
         routing_weights: torch.Tensor,
+        distinct_expert_ids: tuple[int, ...],
         monotonic_deadline: float,
     ) -> torch.Tensor:
         assert threading.get_ident() == self.loop_thread_id
+        assert distinct_expert_ids == (0, 1)
         self.entered += 1
         self.active += 1
         self.max_active = max(self.max_active, self.active)
@@ -79,6 +81,7 @@ def test_blocking_client_reuses_one_loop_and_allows_concurrent_calls(monkeypatch
             hidden_states=hidden,
             expert_ids=experts,
             routing_weights=weights,
+            distinct_expert_ids=(0, 1),
             timeout_seconds=1,
         )
 
@@ -128,6 +131,7 @@ def test_blocking_timeout_waits_until_tensor_access_is_cancelled(monkeypatch) ->
                 hidden_states=torch.ones((1, 3)),
                 expert_ids=torch.tensor([[0, 1]], dtype=torch.int32),
                 routing_weights=torch.tensor([[0.5, 0.5]], dtype=torch.float32),
+                distinct_expert_ids=(0, 1),
                 timeout_seconds=0.01,
             )
         except TransportError as error:
@@ -148,6 +152,7 @@ def test_blocking_client_rejects_calls_before_start(monkeypatch) -> None:
             hidden_states=torch.ones((1, 3)),
             expert_ids=torch.tensor([[0, 1]], dtype=torch.int32),
             routing_weights=torch.tensor([[0.5, 0.5]], dtype=torch.float32),
+            distinct_expert_ids=(0, 1),
             timeout_seconds=1,
         )
     except RuntimeError as error:

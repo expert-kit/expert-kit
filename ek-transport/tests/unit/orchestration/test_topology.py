@@ -51,7 +51,10 @@ def test_snapshot_copies_route_mapping_and_replica_sequences() -> None:
     replicas.clear()
     routes.clear()
 
-    assert snapshot.layer_routes(2)[3] == (worker,)
+    first = snapshot.layer_routes(2)
+    second = snapshot.layer_routes(2)
+    assert first[3] == (worker,)
+    assert first is second
     with pytest.raises(TypeError):
         snapshot.routes[(2, 4)] = (worker,)  # type: ignore[index]
 

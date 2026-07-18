@@ -6,6 +6,7 @@ import sys
 import warnings
 from dataclasses import dataclass
 
+import numpy as np
 import torch
 from google.protobuf.message import DecodeError
 
@@ -50,8 +51,11 @@ def _require_little_endian() -> None:
 
 
 def _raw_bytes(tensor: torch.Tensor) -> bytes:
-    cpu = tensor.detach().to(device="cpu").contiguous()
-    return cpu.view(torch.uint8).numpy().tobytes()
+    if tensor.device.type != "cpu":
+        raise ValueError("gRPC serialization requires a CPU Tensor")
+    if not tensor.is_contiguous():
+        raise ValueError("gRPC serialization requires a contiguous Tensor")
+    return tensor.detach().view(torch.uint8).numpy().tobytes()
 
 
 def _tensor_from_bytes(raw: bytes, dtype: torch.dtype, shape: tuple[int, int]) -> torch.Tensor:
@@ -70,17 +74,21 @@ def _validate_routing_values(
     routing_weights: torch.Tensor,
     experts_per_layer: int,
 ) -> tuple[int, ...]:
-    if torch.any(expert_ids < -1).item():
+    expert_values = expert_ids.numpy().reshape(-1)
+    routing_values = routing_weights.numpy().reshape(-1)
+    if int(expert_values.min()) < -1:
         raise GrpcProtocolError("expert IDs below -1 are invalid")
-    if torch.any(expert_ids >= experts_per_layer).item():
+    if int(expert_values.max()) >= experts_per_layer:
         raise GrpcProtocolError("expert ID exceeds the configured expert range")
-    invalid = expert_ids == -1
-    if torch.any(invalid & (routing_weights != 0)).item():
+    invalid = expert_values == -1
+    if np.any(routing_values[invalid] != 0):
         raise GrpcProtocolError("an invalid expert position must have zero routing weight")
-    valid = expert_ids[~invalid]
-    if valid.numel() == 0:
+    valid = expert_values[~invalid]
+    if valid.size == 0:
         return ()
-    return tuple(sorted(torch.unique(valid).tolist()))
+    seen = np.zeros(experts_per_layer, dtype=np.bool_)
+    seen[valid] = True
+    return tuple(np.flatnonzero(seen).tolist())
 
 
 def _validate_batch_against_spec(batch: WorkerBatch, spec: GrpcBatchSpec) -> None:
@@ -105,14 +113,6 @@ def _serialize_host_request(
     host_expert_ids: torch.Tensor,
     host_routing_weights: torch.Tensor,
 ) -> bytes:
-    distinct = _validate_routing_values(
-        host_expert_ids,
-        host_routing_weights,
-        spec.experts_per_layer,
-    )
-    if distinct != batch.distinct_expert_ids:
-        raise GrpcProtocolError("distinct_expert_ids does not match the routing tensor")
-
     request = computation_pb2.ExecuteRequest(
         instance_id=batch.instance_id,
         layer_id=batch.layer_id,

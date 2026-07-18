@@ -85,6 +85,7 @@ def routed_batch() -> RoutedLayerBatch:
         hidden_states=torch.zeros((3, 4), dtype=torch.float16),
         expert_ids=torch.tensor([[0, 1], [1, 0], [0, 0]], dtype=torch.int32),
         routing_weights=torch.ones((3, 2), dtype=torch.float32),
+        distinct_expert_ids=(0, 1),
     )
 
 

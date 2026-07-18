@@ -16,7 +16,11 @@ from expertkit_transport.contracts import (
     TransportError,
     TransportErrorCode,
 )
-from expertkit_transport.orchestration.dispatch import FailedWorkerBatch, dispatch_once
+from expertkit_transport.orchestration.dispatch import (
+    FailedWorkerBatch,
+    dispatch_complete_plan,
+    dispatch_once,
+)
 from expertkit_transport.orchestration.grouping import (
     WorkerBatchPlan,
     group_worker_batches,
@@ -82,6 +86,7 @@ def _unfinished_batch(
             hidden_states=source.hidden_states,
             expert_ids=expert_ids,
             routing_weights=routing_weights,
+            distinct_expert_ids=tuple(sorted(failed_workers)),
         ),
         excluded,
     )
@@ -181,21 +186,38 @@ async def execute_routed_layer(
 
     snapshot = topology.current(batch.instance_id)
     plans = group_worker_batches(batch, snapshot, selector)
-    accumulator = torch.zeros(
-        (batch.token_count, batch.hidden_dim),
-        dtype=torch.float32,
-        device=batch.hidden_states.device,
-    )
     if not plans:
-        return accumulator.to(batch.hidden_states.dtype)
+        return torch.zeros_like(batch.hidden_states)
 
-    failures = await dispatch_once(
-        plans,
-        pools,
-        accumulator,
-        monotonic_deadline=monotonic_deadline,
-    )
+    accumulator: torch.Tensor | None = None
+    if len(plans) == 1 and plans[0].batch.token_indices is None:
+        try:
+            pool = pools[plans[0].target.identity]
+        except KeyError as error:
+            raise RuntimeError("no output pool for selected Worker process") from error
+        direct_result, direct_failure = await dispatch_complete_plan(
+            plans[0],
+            pool,
+            monotonic_deadline=monotonic_deadline,
+        )
+        if direct_failure is None:
+            assert direct_result is not None
+            return direct_result
+        failures = (direct_failure,)
+    else:
+        accumulator = torch.zeros(
+            (batch.token_count, batch.hidden_dim),
+            dtype=torch.float32,
+            device=batch.hidden_states.device,
+        )
+        failures = await dispatch_once(
+            plans,
+            pools,
+            accumulator,
+            monotonic_deadline=monotonic_deadline,
+        )
     if not failures:
+        assert accumulator is not None
         return accumulator.to(batch.hidden_states.dtype)
 
     nonretryable = next(
@@ -224,6 +246,7 @@ async def execute_routed_layer(
         selector,
         excluded_by_expert=failed_workers,
         fallback_to_excluded=True,
+        reuse_complete_tensors=False,
     )
     if any(_uses_failed_process(plan, failed_workers) for plan in retry_plans):
         remaining = monotonic_deadline - clock()
@@ -233,6 +256,12 @@ async def execute_routed_layer(
         if monotonic_deadline - clock() <= 0:
             raise _deadline_error("the Routed layer deadline expired before its retry")
 
+    if accumulator is None:
+        accumulator = torch.zeros(
+            (batch.token_count, batch.hidden_dim),
+            dtype=torch.float32,
+            device=batch.hidden_states.device,
+        )
     retry_failures = await dispatch_once(
         retry_plans,
         pools,

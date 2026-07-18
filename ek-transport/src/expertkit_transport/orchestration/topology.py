@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from types import MappingProxyType
 
 from expertkit_transport.contracts import WorkerTransport
@@ -56,6 +56,7 @@ class WorkerTarget:
 
 
 RouteKey = tuple[int, int]
+_EMPTY_LAYER_ROUTES: Mapping[int, tuple[WorkerTarget, ...]] = MappingProxyType({})
 
 
 @dataclass(frozen=True, slots=True)
@@ -65,12 +66,17 @@ class TopologySnapshot:
     instance_id: int
     version: int
     routes: Mapping[RouteKey, tuple[WorkerTarget, ...]]
+    _routes_by_layer: Mapping[
+        int,
+        Mapping[int, tuple[WorkerTarget, ...]],
+    ] = field(init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         _require_unsigned("instance_id", self.instance_id, _UINT64_MAX)
         _require_unsigned("version", self.version, _UINT64_MAX)
 
         copied: dict[RouteKey, tuple[WorkerTarget, ...]] = {}
+        routes_by_layer: dict[int, dict[int, tuple[WorkerTarget, ...]]] = {}
         targets_by_identity: dict[WorkerIdentity, WorkerTarget] = {}
         for (layer_id, expert_id), replicas in self.routes.items():
             _require_unsigned("layer_id", layer_id, _UINT32_MAX)
@@ -86,18 +92,23 @@ class TopologySnapshot:
                 if existing != target:
                     raise ValueError("one Worker process must have consistent route metadata")
             copied[(layer_id, expert_id)] = normalized
+            routes_by_layer.setdefault(layer_id, {})[expert_id] = normalized
         object.__setattr__(self, "routes", MappingProxyType(copied))
+        object.__setattr__(
+            self,
+            "_routes_by_layer",
+            MappingProxyType(
+                {
+                    layer_id: MappingProxyType(layer_routes)
+                    for layer_id, layer_routes in routes_by_layer.items()
+                }
+            ),
+        )
 
     def layer_routes(self, layer_id: int) -> Mapping[int, tuple[WorkerTarget, ...]]:
         """Return the ready replicas indexed by expert number for one layer."""
 
-        return MappingProxyType(
-            {
-                expert_id: replicas
-                for (route_layer, expert_id), replicas in self.routes.items()
-                if route_layer == layer_id
-            }
-        )
+        return self._routes_by_layer.get(layer_id, _EMPTY_LAYER_ROUTES)
 
 
 class TopologyProvider(ABC):

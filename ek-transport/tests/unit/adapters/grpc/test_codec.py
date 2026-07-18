@@ -15,7 +15,7 @@ from expertkit_transport.adapters.grpc import (
     encode_request,
     encode_success_response,
 )
-from expertkit_transport.adapters.grpc.codec import decode_request_with_size
+from expertkit_transport.adapters.grpc.codec import _raw_bytes, decode_request_with_size
 from expertkit_transport.contracts import (
     TransportError,
     TransportErrorCode,
@@ -80,6 +80,12 @@ def test_request_fields_contain_little_endian_raw_tensors() -> None:
         "0000e04000000041000010410000803f0000004000004040"
     )
     assert request.expert_ids == bytes.fromhex("01000000ffffffff0000000003000000")
+
+
+def test_raw_bytes_accepts_cpu_tensor_requiring_grad() -> None:
+    tensor = torch.ones((1, 2), dtype=torch.float32, requires_grad=True)
+
+    assert len(_raw_bytes(tensor)) == tensor.numel() * tensor.element_size()
 
 
 def test_decoded_request_reports_exact_tensor_backing_bytes() -> None:
@@ -176,7 +182,7 @@ def test_decode_rejects_invalid_routing_values(
         decode_request(request.SerializeToString(), spec())
 
 
-def test_encode_rejects_distinct_expert_list_drift() -> None:
+def test_receiver_derives_experts_independently_of_sender_metadata() -> None:
     source = worker_batch()
     drifted = WorkerBatch(
         instance_id=source.instance_id,
@@ -189,8 +195,9 @@ def test_encode_rejects_distinct_expert_list_drift() -> None:
         distinct_expert_ids=(0, 1),
     )
 
-    with pytest.raises(GrpcProtocolError, match="distinct_expert_ids"):
-        encode_request(drifted, spec())
+    decoded = decode_request(encode_request(drifted, spec()), spec())
+
+    assert decoded.distinct_expert_ids == (0, 1, 3)
 
 
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32])

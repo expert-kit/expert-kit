@@ -62,6 +62,7 @@ def routed_batch() -> RoutedLayerBatch:
             [[0.7, 0.3], [0.2, 0.8], [0.6, 0.4]],
             dtype=torch.float32,
         ),
+        distinct_expert_ids=(0, 1, 2),
     )
 
 
@@ -111,6 +112,26 @@ def test_grouping_keeps_one_row_and_fixed_top_k_per_worker() -> None:
     assert b.distinct_expert_ids == (1,)
 
 
+def test_single_worker_reuses_complete_routing_tensors() -> None:
+    worker = target("worker-a")
+    source = routed_batch()
+    snapshot = TopologySnapshot(
+        instance_id=7,
+        version=11,
+        routes={(2, expert_id): (worker,) for expert_id in (0, 1, 2)},
+    )
+
+    plans = group_worker_batches(source, snapshot, RoundRobinSelector())
+
+    assert len(plans) == 1
+    physical = plans[0].batch
+    assert physical.hidden_states is source.hidden_states
+    assert physical.expert_ids is source.expert_ids
+    assert physical.routing_weights is source.routing_weights
+    assert physical.token_indices is None
+    assert physical.distinct_expert_ids == (0, 1, 2)
+
+
 def test_grouping_splits_only_between_token_rows() -> None:
     worker_a = target("worker-a", max_batch_tokens=1)
     worker_b = target("worker-b", max_batch_tokens=2)
@@ -127,6 +148,27 @@ def test_grouping_splits_only_between_token_rows() -> None:
     assert [batch.token_count for batch in a_plans] == [1, 1, 1]
     assert [batch.token_indices.tolist() for batch in b_plans] == [[0, 1]]
     assert a_plans[2].expert_ids.tolist() == [[2, 0]]
+    assert [batch.distinct_expert_ids for batch in a_plans] == [
+        (0,),
+        (2,),
+        (0, 2),
+    ]
+    assert b_plans[0].distinct_expert_ids == (1,)
+
+
+def test_single_worker_split_keeps_exact_chunk_expert_lists() -> None:
+    worker = target("worker-a", max_batch_tokens=2)
+    source = routed_batch()
+    snapshot = TopologySnapshot(
+        instance_id=7,
+        version=11,
+        routes={(2, expert_id): (worker,) for expert_id in (0, 1, 2)},
+    )
+
+    plans = group_worker_batches(source, snapshot, RoundRobinSelector())
+
+    assert [plan.batch.token_indices.tolist() for plan in plans] == [[0, 1], [2]]
+    assert [plan.batch.distinct_expert_ids for plan in plans] == [(0, 1, 2), (0, 2)]
 
 
 def test_round_robin_selects_one_replica_per_expert_per_call() -> None:
@@ -143,6 +185,7 @@ def test_round_robin_selects_one_replica_per_expert_per_call() -> None:
         hidden_states=torch.zeros((2, 4), dtype=torch.float16),
         expert_ids=torch.zeros((2, 1), dtype=torch.int32),
         routing_weights=torch.ones((2, 1), dtype=torch.float32),
+        distinct_expert_ids=(0,),
     )
     selector = RoundRobinSelector()
 
@@ -170,48 +213,6 @@ def test_grouping_reports_every_expert_without_a_ready_route() -> None:
     assert caught.value.unavailable_expert_ids == (1, 2)
 
 
-@pytest.mark.parametrize(
-    ("expert_ids", "routing_weights", "diagnostic"),
-    [
-        (
-            torch.tensor([[-2, 0]], dtype=torch.int32),
-            torch.tensor([[0.0, 1.0]], dtype=torch.float32),
-            "below -1",
-        ),
-        (
-            torch.tensor([[-1, 0]], dtype=torch.int32),
-            torch.tensor([[0.5, 0.5]], dtype=torch.float32),
-            "zero routing weight",
-        ),
-    ],
-)
-def test_grouping_rejects_invalid_routing_values(
-    expert_ids: torch.Tensor,
-    routing_weights: torch.Tensor,
-    diagnostic: str,
-) -> None:
-    worker_a = target("worker-a")
-    batch = RoutedLayerBatch(
-        instance_id=7,
-        layer_id=2,
-        hidden_states=torch.zeros((1, 4), dtype=torch.float16),
-        expert_ids=expert_ids,
-        routing_weights=routing_weights,
-    )
-    snapshot = TopologySnapshot(
-        instance_id=7,
-        version=11,
-        routes={(2, 0): (worker_a,)},
-    )
-
-    with pytest.raises(TransportError) as caught:
-        group_worker_batches(batch, snapshot, RoundRobinSelector())
-
-    assert caught.value.code is TransportErrorCode.INVALID_REQUEST
-    assert caught.value.retryable is False
-    assert diagnostic in caught.value.diagnostic
-
-
 def test_retry_selection_can_exclude_failed_worker_start() -> None:
     worker_a = target("worker-a")
     worker_b = target("worker-b")
@@ -226,6 +227,7 @@ def test_retry_selection_can_exclude_failed_worker_start() -> None:
         hidden_states=torch.zeros((1, 4), dtype=torch.float16),
         expert_ids=torch.zeros((1, 1), dtype=torch.int32),
         routing_weights=torch.ones((1, 1), dtype=torch.float32),
+        distinct_expert_ids=(0,),
     )
 
     plans = group_worker_batches(
@@ -251,6 +253,7 @@ def test_retry_selection_fails_when_every_replica_is_excluded() -> None:
         hidden_states=torch.zeros((1, 4), dtype=torch.float16),
         expert_ids=torch.zeros((1, 1), dtype=torch.int32),
         routing_weights=torch.ones((1, 1), dtype=torch.float32),
+        distinct_expert_ids=(0,),
     )
 
     with pytest.raises(TransportError) as caught:

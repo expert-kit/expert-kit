@@ -45,6 +45,15 @@ def _validate_routing_tensors(
         raise ValueError("routing_weights and hidden_states must be on the same device")
 
 
+def _validate_distinct_expert_ids(expert_ids: tuple[int, ...]) -> None:
+    previous = -1
+    for expert_id in expert_ids:
+        _require_unsigned("distinct expert ID", expert_id, _UINT32_MAX)
+        if expert_id <= previous:
+            raise ValueError("distinct_expert_ids must be sorted with no duplicates")
+        previous = expert_id
+
+
 @dataclass(frozen=True, slots=True)
 class RoutedLayerBatch:
     """Hold the final assignments produced by one model router.
@@ -56,10 +65,12 @@ class RoutedLayerBatch:
         expert_ids: Stable expert numbers shaped `[token_count, top_k]` using
             int32. A `-1` position must have zero routing weight.
         routing_weights: Final FP32 routing weights shaped `[token_count, top_k]`.
+        distinct_expert_ids: Sorted distinct valid expert numbers derived while
+            validating the final router output.
 
     Note:
-        Construction checks Tensor metadata only. Grouping validates routing
-        values while resolving them against one Topology snapshot.
+        Construction checks Tensor metadata and Host metadata only. The Frontend
+        validates routing values once before constructing this batch.
     """
 
     instance_id: int
@@ -67,8 +78,10 @@ class RoutedLayerBatch:
     hidden_states: torch.Tensor
     expert_ids: torch.Tensor
     routing_weights: torch.Tensor
+    distinct_expert_ids: tuple[int, ...]
 
     def __post_init__(self) -> None:
+        object.__setattr__(self, "distinct_expert_ids", tuple(self.distinct_expert_ids))
         _require_unsigned("instance_id", self.instance_id, _UINT64_MAX)
         _require_unsigned("layer_id", self.layer_id, _UINT32_MAX)
         _validate_routing_tensors(
@@ -76,6 +89,7 @@ class RoutedLayerBatch:
             self.expert_ids,
             self.routing_weights,
         )
+        _validate_distinct_expert_ids(self.distinct_expert_ids)
 
     @property
     def token_count(self) -> int:
@@ -173,12 +187,7 @@ class WorkerBatch:
         if self.routing_weights.device != self.hidden_states.device:
             raise ValueError("routing_weights and hidden_states must be on the same device")
 
-        previous = -1
-        for expert_id in self.distinct_expert_ids:
-            _require_unsigned("distinct expert ID", expert_id, _UINT32_MAX)
-            if expert_id <= previous:
-                raise ValueError("distinct_expert_ids must be sorted with no duplicates")
-            previous = expert_id
+        _validate_distinct_expert_ids(self.distinct_expert_ids)
 
     @property
     def token_count(self) -> int:

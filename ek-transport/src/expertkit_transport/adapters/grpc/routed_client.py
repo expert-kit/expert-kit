@@ -82,6 +82,7 @@ class GrpcRoutedMoEClient:
         hidden_states: torch.Tensor,
         expert_ids: torch.Tensor,
         routing_weights: torch.Tensor,
+        distinct_expert_ids: tuple[int, ...],
         monotonic_deadline: float,
     ) -> torch.Tensor:
         """Return the weighted and aggregated result for one routed layer.
@@ -91,6 +92,7 @@ class GrpcRoutedMoEClient:
             hidden_states: Activations shaped `[token_count, hidden_dim]`.
             expert_ids: Final int32 assignments shaped `[token_count, top_k]`.
             routing_weights: Final FP32 weights shaped `[token_count, top_k]`.
+            distinct_expert_ids: Sorted distinct valid expert numbers.
 
         Returns:
             Tensor shaped `[token_count, hidden_dim]` on the input device and
@@ -113,6 +115,7 @@ class GrpcRoutedMoEClient:
             hidden_states=hidden_states,
             expert_ids=expert_ids,
             routing_weights=routing_weights,
+            distinct_expert_ids=distinct_expert_ids,
         )
         return await execute_routed_layer(
             batch,
@@ -212,6 +215,7 @@ class BlockingGrpcRoutedMoEClient:
         hidden_states: torch.Tensor,
         expert_ids: torch.Tensor,
         routing_weights: torch.Tensor,
+        distinct_expert_ids: tuple[int, ...],
         timeout_seconds: float,
     ) -> torch.Tensor:
         """Block the caller until one asynchronous routed-layer call is submitted."""
@@ -235,6 +239,7 @@ class BlockingGrpcRoutedMoEClient:
                 hidden_states=hidden_states,
                 expert_ids=expert_ids,
                 routing_weights=routing_weights,
+                distinct_expert_ids=distinct_expert_ids,
                 monotonic_deadline=deadline,
                 input_ready=input_ready,
                 completion=completion,
@@ -310,6 +315,7 @@ class BlockingGrpcRoutedMoEClient:
         hidden_states: torch.Tensor,
         expert_ids: torch.Tensor,
         routing_weights: torch.Tensor,
+        distinct_expert_ids: tuple[int, ...],
         monotonic_deadline: float,
         input_ready: torch.cuda.Event | None,
         completion: threading.Event,
@@ -322,6 +328,7 @@ class BlockingGrpcRoutedMoEClient:
                 hidden_states=hidden_states,
                 expert_ids=expert_ids,
                 routing_weights=routing_weights,
+                distinct_expert_ids=distinct_expert_ids,
                 monotonic_deadline=monotonic_deadline,
             )
             output_ready: torch.cuda.Event | None = None

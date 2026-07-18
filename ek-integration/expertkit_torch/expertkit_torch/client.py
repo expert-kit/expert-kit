@@ -123,7 +123,7 @@ class RoutedMoEClient:
         ):
             raise ValueError("all Routed-MoE tensors must use the activation device")
 
-        encoded_experts, fp32_weights = validate_and_convert_routing(
+        encoded_experts, fp32_weights, distinct_expert_ids = validate_and_convert_routing(
             expert_ids,
             routing_weights,
             experts_per_layer=self._experts_per_layer,
@@ -136,6 +136,7 @@ class RoutedMoEClient:
             hidden_states=hidden_states,
             expert_ids=encoded_experts,
             routing_weights=fp32_weights,
+            distinct_expert_ids=distinct_expert_ids,
             timeout_seconds=self._timeout_seconds,
         )
 

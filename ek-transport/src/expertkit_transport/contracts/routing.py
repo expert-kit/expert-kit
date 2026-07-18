@@ -10,12 +10,13 @@ def validate_and_convert_routing(
     routing_weights: torch.Tensor,
     *,
     experts_per_layer: int,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Return validated int32 expert IDs and FP32 routing weights.
+) -> tuple[torch.Tensor, torch.Tensor, tuple[int, ...]]:
+    """Return validated routing Tensors and their sorted distinct expert IDs.
 
-    This function reads Tensor values and may synchronize a CUDA device. Call it
-    once on final router output, before an integer narrowing conversion could
-    change an invalid expert ID into a valid one.
+    The fixed-size validation summary is copied to the Host once. This may
+    synchronize a CUDA device. Call the function once on final router output,
+    before an integer narrowing conversion could change an invalid expert ID
+    into a valid one.
     """
 
     if (
@@ -42,13 +43,33 @@ def validate_and_convert_routing(
         )
     invalid_range = (checked_ids < -1) | (checked_ids >= experts_per_layer)
     invalid_weight = (checked_ids == -1) & (routing_weights != 0)
-    invalid_flags = torch.stack((invalid_range.any(), invalid_weight.any()))
-    range_error, weight_error = invalid_flags.detach().to(device="cpu").tolist()
+    valid = (checked_ids >= 0) & (checked_ids < experts_per_layer)
+    safe_ids = torch.where(valid, checked_ids, 0).to(dtype=torch.int64).flatten()
+
+    summary = torch.zeros(
+        experts_per_layer + 2,
+        dtype=torch.int32,
+        device=expert_ids.device,
+    )
+    summary[:2].copy_(
+        torch.stack((invalid_range.any(), invalid_weight.any())).to(dtype=torch.int32)
+    )
+    summary[2:].scatter_add_(
+        0,
+        safe_ids,
+        valid.flatten().to(dtype=torch.int32),
+    )
+    host_summary = summary.detach().to(device="cpu").tolist()
+    range_error, weight_error = host_summary[:2]
     if range_error:
         raise ValueError("expert_ids must be within the configured expert range [-1, count)")
     if weight_error:
         raise ValueError("an expert ID of -1 must have zero routing weight")
+    distinct_expert_ids = tuple(
+        expert_id for expert_id, assignment_count in enumerate(host_summary[2:]) if assignment_count
+    )
     return (
         expert_ids.to(dtype=torch.int32),
         routing_weights.to(dtype=torch.float32),
+        distinct_expert_ids,
     )
