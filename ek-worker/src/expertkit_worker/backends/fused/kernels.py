@@ -56,7 +56,7 @@ def _expert_gemm_kernel(
         slot_mapping_ptr + route_id,
         mask=route_is_valid,
         other=-1,
-    )
+    ).to(tl.int64)
 
     row_offsets = tl.arange(0, BLOCK_M)
     assignment_offsets = tl.where(row_offsets == 0, assignment_id, num_assignments)

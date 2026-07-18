@@ -15,6 +15,7 @@ from expertkit_worker.backends.fused import (
     FusedExpertWeights,
     FusedWeightAdapter,
 )
+from expertkit_worker.backends.fused.kernels import launch_fused_moe
 from expertkit_worker.weights import ReadyWeightTable
 
 pytestmark = [
@@ -210,3 +211,57 @@ def test_fused_backend_resource_plan_covers_all_workspace_and_mapping_bytes() ->
     expected_workspace_elements = 5 * _TOP_K * (3 * _INTERMEDIATE_DIM + _HIDDEN_DIM)
     assert estimate.temporary_bytes_per_active_batch == expected_workspace_elements * 2
     assert estimate.shared_temporary_bytes == 2 * 4 * 4
+
+
+def test_fused_kernel_addresses_qwen_weight_slots_with_64_bit_offsets() -> None:
+    free_bytes, _total_bytes = torch.cuda.mem_get_info("cuda:0")
+    required_bytes = 11 * 1024**3
+    if free_bytes < required_bytes:
+        pytest.skip("test requires 11 GiB of free CUDA memory")
+
+    device = torch.device("cuda:0")
+    hidden_dim = 2048
+    intermediate_dim = 768
+    top_k = 8
+    selected_slot = 700
+    slot_count = selected_slot + 1
+    hidden_states = torch.randn(1, hidden_dim, device=device, dtype=torch.bfloat16)
+    expert_ids = torch.zeros(1, top_k, device=device, dtype=torch.int32)
+    routing_weights = torch.full(
+        (1, top_k),
+        1.0 / top_k,
+        device=device,
+        dtype=torch.float32,
+    )
+    gate_up = torch.empty(
+        slot_count,
+        2 * intermediate_dim,
+        hidden_dim,
+        device=device,
+        dtype=torch.bfloat16,
+    )
+    down = torch.empty(
+        slot_count,
+        hidden_dim,
+        intermediate_dim,
+        device=device,
+        dtype=torch.bfloat16,
+    )
+    gate_up[selected_slot].normal_(std=0.01)
+    down[selected_slot].normal_(std=0.01)
+    slot_mapping = torch.full((128,), -1, device=device, dtype=torch.int32)
+    slot_mapping[0] = selected_slot
+    output = torch.empty_like(hidden_states)
+
+    launch_fused_moe(
+        hidden_states=hidden_states,
+        expert_ids=expert_ids,
+        routing_weights=routing_weights,
+        gate_up=gate_up,
+        down=down,
+        slot_mapping=slot_mapping,
+        prepared_output=output,
+    )
+    torch.cuda.synchronize()
+
+    assert torch.isfinite(output).all()
