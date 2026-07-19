@@ -191,31 +191,37 @@ If a Worker rejects its assignment because `max_experts` is too small, add
 capacity and run the assignment again instead of increasing the configured
 budget past actual free device memory.
 
-## 6. Run the fixed Qwen check
+## 6. Run the Qwen benchmark
 
 In the Torch Frontend environment, use Controller port 5002:
 
 ```bash
 source ek-integration/expertkit_torch/.venv/bin/activate
-ek-qwen-smoke \
+ek-torch-benchmark \
   --model-path "$QWEN_ROOT" \
+  --mode expertkit \
   --controller-endpoint 127.0.0.1:5002 \
-  --instance-id 1
+  --instance-id 1 \
+  --batch-sizes 1 \
+  --input-length 128 \
+  --output-length 20 \
+  --warmup-runs 1 \
+  --runs 5
 ```
 
-Replace `1` with the instance ID queried above. The command always uses one
-prompt and `max_new_tokens=20`. Success prints `Qwen smoke passed`, a generated
-token count between 1 and 20, and non-empty decoded text. It does not require an
-exact expected sentence.
+Replace `1` with the instance ID queried above. The command performs exact
+fixed-length prefill and decode work, then prints median prefill, decode, and
+complete output throughput. The benchmark ignores EOS so every measured run
+executes 20 output-token steps.
 
-The same check is exposed as an environment-gated test:
+The same path is exposed as an environment-gated test:
 
 ```bash
 cd ek-integration/expertkit_torch
 EK_QWEN_MODEL_PATH="$QWEN_ROOT" \
 EK_QWEN_CONTROLLER_ENDPOINT=127.0.0.1:5002 \
 EK_QWEN_INSTANCE_ID=1 \
-uv run pytest tests/test_qwen_generation.py -m qwen
+uv run pytest tests/test_deployment_benchmark.py -m qwen
 ```
 
 ## Current limits
@@ -223,7 +229,8 @@ uv run pytest tests/test_qwen_generation.py -m qwen
 - Computation Transport is gRPC-only and copies Tensor bytes through Host
   memory. There is no current SHM, RDMA, NCCL, or NVSHMEM path.
 - Torch is the only Backend targeted for full migration qualification.
-- GGML is experimental and CPU-only. The fused Backend is currently disabled.
+- GGML is experimental and CPU-only. The fused Backend is experimental and
+  requires a compatible CUDA and Triton environment.
 - The Controller does not relay computation as a fallback during topology
   changes. Frontend requests can receive retryable failures until a replacement
   topology is installed.

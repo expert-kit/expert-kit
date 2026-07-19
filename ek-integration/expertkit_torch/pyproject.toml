@@ -15,7 +15,7 @@ dependencies = [
 ]
 
 [project.scripts]
-ek-qwen-smoke = "expertkit_torch.qwen_smoke:main"
+ek-torch-benchmark = "expertkit_torch.benchmark.cli:main"
 
 [tool.uv.sources]
 expertkit-transport = { path = "../../ek-transport", editable = true }
@@ -30,6 +30,7 @@ dev = [
 testpaths = ["tests"]
 markers = [
     "qwen: requires a supported Qwen model and a running Expert Kit deployment",
+    "deepseek_v2: requires DeepSeek-V2 weights and a running Expert Kit deployment",
 ]
 
 [tool.ruff]

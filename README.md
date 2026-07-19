@@ -50,19 +50,20 @@ flowchart LR
 - The computation Transport is gRPC-only. SHM and RDMA are not available in
   this MVP.
 - Torch is the default and the only Backend targeted for full qualification.
-- GGML is an experimental CPU-only Backend. The fused Backend remains
-  experimental and disabled until its implementation passes its minimum
-  checks.
+- GGML is an experimental CPU-only Backend. The fused Backend is experimental
+  and requires a compatible CUDA and Triton environment.
 - Torch and vLLM Frontend integrations use the routed-layer interface. vLLM is
   version-pinned but its runtime qualification is deferred.
+- The Torch integration supports Qwen3-MoE, DeepSeek-V2, DeepSeek-V3, and
+  Mixtral through one model loader and benchmark command.
 - Connections use plaintext gRPC and HTTP without TLS or application
   authentication.
 
 ## Quick start
 
 Use the [Qwen3-30B-A3B guide](./doc/tutorial/standalone/qwen3-moe-a3b-demo.md)
-for the current end-to-end deployment and the fixed `batch_size=1`,
-`max_new_tokens=20` generation check.
+for the current end-to-end deployment. The Torch benchmark accepts explicit
+batch sizes, input length, output length, warmup count, and measured-run count.
 
 Package-specific documentation:
 
