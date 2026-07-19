@@ -5,6 +5,7 @@ from __future__ import annotations
 import math
 import os
 from dataclasses import dataclass
+from typing import Literal
 
 
 @dataclass(frozen=True, slots=True)
@@ -14,6 +15,7 @@ class EkClientConfig:
     controller_endpoint: str
     instance_id: int
     timeout_seconds: float
+    transport: Literal["grpc", "shm"]
 
 
 def collect_ek_client_config() -> EkClientConfig:
@@ -36,4 +38,7 @@ def collect_ek_client_config() -> EkClientConfig:
         raise ValueError("EK_CLIENT_TIMEOUT must be numeric") from error
     if not math.isfinite(timeout_seconds) or timeout_seconds <= 0:
         raise ValueError("EK_CLIENT_TIMEOUT must be finite and positive")
-    return EkClientConfig(endpoint, instance_id, timeout_seconds)
+    transport = os.getenv("EK_WORKER_TRANSPORT", "grpc").strip()
+    if transport not in ("grpc", "shm"):
+        raise ValueError("EK_WORKER_TRANSPORT must be 'grpc' or 'shm'")
+    return EkClientConfig(endpoint, instance_id, timeout_seconds, transport)

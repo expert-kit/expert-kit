@@ -10,13 +10,17 @@ from expertkit_transport._proto.ek.worker.v2 import (
 )
 
 
-def test_computation_service_is_unary() -> None:
-    method = computation_pb2.DESCRIPTOR.services_by_name["ComputationService"].methods_by_name[
-        "Execute"
-    ]
+def test_computation_service_methods_are_unary() -> None:
+    methods = computation_pb2.DESCRIPTOR.services_by_name["ComputationService"].methods_by_name
 
-    assert method.client_streaming is False
-    assert method.server_streaming is False
+    assert set(methods) == {
+        "Execute",
+        "OpenSharedMemory",
+        "ExecuteSharedMemory",
+        "CloseSharedMemory",
+    }
+    assert all(not method.client_streaming for method in methods.values())
+    assert all(not method.server_streaming for method in methods.values())
     assert hasattr(computation_pb2_grpc, "ComputationServiceStub")
 
 
@@ -75,6 +79,20 @@ def test_execute_response_result_is_exclusive() -> None:
     assert response.WhichOneof("result") == "error"
     assert response.partial_output == b""
     assert list(response.error.unavailable_expert_ids) == [2, 5]
+
+
+def test_shared_memory_execute_metadata_has_stable_field_numbers() -> None:
+    fields = computation_pb2.ExecuteSharedMemoryRequest.DESCRIPTOR.fields_by_name
+
+    assert {name: field.number for name, field in fields.items()} == {
+        "session_id": 1,
+        "slot_index": 2,
+        "generation": 3,
+        "layer_id": 4,
+        "topology_version": 5,
+        "token_count": 6,
+        "timeout_micros": 7,
+    }
 
 
 def test_optional_recovery_versions_preserve_presence() -> None:

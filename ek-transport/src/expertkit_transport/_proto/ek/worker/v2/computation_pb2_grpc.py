@@ -3,7 +3,9 @@
 import grpc
 import warnings
 
-from expertkit_transport._proto.ek.worker.v2 import computation_pb2 as ek_dot_worker_dot_v2_dot_computation__pb2
+from expertkit_transport._proto.ek.worker.v2 import (
+    computation_pb2 as ek_dot_worker_dot_v2_dot_computation__pb2,
+)
 
 GRPC_GENERATED_VERSION = '1.71.0'
 GRPC_VERSION = grpc.__version__
@@ -40,6 +42,21 @@ class ComputationServiceStub(object):
                 request_serializer=ek_dot_worker_dot_v2_dot_computation__pb2.ExecuteRequest.SerializeToString,
                 response_deserializer=ek_dot_worker_dot_v2_dot_computation__pb2.ExecuteResponse.FromString,
                 _registered_method=True)
+        self.OpenSharedMemory = channel.unary_unary(
+                '/ek.worker.v2.ComputationService/OpenSharedMemory',
+                request_serializer=ek_dot_worker_dot_v2_dot_computation__pb2.OpenSharedMemoryRequest.SerializeToString,
+                response_deserializer=ek_dot_worker_dot_v2_dot_computation__pb2.OpenSharedMemoryResponse.FromString,
+                _registered_method=True)
+        self.ExecuteSharedMemory = channel.unary_unary(
+                '/ek.worker.v2.ComputationService/ExecuteSharedMemory',
+                request_serializer=ek_dot_worker_dot_v2_dot_computation__pb2.ExecuteSharedMemoryRequest.SerializeToString,
+                response_deserializer=ek_dot_worker_dot_v2_dot_computation__pb2.ExecuteSharedMemoryResponse.FromString,
+                _registered_method=True)
+        self.CloseSharedMemory = channel.unary_unary(
+                '/ek.worker.v2.ComputationService/CloseSharedMemory',
+                request_serializer=ek_dot_worker_dot_v2_dot_computation__pb2.CloseSharedMemoryRequest.SerializeToString,
+                response_deserializer=ek_dot_worker_dot_v2_dot_computation__pb2.CloseSharedMemoryResponse.FromString,
+                _registered_method=True)
 
 
 class ComputationServiceServicer(object):
@@ -52,6 +69,24 @@ class ComputationServiceServicer(object):
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def OpenSharedMemory(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def ExecuteSharedMemory(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def CloseSharedMemory(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
 
 def add_ComputationServiceServicer_to_server(servicer, server):
     rpc_method_handlers = {
@@ -59,6 +94,21 @@ def add_ComputationServiceServicer_to_server(servicer, server):
                     servicer.Execute,
                     request_deserializer=ek_dot_worker_dot_v2_dot_computation__pb2.ExecuteRequest.FromString,
                     response_serializer=ek_dot_worker_dot_v2_dot_computation__pb2.ExecuteResponse.SerializeToString,
+            ),
+            'OpenSharedMemory': grpc.unary_unary_rpc_method_handler(
+                    servicer.OpenSharedMemory,
+                    request_deserializer=ek_dot_worker_dot_v2_dot_computation__pb2.OpenSharedMemoryRequest.FromString,
+                    response_serializer=ek_dot_worker_dot_v2_dot_computation__pb2.OpenSharedMemoryResponse.SerializeToString,
+            ),
+            'ExecuteSharedMemory': grpc.unary_unary_rpc_method_handler(
+                    servicer.ExecuteSharedMemory,
+                    request_deserializer=ek_dot_worker_dot_v2_dot_computation__pb2.ExecuteSharedMemoryRequest.FromString,
+                    response_serializer=ek_dot_worker_dot_v2_dot_computation__pb2.ExecuteSharedMemoryResponse.SerializeToString,
+            ),
+            'CloseSharedMemory': grpc.unary_unary_rpc_method_handler(
+                    servicer.CloseSharedMemory,
+                    request_deserializer=ek_dot_worker_dot_v2_dot_computation__pb2.CloseSharedMemoryRequest.FromString,
+                    response_serializer=ek_dot_worker_dot_v2_dot_computation__pb2.CloseSharedMemoryResponse.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -89,6 +139,87 @@ class ComputationService(object):
             '/ek.worker.v2.ComputationService/Execute',
             ek_dot_worker_dot_v2_dot_computation__pb2.ExecuteRequest.SerializeToString,
             ek_dot_worker_dot_v2_dot_computation__pb2.ExecuteResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def OpenSharedMemory(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/ek.worker.v2.ComputationService/OpenSharedMemory',
+            ek_dot_worker_dot_v2_dot_computation__pb2.OpenSharedMemoryRequest.SerializeToString,
+            ek_dot_worker_dot_v2_dot_computation__pb2.OpenSharedMemoryResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def ExecuteSharedMemory(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/ek.worker.v2.ComputationService/ExecuteSharedMemory',
+            ek_dot_worker_dot_v2_dot_computation__pb2.ExecuteSharedMemoryRequest.SerializeToString,
+            ek_dot_worker_dot_v2_dot_computation__pb2.ExecuteSharedMemoryResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def CloseSharedMemory(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/ek.worker.v2.ComputationService/CloseSharedMemory',
+            ek_dot_worker_dot_v2_dot_computation__pb2.CloseSharedMemoryRequest.SerializeToString,
+            ek_dot_worker_dot_v2_dot_computation__pb2.CloseSharedMemoryResponse.FromString,
             options,
             channel_credentials,
             insecure,

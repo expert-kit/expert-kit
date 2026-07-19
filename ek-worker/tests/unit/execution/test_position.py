@@ -59,6 +59,10 @@ class FakeReceivedBatch(ReceivedWorkerBatch):
     def cancelled(self) -> bool:
         return self.is_cancelled
 
+    @property
+    def output_destination(self) -> torch.Tensor | None:
+        return None
+
     def release_input(self) -> None:
         self.input_released = True
         self._batch = None

@@ -8,6 +8,7 @@ import math
 import threading
 import time
 from collections.abc import Callable
+from typing import Literal
 
 import torch
 
@@ -37,6 +38,7 @@ class GrpcRoutedMoEClient:
         top_k: int,
         dtype: torch.dtype,
         device: torch.device | str,
+        worker_transport: Literal["grpc", "shm"] = "grpc",
         same_worker_retry_delay_seconds: float = 0.001,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
@@ -61,6 +63,7 @@ class GrpcRoutedMoEClient:
             top_k=top_k,
             dtype=dtype,
             device=self._device,
+            worker_transport=worker_transport,
             clock=clock,
         )
         self._selector = RoundRobinSelector()
@@ -157,6 +160,7 @@ class BlockingGrpcRoutedMoEClient:
         top_k: int,
         dtype: torch.dtype,
         device: torch.device | str,
+        worker_transport: Literal["grpc", "shm"] = "grpc",
         same_worker_retry_delay_seconds: float = 0.001,
     ) -> None:
         self._client_args = (controller_endpoint,)
@@ -168,6 +172,7 @@ class BlockingGrpcRoutedMoEClient:
             "top_k": top_k,
             "dtype": dtype,
             "device": device,
+            "worker_transport": worker_transport,
             "same_worker_retry_delay_seconds": same_worker_retry_delay_seconds,
         }
         self._loop: asyncio.AbstractEventLoop | None = None

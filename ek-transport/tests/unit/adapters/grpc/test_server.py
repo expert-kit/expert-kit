@@ -198,12 +198,12 @@ def test_server_allocates_direct_cpu_position_buffers() -> None:
     torch.testing.assert_close(expert_ids, compact.expert_ids)
     torch.testing.assert_close(routing_weights, compact.routing_weights)
     output = torch.full((2, 3), 7, dtype=torch.float16)
-    assert buffers.copy_output(output) is output
+    assert buffers.copy_output(output, None) is output
     assert buffers.host_staging_bytes == 0
 
     buffers.close()
     with pytest.raises(RuntimeError, match="closed"):
-        buffers.copy_output(output)
+        buffers.copy_output(output, None)
     run(server.close())
 
 
@@ -264,14 +264,14 @@ def test_server_reuses_pinned_cuda_position_staging() -> None:
     stream = torch.cuda.Stream(device="cuda:0")
     with torch.cuda.stream(stream):
         buffers.copy_input(compact, hidden, expert_ids, routing_weights)
-        host_output = buffers.copy_output(output)
+        host_output = buffers.copy_output(output, None)
         output_pointer = host_output.data_ptr()
     stream.synchronize()
     torch.testing.assert_close(hidden.cpu(), compact.hidden_states)
     torch.testing.assert_close(host_output, torch.full((2, 3), 5, dtype=torch.float16))
 
     with torch.cuda.stream(stream):
-        second_output = buffers.copy_output(output + 1)
+        second_output = buffers.copy_output(output + 1, None)
     stream.synchronize()
     assert second_output.data_ptr() == output_pointer
     assert host_output.is_pinned()

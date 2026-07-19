@@ -7,6 +7,9 @@ import "ek/worker/v2/common.proto";
 // ComputationService executes one physical Worker batch per unary call.
 service ComputationService {
   rpc Execute(ExecuteRequest) returns (ExecuteResponse);
+  rpc OpenSharedMemory(OpenSharedMemoryRequest) returns (OpenSharedMemoryResponse);
+  rpc ExecuteSharedMemory(ExecuteSharedMemoryRequest) returns (ExecuteSharedMemoryResponse);
+  rpc CloseSharedMemory(CloseSharedMemoryRequest) returns (CloseSharedMemoryResponse);
 }
 
 // ExecuteRequest carries one fixed-top-k Worker batch as little-endian raw tensors.
@@ -53,3 +56,43 @@ message ExecuteResponse {
     ComputeError error = 2;
   }
 }
+
+// OpenSharedMemoryRequest registers fixed same-host Tensor slots.
+message OpenSharedMemoryRequest {
+  uint64 instance_id = 1;
+  string session_id = 2;
+  string segment_name = 3;
+  uint64 segment_size = 4;
+  uint32 slot_count = 5;
+  uint32 max_batch_tokens = 6;
+  uint32 hidden_dim = 7;
+  uint32 top_k = 8;
+  ActivationDType dtype = 9;
+}
+
+message OpenSharedMemoryResponse {}
+
+// ExecuteSharedMemoryRequest identifies valid rows in one registered slot.
+message ExecuteSharedMemoryRequest {
+  string session_id = 1;
+  uint32 slot_index = 2;
+  uint64 generation = 3;
+  uint32 layer_id = 4;
+  uint64 topology_version = 5;
+  uint32 token_count = 6;
+  uint64 timeout_micros = 7;
+}
+
+// ExecuteSharedMemoryResponse acknowledges that the slot output is complete.
+message ExecuteSharedMemoryResponse {
+  oneof result {
+    uint64 completed_generation = 1;
+    ComputeError error = 2;
+  }
+}
+
+message CloseSharedMemoryRequest {
+  string session_id = 1;
+}
+
+message CloseSharedMemoryResponse {}

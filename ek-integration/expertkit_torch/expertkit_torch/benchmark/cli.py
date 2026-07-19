@@ -31,6 +31,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--mode", choices=("expertkit", "local"), default="expertkit")
     parser.add_argument("--controller-endpoint", default="127.0.0.1:5002")
     parser.add_argument("--instance-id", type=_positive_int, default=1)
+    parser.add_argument("--transport", choices=("grpc", "shm"), default="grpc")
     parser.add_argument("--batch-sizes", nargs="+", type=_positive_int, default=[1])
     parser.add_argument("--input-length", type=_positive_int, default=128)
     parser.add_argument("--output-length", type=_positive_int, default=20)
@@ -90,6 +91,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         instance_id=arguments.instance_id,
         device=arguments.device,
         dtype=arguments.dtype,
+        transport=arguments.transport,
     ) as loaded:
         report = run_benchmark(
             loaded.model,
@@ -114,6 +116,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 arguments.controller_endpoint if arguments.mode == "expertkit" else None
             ),
             "instance_id": arguments.instance_id if arguments.mode == "expertkit" else None,
+            "transport": arguments.transport if arguments.mode == "expertkit" else None,
         }
         arguments.json_output.parent.mkdir(parents=True, exist_ok=True)
         arguments.json_output.write_text(

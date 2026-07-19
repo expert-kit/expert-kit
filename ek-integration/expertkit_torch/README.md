@@ -14,7 +14,7 @@ The integration targets Transformers 4.57.3 and supports:
 - Mixtral
 
 The model loader detects the family from `config.json`. One Frontend process
-uses one device. The normal computation path is plaintext gRPC, so deployments
+uses one device. The default computation path is plaintext gRPC, so deployments
 must run on a trusted and isolated cluster network.
 
 ## Install
@@ -75,6 +75,7 @@ ek-torch-benchmark \
   --mode expertkit \
   --controller-endpoint 10.0.0.10:5002 \
   --instance-id 1 \
+  --transport grpc \
   --batch-sizes 1 32 \
   --input-length 128 \
   --output-length 20 \
@@ -84,6 +85,17 @@ ek-torch-benchmark \
   --dtype auto \
   --json-output /tmp/deepseek-v2-benchmark.json
 ```
+
+For a Frontend and Worker on the same Host, change only:
+
+```bash
+--transport shm
+```
+
+This keeps gRPC for notifications and structured errors while moving Tensor
+bytes through fixed pinned files under `/dev/shm`. Both processes must share the
+same OS shared-memory namespace and Unix user. This option does not work across
+machines and does not remove GPU-to-Host or Host-to-GPU transfers.
 
 The command reports medians across measured runs:
 
@@ -143,4 +155,6 @@ uv run pytest tests/test_deployment_benchmark.py -m deepseek_v2
 - Full Mixtral and DeepSeek-V3 deployment tests require more device memory than
   the current development host can provide after accounting for Frontend and
   Worker copies.
-- The current gRPC path copies Tensor bytes through Host memory.
+- The gRPC path copies Tensor bytes through protobuf and Host memory.
+- The experimental shared-memory path avoids protobuf and loopback-socket
+  Tensor copies, but still stages data through pinned Host memory.

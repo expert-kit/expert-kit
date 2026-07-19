@@ -9,6 +9,7 @@ import time
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
+from typing import Literal
 
 import grpc
 import torch
@@ -79,6 +80,7 @@ class GrpcTopologyProvider(TopologyProvider):
         top_k: int,
         dtype: torch.dtype,
         device: torch.device | str,
+        worker_transport: Literal["grpc", "shm"] = "grpc",
         reconnect_delay_seconds: float = 0.1,
         clock: Callable[[], float] = time.monotonic,
         resource_factory: ResourceFactory | None = None,
@@ -98,6 +100,8 @@ class GrpcTopologyProvider(TopologyProvider):
             raise ValueError("top_k must not exceed experts_per_layer")
         if dtype not in (torch.float16, torch.bfloat16, torch.float32):
             raise ValueError("dtype must be FP16, BF16, or FP32")
+        if worker_transport not in ("grpc", "shm"):
+            raise ValueError("worker_transport must be 'grpc' or 'shm'")
         if not math.isfinite(reconnect_delay_seconds) or reconnect_delay_seconds <= 0:
             raise ValueError("reconnect_delay_seconds must be finite and positive")
 
@@ -109,6 +113,7 @@ class GrpcTopologyProvider(TopologyProvider):
         self._top_k = top_k
         self._dtype = dtype
         self._device = torch.device(device)
+        self._worker_transport = worker_transport
         self._reconnect_delay_seconds = reconnect_delay_seconds
         self._clock = clock
         self._resource_factory = resource_factory or self._create_resource
@@ -371,11 +376,21 @@ class GrpcTopologyProvider(TopologyProvider):
             top_k=self._top_k,
             dtype=self._dtype,
         )
-        transport = GrpcWorkerTransport(
-            route.endpoint,
-            batch_spec,
-            max_in_flight=route.max_in_flight,
-        )
+        if self._worker_transport == "shm":
+            from expertkit_transport.adapters.shm.client import ShmWorkerTransport
+
+            transport = ShmWorkerTransport(
+                route.endpoint,
+                batch_spec,
+                max_in_flight=route.max_in_flight,
+                device=self._device,
+            )
+        else:
+            transport = GrpcWorkerTransport(
+                route.endpoint,
+                batch_spec,
+                max_in_flight=route.max_in_flight,
+            )
         try:
             pool = OutputPool(
                 transport.output_buffers,

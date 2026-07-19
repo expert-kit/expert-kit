@@ -292,7 +292,12 @@ class ActivePosition:
             rejection = _request_end_error(received, clock)
             with _trace_span(tracer, "worker.output.prepare"):
                 response_output = (
-                    None if rejection is not None else self._transport_buffers.copy_output(output)
+                    None
+                    if rejection is not None
+                    else self._transport_buffers.copy_output(
+                        output,
+                        received.output_destination,
+                    )
                 )
             return self._set_result(response_output, rejection, completion)
         except BaseException:
@@ -344,7 +349,10 @@ class ActivePosition:
                     rejection = _request_end_error(received, clock)
                     if rejection is None:
                         with _trace_span(tracer, "worker.output.prepare"):
-                            response_output = self._transport_buffers.copy_output(output)
+                            response_output = self._transport_buffers.copy_output(
+                                output,
+                                received.output_destination,
+                            )
                 if timing_events is not None:
                     timing_events[3].record(stream)
                 event.record(stream)

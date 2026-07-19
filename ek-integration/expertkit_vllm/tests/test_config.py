@@ -14,6 +14,14 @@ def test_collects_numeric_instance_and_timeout(monkeypatch) -> None:
     assert config.controller_endpoint == "127.0.0.1:50050"
     assert config.instance_id == 7
     assert config.timeout_seconds == 2.5
+    assert config.transport == "grpc"
+
+
+def test_selects_same_host_shared_memory(monkeypatch) -> None:
+    monkeypatch.setenv("EK_INSTANCE_ID", "7")
+    monkeypatch.setenv("EK_WORKER_TRANSPORT", "shm")
+
+    assert collect_ek_client_config().transport == "shm"
 
 
 @pytest.mark.parametrize(
@@ -23,6 +31,7 @@ def test_collects_numeric_instance_and_timeout(monkeypatch) -> None:
         ("EK_INSTANCE_ID", "worker", "integer"),
         ("EK_CLIENT_TIMEOUT", "nan", "finite"),
         ("EK_CLIENT_TIMEOUT", "0", "positive"),
+        ("EK_WORKER_TRANSPORT", "rdma", "grpc.*shm"),
     ],
 )
 def test_rejects_invalid_values(

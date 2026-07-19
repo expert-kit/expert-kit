@@ -134,6 +134,16 @@ class GrpcWorkerPositionBuffers(WorkerPositionBuffers):
             routing_weights.copy_(batch.routing_weights)
             return
 
+        if (
+            batch.hidden_states.is_pinned()
+            and batch.expert_ids.is_pinned()
+            and batch.routing_weights.is_pinned()
+        ):
+            hidden_states.copy_(batch.hidden_states, non_blocking=True)
+            expert_ids.copy_(batch.expert_ids, non_blocking=True)
+            routing_weights.copy_(batch.routing_weights, non_blocking=True)
+            return
+
         host_hidden = self._require_host(self._host_hidden_states)[: batch.token_count]
         host_expert_ids = self._require_host(self._host_expert_ids)[: batch.token_count]
         host_routing = self._require_host(self._host_routing_weights)[: batch.token_count]
@@ -144,8 +154,12 @@ class GrpcWorkerPositionBuffers(WorkerPositionBuffers):
         expert_ids.copy_(host_expert_ids, non_blocking=True)
         routing_weights.copy_(host_routing, non_blocking=True)
 
-    def copy_output(self, partial_output: torch.Tensor) -> torch.Tensor:
-        """Return fixed CPU output directly or enqueue CUDA D2H into pinned storage."""
+    def copy_output(
+        self,
+        partial_output: torch.Tensor,
+        destination: torch.Tensor | None,
+    ) -> torch.Tensor:
+        """Return or copy output into private staging or a Transport destination."""
 
         self._require_open()
         _require_tensor(
@@ -157,6 +171,21 @@ class GrpcWorkerPositionBuffers(WorkerPositionBuffers):
         )
         if not 0 < partial_output.shape[0] <= self._spec.max_batch_tokens:
             raise ValueError("partial_output token count exceeds the fixed position")
+        if destination is not None:
+            _require_tensor(
+                "output destination",
+                destination,
+                shape=tuple(partial_output.shape),
+                dtype=self._spec.dtype,
+                device=torch.device("cpu"),
+            )
+            if self._spec.device.type == "cuda" and not destination.is_pinned():
+                raise ValueError("CUDA output destination must use pinned Host memory")
+            destination.copy_(
+                partial_output,
+                non_blocking=self._spec.device.type == "cuda",
+            )
+            return destination
         if self._spec.device.type == "cpu":
             return partial_output
 

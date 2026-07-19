@@ -63,7 +63,11 @@ class WorkerPositionBuffers(ABC):
         """Copy one received batch into valid views of fixed Backend inputs."""
 
     @abstractmethod
-    def copy_output(self, partial_output: torch.Tensor) -> torch.Tensor:
+    def copy_output(
+        self,
+        partial_output: torch.Tensor,
+        destination: torch.Tensor | None,
+    ) -> torch.Tensor:
         """Copy or expose a valid output view that this adapter can send."""
 
     @abstractmethod
@@ -93,6 +97,11 @@ class ReceivedWorkerBatch(ABC):
     @abstractmethod
     def cancelled(self) -> bool:
         """Return whether the caller no longer needs a response."""
+
+    @property
+    @abstractmethod
+    def output_destination(self) -> torch.Tensor | None:
+        """Return an optional Host Tensor owned by Transport for the response."""
 
     @abstractmethod
     def release_input(self) -> None:

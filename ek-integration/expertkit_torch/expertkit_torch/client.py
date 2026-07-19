@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 import threading
+from typing import Literal
 
 import torch
 from expertkit_transport.adapters.grpc import BlockingGrpcRoutedMoEClient
@@ -27,6 +28,7 @@ class RoutedMoEClient:
         experts_per_layer: int,
         hidden_dim: int,
         top_k: int,
+        transport: Literal["grpc", "shm"] = "grpc",
         timeout_seconds: float = 6.0,
     ) -> None:
         if not controller_endpoint:
@@ -42,6 +44,8 @@ class RoutedMoEClient:
                 raise ValueError(f"{name} must be a positive integer")
         if top_k > experts_per_layer:
             raise ValueError("top_k must not exceed experts_per_layer")
+        if transport not in ("grpc", "shm"):
+            raise ValueError("transport must be 'grpc' or 'shm'")
         if not math.isfinite(timeout_seconds) or timeout_seconds <= 0:
             raise ValueError("timeout_seconds must be finite and positive")
 
@@ -51,6 +55,7 @@ class RoutedMoEClient:
         self._experts_per_layer = experts_per_layer
         self._hidden_dim = hidden_dim
         self._top_k = top_k
+        self._transport_name = transport
         self._timeout_seconds = timeout_seconds
         self._transport: BlockingGrpcRoutedMoEClient | None = None
         self._device: torch.device | None = None
@@ -80,6 +85,7 @@ class RoutedMoEClient:
                 top_k=self._top_k,
                 dtype=dtype,
                 device=resolved_device,
+                worker_transport=self._transport_name,
             )
             try:
                 transport.start(timeout_seconds=self._timeout_seconds)

@@ -69,11 +69,13 @@ def _tensor_from_bytes(raw: bytes, dtype: torch.dtype, shape: tuple[int, int]) -
     return flat.reshape(shape)
 
 
-def _validate_routing_values(
+def validate_received_routing(
     expert_ids: torch.Tensor,
     routing_weights: torch.Tensor,
     experts_per_layer: int,
 ) -> tuple[int, ...]:
+    """Validate untrusted Host routing values and return distinct expert IDs."""
+
     expert_values = expert_ids.numpy().reshape(-1)
     routing_values = routing_weights.numpy().reshape(-1)
     if int(expert_values.min()) < -1:
@@ -217,7 +219,7 @@ def decode_request_with_size(payload: bytes, spec: GrpcBatchSpec) -> DecodedRequ
         torch.float32,
         (token_count, spec.top_k),
     )
-    distinct = _validate_routing_values(
+    distinct = validate_received_routing(
         expert_ids,
         routing_weights,
         spec.experts_per_layer,
@@ -244,8 +246,11 @@ def _bounded_diagnostic(value: str) -> str:
     return encoded[:MAX_DIAGNOSTIC_BYTES].decode("utf-8", errors="ignore")
 
 
-def encode_error_response(error: TransportError, spec: GrpcBatchSpec) -> bytes:
-    """Return a bounded structured computation rejection."""
+def encode_compute_error(
+    error: TransportError,
+    spec: GrpcBatchSpec,
+) -> computation_pb2.ComputeError:
+    """Return one bounded protobuf computation rejection."""
 
     try:
         code = _TRANSPORT_TO_PROTO_ERROR[error.code]
@@ -269,8 +274,45 @@ def encode_error_response(error: TransportError, spec: GrpcBatchSpec) -> bytes:
         fields["observed_topology_version"] = error.observed_topology_version
     if error.min_topology_version is not None:
         fields["min_topology_version"] = error.min_topology_version
+    return computation_pb2.ComputeError(**fields)
+
+
+def decode_compute_error(
+    wire_error: computation_pb2.ComputeError,
+    spec: GrpcBatchSpec,
+) -> TransportError:
+    """Validate and map one protobuf computation rejection."""
+
+    code = _PROTO_TO_TRANSPORT_ERROR.get(wire_error.code)
+    if code is None:
+        raise GrpcProtocolError("response contains an unknown computation error code")
+    if len(wire_error.diagnostic.encode("utf-8")) > MAX_DIAGNOSTIC_BYTES:
+        raise GrpcProtocolError("response diagnostic exceeds its configured bound")
+    if len(wire_error.unavailable_expert_ids) > spec.max_batch_tokens * spec.top_k:
+        raise GrpcProtocolError("response contains too many unavailable expert IDs")
+    if any(expert_id >= spec.experts_per_layer for expert_id in wire_error.unavailable_expert_ids):
+        raise GrpcProtocolError("response unavailable expert ID exceeds the configured range")
+    return TransportError(
+        code,
+        retryable=wire_error.retryable,
+        observed_topology_version=(
+            wire_error.observed_topology_version
+            if wire_error.HasField("observed_topology_version")
+            else None
+        ),
+        min_topology_version=(
+            wire_error.min_topology_version if wire_error.HasField("min_topology_version") else None
+        ),
+        unavailable_expert_ids=tuple(wire_error.unavailable_expert_ids),
+        diagnostic=wire_error.diagnostic,
+    )
+
+
+def encode_error_response(error: TransportError, spec: GrpcBatchSpec) -> bytes:
+    """Return a bounded structured computation rejection."""
+
     response = computation_pb2.ExecuteResponse(
-        error=computation_pb2.ComputeError(**fields),
+        error=encode_compute_error(error, spec),
     )
     payload = response.SerializeToString()
     if len(payload) > calculate_message_limits(spec).response_bytes:
@@ -311,34 +353,7 @@ def decode_response(payload: bytes, token_count: int, spec: GrpcBatchSpec) -> to
 
     result = response.WhichOneof("result")
     if result == "error":
-        wire_error = response.error
-        code = _PROTO_TO_TRANSPORT_ERROR.get(wire_error.code)
-        if code is None:
-            raise GrpcProtocolError("response contains an unknown computation error code")
-        if len(wire_error.diagnostic.encode("utf-8")) > MAX_DIAGNOSTIC_BYTES:
-            raise GrpcProtocolError("response diagnostic exceeds its configured bound")
-        if len(wire_error.unavailable_expert_ids) > spec.max_batch_tokens * spec.top_k:
-            raise GrpcProtocolError("response contains too many unavailable expert IDs")
-        if any(
-            expert_id >= spec.experts_per_layer for expert_id in wire_error.unavailable_expert_ids
-        ):
-            raise GrpcProtocolError("response unavailable expert ID exceeds the configured range")
-        raise TransportError(
-            code,
-            retryable=wire_error.retryable,
-            observed_topology_version=(
-                wire_error.observed_topology_version
-                if wire_error.HasField("observed_topology_version")
-                else None
-            ),
-            min_topology_version=(
-                wire_error.min_topology_version
-                if wire_error.HasField("min_topology_version")
-                else None
-            ),
-            unavailable_expert_ids=tuple(wire_error.unavailable_expert_ids),
-            diagnostic=wire_error.diagnostic,
-        )
+        raise decode_compute_error(response.error, spec)
     if result != "partial_output":
         raise GrpcProtocolError("response does not contain a result")
 

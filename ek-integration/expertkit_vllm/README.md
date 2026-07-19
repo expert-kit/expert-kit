@@ -26,6 +26,7 @@ The plugin is disabled unless `EK_ENABLE=1` is set. When enabled, it reads:
 - `EK_ADDR`: Controller gRPC endpoint. The default is `localhost:5002`.
 - `EK_INSTANCE_ID`: required positive numeric model instance ID.
 - `EK_CLIENT_TIMEOUT`: positive timeout in seconds. The default is `6`.
+- `EK_WORKER_TRANSPORT`: `grpc` or same-host `shm`. The default is `grpc`.
 
 For example:
 
@@ -34,11 +35,14 @@ export EK_ENABLE=1
 export EK_ADDR=controller.internal:5002
 export EK_INSTANCE_ID=1
 export EK_CLIENT_TIMEOUT=6
+export EK_WORKER_TRANSPORT=grpc
 ```
 
 The Controller and Workers must already be running, and the instance's expert
 weights must be ready before inference starts. The MVP assumes a trusted,
 isolated cluster network and does not provide TLS or application authentication.
+Shared memory requires vLLM and the Worker to use the same Host, `/dev/shm`
+namespace, and Unix user.
 
 ## Current limits
 

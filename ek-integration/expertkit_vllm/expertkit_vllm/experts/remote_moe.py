@@ -118,6 +118,7 @@ def _client_for(
     key = (
         config.controller_endpoint,
         config.instance_id,
+        config.transport,
         layer.num_experts,
         layer.top_k,
         layer.hidden_size,
@@ -137,6 +138,7 @@ def _client_for(
             top_k=layer.top_k,
             dtype=hidden_states.dtype,
             device=hidden_states.device,
+            worker_transport=config.transport,
         )
         try:
             client.start(timeout_seconds=config.timeout_seconds)

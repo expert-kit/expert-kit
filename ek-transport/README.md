@@ -6,10 +6,12 @@ groups and splits it by Worker, dispatches bounded asynchronous calls, retries
 eligible failures within the original deadline, and aggregates weighted
 partial outputs in FP32 before returning the model activation dtype.
 
-The MVP contains one adapter using `grpc.aio`. Protobuf encoding, message-size
-limits, request matching, waiting capacity, and Host staging stay inside that
-adapter. Future communication mechanisms can implement the same package
-contracts without changing Compute backends.
+The package contains a portable `grpc.aio` data path and an experimental
+same-host shared-memory data path. Shared memory keeps gRPC for small session,
+notification, completion, and error messages, but places Tensor bytes in fixed
+reusable slots. Both paths use the same orchestration and Worker admission.
+Future communication mechanisms can implement the same package contracts
+without changing Compute backends.
 
 ## Install and test
 
@@ -26,8 +28,15 @@ Most users install this package through `expertkit-worker`,
 ## Current limits
 
 - Input and output values use `torch.Tensor`.
-- Computation uses unary plaintext gRPC and copies Tensor bytes through Host
-  memory.
-- SHM, RDMA, NCCL, NVSHMEM, Arrow Flight, and Mooncake adapters are not present.
+- Cross-host computation uses unary plaintext gRPC and copies Tensor bytes
+  through Host memory.
+- Shared memory requires both processes to see the same `/dev/shm` namespace.
+  The current private-file permissions also require the same Unix user. CUDA
+  mappings are registered as pinned memory, but transfers between the Frontend
+  GPU and Worker GPU still pass through Host memory.
+- A Frontend crash cannot send normal session cleanup. The Worker keeps that
+  session mapped until it exits; the 64-session bound prevents unbounded
+  registration.
+- RDMA, NCCL, NVSHMEM, Arrow Flight, and Mooncake adapters are not present.
 - TLS, authentication, and authorization are not implemented. Endpoints must
   remain inside a trusted isolated network.

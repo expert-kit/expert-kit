@@ -1,9 +1,9 @@
 # Expert Kit Python Worker
 
 `expertkit-worker` runs routed expert FFNs for one model instance on one compute
-device. It receives bounded layer batches through gRPC, executes only experts
-that the Controller has made ready, and returns one weighted partial output per
-batch.
+device. It receives bounded layer batches through gRPC or the experimental
+same-host shared-memory data path, executes only experts that the Controller has
+made ready, and returns one weighted partial output per batch.
 
 ## Install
 
@@ -65,6 +65,9 @@ Important settings:
 
 `transport.grpc.advertise` and `weight_manager.peer.advertise` must be reachable
 from other processes. Their `listen` counterparts select local bind addresses.
+The same computation gRPC endpoint also handles shared-memory setup and
+notifications. Shared memory is selected by the Frontend and requires both
+processes to see the same `/dev/shm` namespace.
 
 The Weight Manager looks for a requested assigned expert in this order:
 
