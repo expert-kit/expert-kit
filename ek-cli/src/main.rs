@@ -190,11 +190,18 @@ const DEFAULT_THREAD_NUM: usize = 6;
 
 fn python_worker_command(config: Option<String>) -> Result<ProcessCommand, &'static str> {
     let Some(config) = config else {
-        return Err("The Python Worker requires --config");
+        return Err("The Python Worker requires --config or EK_CONFIG");
     };
     let mut command = ProcessCommand::new("ek-worker");
     command.arg("--config").arg(config);
     Ok(command)
+}
+
+fn resolve_python_worker_config(
+    cli_config: Option<String>,
+    environment_config: Option<String>,
+) -> Option<String> {
+    cli_config.or(environment_config.filter(|value| !value.trim().is_empty()))
 }
 
 fn run_python_worker(config: Option<String>) -> ! {
@@ -240,7 +247,11 @@ fn main() {
         unsafe { std::env::set_var("RUST_LOG", "debug") };
     }
     if matches!(&cli.command, Command::Worker {}) {
-        run_python_worker(cli.config.clone());
+        let environment_config = std::env::var("EK_CONFIG").ok();
+        run_python_worker(resolve_python_worker_config(
+            cli.config.clone(),
+            environment_config,
+        ));
     }
     let command_name = get_command_name(&cli.command);
 
@@ -332,7 +343,34 @@ mod worker_launcher_tests {
     fn requires_an_explicit_worker_config() {
         assert_eq!(
             python_worker_command(None).unwrap_err(),
-            "The Python Worker requires --config"
+            "The Python Worker requires --config or EK_CONFIG"
+        );
+    }
+
+    #[test]
+    fn resolves_worker_config_from_environment() {
+        assert_eq!(
+            resolve_python_worker_config(None, Some("/tmp/from-environment.yaml".to_owned())),
+            Some("/tmp/from-environment.yaml".to_owned())
+        );
+    }
+
+    #[test]
+    fn explicit_worker_config_overrides_environment() {
+        assert_eq!(
+            resolve_python_worker_config(
+                Some("/tmp/from-argument.yaml".to_owned()),
+                Some("/tmp/from-environment.yaml".to_owned())
+            ),
+            Some("/tmp/from-argument.yaml".to_owned())
+        );
+    }
+
+    #[test]
+    fn ignores_empty_environment_worker_config() {
+        assert_eq!(
+            resolve_python_worker_config(None, Some("  ".to_owned())),
+            None
         );
     }
 }

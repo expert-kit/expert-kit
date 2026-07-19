@@ -26,8 +26,14 @@ The optional CPU-only GGML environment is installed with:
 uv sync --project ek-worker --locked --extra ggml
 ```
 
-GGML remains experimental. The fused Backend is not implemented in the current
-build and fails during startup when selected. Torch is the default Backend.
+The experimental NVIDIA fused environment is installed with:
+
+```bash
+uv sync --project ek-worker --locked --extra fused
+```
+
+GGML remains experimental and CPU-only. The fused Backend supports the current
+unquantized FP16 and BF16 SiLU path. Torch is the default Backend.
 
 ## Configuration
 
@@ -78,10 +84,23 @@ Run the Worker directly:
 ek-worker --config /absolute/path/to/worker.yaml
 ```
 
+The configuration path may instead be selected with `EK_CONFIG`. An explicit
+`--config` takes precedence:
+
+```bash
+EK_CONFIG=/absolute/path/to/worker.yaml ek-worker
+```
+
 Or use the unified launcher, which replaces itself with the same Python process:
 
 ```bash
 target/release/ek-cli --config /absolute/path/to/worker.yaml worker
+```
+
+The unified launcher accepts the same environment-based selection:
+
+```bash
+EK_CONFIG=/absolute/path/to/worker.yaml target/release/ek-cli worker
 ```
 
 Sending `SIGTERM` starts the Controller-coordinated shutdown. The Worker keeps

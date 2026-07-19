@@ -52,6 +52,50 @@ def test_main_loads_config_runs_application_and_removes_handlers(
     assert configured == [FakeConfig.logging]
 
 
+def test_main_uses_ek_config_when_argument_is_absent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    application = FakeApplication()
+    loaded_paths: list[str] = []
+    monkeypatch.setenv("EK_CONFIG", "/tmp/from-environment.yaml")
+    monkeypatch.setattr(
+        cli,
+        "load_config",
+        lambda path: loaded_paths.append(path) or FakeConfig(),
+    )
+    monkeypatch.setattr(cli, "configure_logging", lambda _config: None)
+
+    async def build(_config: object) -> FakeApplication:
+        return application
+
+    monkeypatch.setattr(cli, "build_worker_application", build)
+
+    assert cli.main([]) == 0
+    assert loaded_paths == ["/tmp/from-environment.yaml"]
+
+
+def test_explicit_config_overrides_ek_config(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    application = FakeApplication()
+    loaded_paths: list[str] = []
+    monkeypatch.setenv("EK_CONFIG", "/tmp/from-environment.yaml")
+    monkeypatch.setattr(
+        cli,
+        "load_config",
+        lambda path: loaded_paths.append(path) or FakeConfig(),
+    )
+    monkeypatch.setattr(cli, "configure_logging", lambda _config: None)
+
+    async def build(_config: object) -> FakeApplication:
+        return application
+
+    monkeypatch.setattr(cli, "build_worker_application", build)
+
+    assert cli.main(["--config", "/tmp/from-argument.yaml"]) == 0
+    assert loaded_paths == ["/tmp/from-argument.yaml"]
+
+
 def test_main_returns_failure_after_runtime_error(monkeypatch: pytest.MonkeyPatch) -> None:
     application = FakeApplication(error=RuntimeError("fatal device failure"))
     monkeypatch.setattr(cli, "load_config", lambda _path: FakeConfig())
@@ -70,7 +114,10 @@ def test_main_returns_configuration_error_for_missing_file(tmp_path: Path) -> No
     assert cli.main(["--config", str(tmp_path / "missing.yaml")]) == 2
 
 
-def test_main_requires_explicit_config() -> None:
+def test_main_requires_config_argument_or_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("EK_CONFIG", raising=False)
     with pytest.raises(SystemExit) as caught:
         cli.main([])
 

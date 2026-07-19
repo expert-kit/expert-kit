@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+import os
 from collections.abc import Sequence
 
 import structlog
@@ -21,7 +22,7 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="ek-worker")
     parser.add_argument(
         "--config",
-        help="Path to the Python Worker YAML configuration",
+        help="Path to the Python Worker YAML configuration; overrides EK_CONFIG",
     )
     return parser
 
@@ -41,10 +42,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     """Parse configuration, configure logging once, and run the Worker."""
 
     arguments = _parser().parse_args(argv)
-    if not arguments.config:
-        _parser().error("--config is required")
+    config_path = arguments.config or os.environ.get("EK_CONFIG")
+    if not config_path:
+        _parser().error("--config or EK_CONFIG is required")
     try:
-        config = load_config(arguments.config)
+        config = load_config(config_path)
     except (ConfigFileError, ValidationError) as error:
         logging.basicConfig(level=logging.ERROR)
         logging.getLogger(__name__).error("invalid Worker configuration: %s", error)
