@@ -54,7 +54,9 @@ Important settings:
 - `worker.max_batch_tokens` defaults to `4096`.
 - `worker.max_active_batches_per_device` defaults to `1`.
 - `worker.ggml.cpu_threads` is required when `worker.backend` is `ggml`.
-- `transport.max_pending_batches_per_device` defaults to the active-batch count.
+- `transport.max_pending_batches_per_device` is the number of decoded requests
+  allowed to wait outside the fixed execution slots. It defaults to
+  `worker.max_active_batches_per_device` when omitted.
 - `weight_manager.max_concurrent_loads` defaults to `64`.
 - The DRAM cache limit defaults to enough bytes for the model's complete expert
   set. Set `weight_manager.dram_cache.max_bytes` to impose a smaller LRU cache.
@@ -64,11 +66,33 @@ Important settings:
 - Expert state changes are sent in groups of at most 64 or after 50 ms. Heartbeat
   and expert state reporting use separate control streams.
 
-`transport.grpc.advertise` and `weight_manager.peer.advertise` must be reachable
-from other processes. Their `listen` counterparts select local bind addresses.
-The same computation gRPC endpoint also handles shared-memory setup and
-notifications. Shared memory is selected by the Frontend and requires both
-processes to see the same `/dev/shm` namespace.
+For a gRPC Tensor Worker, configure:
+
+```yaml
+transport:
+  type: grpc
+  max_pending_batches_per_device: 1
+  listen: 0.0.0.0:51051
+  advertise: worker-a100:51051
+```
+
+For a same-host shared-memory Worker, configure:
+
+```yaml
+transport:
+  type: shm
+  max_pending_batches_per_device: 1
+  rpc_listen: 0.0.0.0:51051
+  rpc_advertise: worker-a100:51051
+  shared_memory_dir: /dev/shm
+```
+
+`advertise` or `rpc_advertise`, together with
+`weight_manager.peer.advertise`, must be reachable from the relevant
+processes. Their listen counterparts select local bind addresses. In SHM mode,
+the RPC endpoint handles only session setup and small notifications; Tensor
+payloads use `/dev/shm`. The Frontend and Worker must see the same shared-memory
+namespace and run as the same Unix user.
 
 The Weight Manager looks for a requested assigned expert in this order:
 
@@ -141,7 +165,7 @@ Prometheus serves `/metrics`. The OpenTelemetry exporter uses asynchronous,
 sampled plaintext OTLP over gRPC.
 
 For each sampled computation call, the automatic gRPC server span contains
-Worker child spans for request decoding, waiting for an active position, active
+Worker child spans for request decoding, waiting for an execution slot, active
 batch execution, input preparation, Backend submission and completion, output
 preparation, device completion waiting, and response encoding. CUDA execution
 adds the following attributes to `worker.batch.execute`:
@@ -161,8 +185,9 @@ Worker spans; it is not part of the computation payload or any Tensor.
 
 ## Transport and security limits
 
-The current computation path uses only plaintext gRPC. It serializes Tensor
-bytes through Host memory and is not a GPU-direct path. SHM, RDMA, NCCL,
+The gRPC path serializes Tensor bytes through Host memory. The SHM path avoids
+protobuf Tensor payloads and loopback Tensor copies, but CUDA inputs and outputs
+still pass through pinned Host memory. Neither path is GPU Direct. RDMA, NCCL,
 NVSHMEM, Arrow Flight, and Mooncake are not implemented by this Worker.
 
 There is no TLS, mTLS, authentication, or authorization. Run all Controller,

@@ -75,7 +75,6 @@ ek-torch-benchmark \
   --mode expertkit \
   --controller-endpoint 10.0.0.10:5002 \
   --instance-id 1 \
-  --transport grpc \
   --batch-sizes 1 32 \
   --input-length 128 \
   --output-length 20 \
@@ -86,16 +85,12 @@ ek-torch-benchmark \
   --json-output /tmp/deepseek-v2-benchmark.json
 ```
 
-For a Frontend and Worker on the same Host, change only:
-
-```bash
---transport shm
-```
-
-This keeps gRPC for notifications and structured errors while moving Tensor
-bytes through fixed pinned files under `/dev/shm`. Both processes must share the
-same OS shared-memory namespace and Unix user. This option does not work across
-machines and does not remove GPU-to-Host or Host-to-GPU transfers.
+The Frontend does not select a Transport on the command line. Each Worker
+registers `grpc` or `shm`, the Controller publishes that value in topology, and
+the Transport package creates the matching connection. An SHM Worker and the
+Frontend must share the same OS shared-memory namespace and Unix user. SHM does
+not work across machines and does not remove GPU-to-Host or Host-to-GPU
+transfers.
 
 The command reports medians across measured runs:
 

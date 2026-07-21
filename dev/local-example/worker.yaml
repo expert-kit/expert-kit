@@ -22,6 +22,7 @@ worker:
 
 transport:
   type: grpc
+  max_pending_batches_per_device: 1
   listen: 0.0.0.0:51234
   advertise: ek-worker:51234
 
