@@ -7,10 +7,9 @@ import torch
 from expertkit_proto.ek.worker.v2 import computation_pb2
 
 from expertkit_transport.batches import WorkerBatch
-from expertkit_transport.errors import TransportError, TransportErrorCode
+from expertkit_transport.errors import TransportError, TransportErrorCode, TransportProtocolError
+from expertkit_transport.transports import WorkerEndpointConfig
 from expertkit_transport.transports.grpc import (
-    GrpcBatchSpec,
-    GrpcProtocolError,
     decode_request,
     decode_response,
     encode_error_response,
@@ -20,8 +19,8 @@ from expertkit_transport.transports.grpc import (
 from expertkit_transport.transports.grpc.codec import _raw_bytes, decode_request_with_size
 
 
-def spec(dtype: torch.dtype = torch.float16) -> GrpcBatchSpec:
-    return GrpcBatchSpec(
+def spec(dtype: torch.dtype = torch.float16) -> WorkerEndpointConfig:
+    return WorkerEndpointConfig(
         instance_id=7,
         num_layers=4,
         experts_per_layer=8,
@@ -116,7 +115,7 @@ def test_decode_rejects_mismatched_metadata(field: str, value: int, diagnostic: 
     request = computation_pb2.ExecuteRequest.FromString(encode_request(worker_batch(), spec()))
     setattr(request, field, value)
 
-    with pytest.raises(GrpcProtocolError, match=diagnostic):
+    with pytest.raises(TransportProtocolError, match=diagnostic):
         decode_request(request.SerializeToString(), spec())
 
 
@@ -125,12 +124,12 @@ def test_decode_rejects_each_malformed_tensor_length(field: str) -> None:
     request = computation_pb2.ExecuteRequest.FromString(encode_request(worker_batch(), spec()))
     setattr(request, field, getattr(request, field)[:-1])
 
-    with pytest.raises(GrpcProtocolError, match="encoded length"):
+    with pytest.raises(TransportProtocolError, match="encoded length"):
         decode_request(request.SerializeToString(), spec())
 
 
 def test_decode_rejects_malformed_protobuf() -> None:
-    with pytest.raises(GrpcProtocolError, match="valid protobuf"):
+    with pytest.raises(TransportProtocolError, match="valid protobuf"):
         decode_request(b"\xff", spec())
 
 
@@ -175,7 +174,7 @@ def test_decode_rejects_invalid_routing_values(
     request.expert_ids = expert_ids.view(torch.uint8).numpy().tobytes()
     request.routing_weights = routing_weights.view(torch.uint8).numpy().tobytes()
 
-    with pytest.raises(GrpcProtocolError, match=diagnostic):
+    with pytest.raises(TransportProtocolError, match=diagnostic):
         decode_request(request.SerializeToString(), spec())
 
 
@@ -215,7 +214,7 @@ def test_success_response_round_trip_uses_request_shape(dtype: torch.dtype) -> N
 def test_success_response_rejects_wrong_encoded_length() -> None:
     response = computation_pb2.ExecuteResponse(partial_output=b"too short")
 
-    with pytest.raises(GrpcProtocolError, match="encoded length"):
+    with pytest.raises(TransportProtocolError, match="encoded length"):
         decode_response(response.SerializeToString(), token_count=2, spec=spec())
 
 
@@ -261,16 +260,16 @@ def test_unknown_or_missing_response_branch_is_protocol_error() -> None:
         error=computation_pb2.ComputeError(code=999, retryable=True)
     )
 
-    with pytest.raises(GrpcProtocolError, match="unknown computation error"):
+    with pytest.raises(TransportProtocolError, match="unknown computation error"):
         decode_response(unknown_error.SerializeToString(), token_count=1, spec=spec())
-    with pytest.raises(GrpcProtocolError, match="does not contain a result"):
+    with pytest.raises(TransportProtocolError, match="does not contain a result"):
         decode_response(b"", token_count=1, spec=spec())
 
 
 def test_non_computation_error_cannot_use_structured_response() -> None:
     error = TransportError(TransportErrorCode.UNAVAILABLE, retryable=True)
 
-    with pytest.raises(ValueError, match="native gRPC status"):
+    with pytest.raises(ValueError, match="native RPC status"):
         encode_error_response(error, spec())
 
 

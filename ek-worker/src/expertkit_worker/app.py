@@ -73,7 +73,6 @@ class WorkerApplication:
         transfer: _AsyncStartClose,
         manager: _WeightManager,
         peer_server: _AsyncStartClose,
-        computation_server: _AsyncStartClose,
         execution: _Execution,
         control: _Control,
         disk_cache: _SyncClose,
@@ -85,7 +84,6 @@ class WorkerApplication:
         self._transfer = transfer
         self._manager = manager
         self._peer_server = peer_server
-        self._computation_server = computation_server
         self._execution = execution
         self._control = control
         self._disk_cache = disk_cache
@@ -172,7 +170,6 @@ class WorkerApplication:
         await self._transfer.start()
         self._manager.start()
         await self._peer_server.start()
-        await self._computation_server.start()
         await self._execution.start()
         self._control_task = asyncio.create_task(
             self._control.run(),

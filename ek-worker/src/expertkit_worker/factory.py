@@ -9,8 +9,12 @@ from typing import Any
 
 import structlog
 import torch
-from expertkit_transport.transports.base import WorkerBatchReceiver, WorkerPositionSpec
-from expertkit_transport.transports.grpc import GrpcBatchSpec, GrpcWorkerBatchReceiver
+from expertkit_transport.transports.base import (
+    BatchBufferConfig,
+    WorkerBatchReceiver,
+    WorkerEndpointConfig,
+)
+from expertkit_transport.transports.grpc import GrpcWorkerBatchReceiver
 from expertkit_transport.transports.shm import ShmWorkerBatchReceiver
 
 from expertkit_worker.app import WorkerApplication
@@ -33,7 +37,7 @@ from expertkit_worker.control import (
     WorkerRegistration,
     new_start_id,
 )
-from expertkit_worker.execution import WorkerExecution
+from expertkit_worker.execution import WorkerExecutor
 from expertkit_worker.observability import create_observability
 from expertkit_worker.weights import (
     CpuWeightLoader,
@@ -218,7 +222,7 @@ async def build_worker_application(config: WorkerConfig) -> WorkerApplication:
     )
     metrics = observability.metrics
     receiver: WorkerBatchReceiver | None = None
-    execution: WorkerExecution | None = None
+    execution: WorkerExecutor | None = None
     manager: WeightManager[Any, Any] | None = None
     peer_server: PeerWeightServer[Any, Any] | None = None
     transfer: HttpWeightTransfer | None = None
@@ -236,7 +240,7 @@ async def build_worker_application(config: WorkerConfig) -> WorkerApplication:
             compute_dtype=activation_dtype,
             device=device,
         )
-        batch_spec = GrpcBatchSpec(
+        endpoint_config = WorkerEndpointConfig(
             instance_id=config.model.instance_id,
             num_layers=config.model.num_layers,
             experts_per_layer=config.model.experts_per_layer,
@@ -256,7 +260,7 @@ async def build_worker_application(config: WorkerConfig) -> WorkerApplication:
         if isinstance(config.transport, GrpcTransportConfig):
             receiver = GrpcWorkerBatchReceiver(
                 config.transport.listen,
-                batch_spec,
+                endpoint_config,
                 **receiver_options,
             )
             computation_endpoint = config.transport.advertise
@@ -264,7 +268,7 @@ async def build_worker_application(config: WorkerConfig) -> WorkerApplication:
         elif isinstance(config.transport, ShmTransportConfig):
             receiver = ShmWorkerBatchReceiver(
                 config.transport.rpc_listen,
-                batch_spec,
+                endpoint_config,
                 shared_memory_dir=Path(config.transport.shared_memory_dir),
                 **receiver_options,
             )
@@ -287,25 +291,25 @@ async def build_worker_application(config: WorkerConfig) -> WorkerApplication:
             device=device,
             acquire_many=acquire_many,
         )
-        position_spec = WorkerPositionSpec(
+        buffer_config = BatchBufferConfig(
             max_batch_tokens=config.worker.max_batch_tokens,
             hidden_dim=config.model.hidden_dim,
             top_k=config.model.top_k,
             dtype=activation_dtype,
             device=device,
         )
-        execution = WorkerExecution(
+        execution = WorkerExecutor(
             receiver,
             backend,
             instance_id=config.model.instance_id,
-            position_spec=position_spec,
-            active_positions=config.worker.max_active_batches_per_device,
+            buffer_config=buffer_config,
+            slot_count=config.worker.max_active_batches_per_device,
             metrics=metrics,
             tracer=observability.tracer,
         )
         resource_plan = plan_device_resources(
             device_memory_limit_bytes=int(config.worker.device_memory_limit),
-            fixed_position_bytes=execution.fixed_device_bytes,
+            fixed_slot_bytes=execution.fixed_device_bytes,
             backend_estimate=backend.estimate_resources(config.worker.max_batch_tokens),
             active_batches=config.worker.max_active_batches_per_device,
             conversion_temporary_bytes=adapter.conversion_temporary_bytes(),
@@ -315,7 +319,7 @@ async def build_worker_application(config: WorkerConfig) -> WorkerApplication:
             raise ValueError("worker.device_memory_limit exceeds total device memory")
         validate_available_device_memory(
             resource_plan,
-            available_bytes_after_fixed_positions=available_bytes,
+            available_bytes_after_fixed_slots=available_bytes,
         )
 
         transfer = HttpWeightTransfer(
@@ -429,7 +433,6 @@ async def build_worker_application(config: WorkerConfig) -> WorkerApplication:
             transfer=transfer,
             manager=manager,
             peer_server=peer_server,
-            computation_server=receiver,
             execution=execution,
             control=control,
             disk_cache=disk_cache,

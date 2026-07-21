@@ -6,7 +6,7 @@ from dataclasses import dataclass
 
 import torch
 
-from expertkit_transport.transports.grpc.spec import GrpcBatchSpec
+from expertkit_transport.transports.base import WorkerEndpointConfig
 
 
 @dataclass(slots=True)
@@ -28,7 +28,7 @@ class GrpcTransferBufferPool:
 
     def __init__(
         self,
-        batch_spec: GrpcBatchSpec,
+        endpoint_config: WorkerEndpointConfig,
         *,
         device: torch.device | str,
         capacity: int,
@@ -39,24 +39,24 @@ class GrpcTransferBufferPool:
         self._all = tuple(
             GrpcTransferBuffers(
                 host_hidden_states=torch.empty(
-                    (batch_spec.max_batch_tokens, batch_spec.hidden_dim),
-                    dtype=batch_spec.dtype,
+                    (endpoint_config.max_batch_tokens, endpoint_config.hidden_dim),
+                    dtype=endpoint_config.dtype,
                     **host_options,
                 ),
                 host_expert_ids=torch.empty(
-                    (batch_spec.max_batch_tokens, batch_spec.top_k),
+                    (endpoint_config.max_batch_tokens, endpoint_config.top_k),
                     dtype=torch.int32,
                     **host_options,
                 ),
                 host_routing_weights=torch.empty(
-                    (batch_spec.max_batch_tokens, batch_spec.top_k),
+                    (endpoint_config.max_batch_tokens, endpoint_config.top_k),
                     dtype=torch.float32,
                     **host_options,
                 ),
                 host_partial_output=(
                     torch.empty(
-                        (batch_spec.max_batch_tokens, batch_spec.hidden_dim),
-                        dtype=batch_spec.dtype,
+                        (endpoint_config.max_batch_tokens, endpoint_config.hidden_dim),
+                        dtype=endpoint_config.dtype,
                         **host_options,
                     )
                     if uses_cuda

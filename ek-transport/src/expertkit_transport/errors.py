@@ -1,4 +1,4 @@
-"""Transport-level computation failures shared by all adapters."""
+"""Transport failures and malformed-message errors."""
 
 from __future__ import annotations
 
@@ -18,6 +18,10 @@ class TransportErrorCode(StrEnum):
     DEADLINE_EXCEEDED = "deadline_exceeded"
     CANCELLED = "cancelled"
     PROTOCOL = "protocol"
+
+
+class TransportProtocolError(ValueError):
+    """Report malformed or inconsistent data at a Transport boundary."""
 
 
 class TransportError(RuntimeError):

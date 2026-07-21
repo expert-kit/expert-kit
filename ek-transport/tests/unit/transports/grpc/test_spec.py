@@ -4,10 +4,12 @@ import pytest
 import torch
 from expertkit_proto.ek.worker.v2 import computation_pb2
 
-from expertkit_transport.transports.grpc import GrpcBatchSpec, calculate_message_limits
+from expertkit_transport.transports import WorkerEndpointConfig
+from expertkit_transport.transports.codec import activation_dtype_to_protobuf
+from expertkit_transport.transports.grpc import calculate_message_limits
 
 
-def spec(**overrides: object) -> GrpcBatchSpec:
+def spec(**overrides: object) -> WorkerEndpointConfig:
     values: dict[str, object] = {
         "instance_id": 7,
         "num_layers": 4,
@@ -18,7 +20,7 @@ def spec(**overrides: object) -> GrpcBatchSpec:
         "dtype": torch.float16,
     }
     values.update(overrides)
-    return GrpcBatchSpec(**values)
+    return WorkerEndpointConfig(**values)
 
 
 def test_limits_cover_both_directions_and_raw_request_storage() -> None:
@@ -59,7 +61,7 @@ def test_limits_cover_maximum_encoded_request_success_and_error() -> None:
         token_count=4,
         hidden_dim=3,
         top_k=2,
-        dtype=batch_spec.protobuf_dtype,
+        dtype=activation_dtype_to_protobuf(batch_spec.dtype),
         hidden_states=b"\xff" * hidden_bytes,
         expert_ids=b"\xff" * routing_bytes,
         routing_weights=b"\xff" * routing_bytes,
@@ -98,4 +100,4 @@ def test_spec_rejects_invalid_model_shape(field: str, value: object, diagnostic:
 
 def test_spec_rejects_message_size_above_grpc_integer_limit() -> None:
     with pytest.raises(ValueError, match="signed 32-bit limit"):
-        spec(max_batch_tokens=(1 << 30), hidden_dim=8)
+        calculate_message_limits(spec(max_batch_tokens=(1 << 30), hidden_dim=8))

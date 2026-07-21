@@ -16,16 +16,19 @@ import grpc
 import torch
 
 from expertkit_transport.batches import WorkerBatch
-from expertkit_transport.errors import TransportError, TransportErrorCode
+from expertkit_transport.errors import (
+    TransportError,
+    TransportErrorCode,
+    TransportProtocolError,
+)
 from expertkit_transport.tracing import TraceContext, Tracer, TraceSpan
 from expertkit_transport.transports.base import (
-    ReceivedWorkerBatch,
+    BatchBufferConfig,
+    ReceivedBatch,
+    WorkerBatchBuffers,
     WorkerBatchReceiver,
-    WorkerPositionBuffers,
-    WorkerPositionSpec,
+    WorkerEndpointConfig,
 )
-from expertkit_transport.transports.grpc.codec import GrpcProtocolError
-from expertkit_transport.transports.grpc.spec import GrpcBatchSpec
 from expertkit_transport.transports.queue import ReceiverQueue
 from expertkit_transport.transports.shm.codec import (
     SHM_CONTROL_MESSAGE_BYTES,
@@ -41,7 +44,7 @@ from expertkit_transport.transports.shm.session import (
     SharedMemorySlotBusy,
     WorkerSharedMemorySession,
 )
-from expertkit_transport.transports.shm.worker_buffers import ShmWorkerPositionBuffers
+from expertkit_transport.transports.shm.worker_buffers import ShmWorkerBatchBuffers
 
 _OPEN_METHOD_NAME = "OpenSharedMemory"
 _EXECUTE_METHOD_NAME = "ExecuteSharedMemory"
@@ -80,7 +83,7 @@ class _NativeCallError(RuntimeError):
         self.diagnostic = diagnostic
 
 
-class _ShmReceivedBatch(ReceivedWorkerBatch):
+class _ShmReceivedBatch(ReceivedBatch):
     """Retain one claimed shared-memory slot until its response is complete."""
 
     def __init__(
@@ -132,7 +135,7 @@ class _ShmReceivedBatch(ReceivedWorkerBatch):
         return self._output_destination
 
     def release_input(self) -> None:
-        """Drop claimed input views after the execution position has copied them."""
+        """Drop claimed input views after the execution slot has copied them."""
 
         self._owner._require_active(self)
         self._batch = None
@@ -175,7 +178,7 @@ class ShmWorkerBatchReceiver(WorkerBatchReceiver):
     def __init__(
         self,
         listen: str,
-        batch_spec: GrpcBatchSpec,
+        endpoint_config: WorkerEndpointConfig,
         *,
         max_active_batches: int,
         max_pending_batches: int,
@@ -204,7 +207,7 @@ class ShmWorkerBatchReceiver(WorkerBatchReceiver):
             raise ValueError("cpu_workers must be a positive integer")
 
         self._listen = listen
-        self._spec = batch_spec
+        self._spec = endpoint_config
         self._shared_memory_dir = shared_memory_dir
         self._maximum_concurrent_rpcs = max_active_batches + max_pending_batches
         self._queue = ReceiverQueue(
@@ -225,7 +228,7 @@ class ShmWorkerBatchReceiver(WorkerBatchReceiver):
         self._start_lock = asyncio.Lock()
         self._sessions: dict[str, WorkerSharedMemorySession] = {}
         self._session_lock = asyncio.Lock()
-        self._position_device: torch.device | None = None
+        self._execution_device: torch.device | None = None
         self._closing = False
         self._close_task: asyncio.Task[None] | None = None
         self._bound_port: int | None = None
@@ -301,7 +304,7 @@ class ShmWorkerBatchReceiver(WorkerBatchReceiver):
             self._server = server
             self._bound_port = port
 
-    async def take(self) -> ReceivedWorkerBatch:
+    async def receive(self) -> ReceivedBatch:
         """Move one waiting slot directly into Worker execution ownership."""
 
         item = await self._queue.take()
@@ -309,7 +312,7 @@ class ShmWorkerBatchReceiver(WorkerBatchReceiver):
         item.finish_wait_span("active")
         return item
 
-    def allocate_position_buffers(self, spec: WorkerPositionSpec) -> WorkerPositionBuffers:
+    def create_batch_buffers(self, spec: BatchBufferConfig) -> WorkerBatchBuffers:
         """Create SHM copy behavior without allocating private Host staging."""
 
         expected = (
@@ -320,12 +323,12 @@ class ShmWorkerBatchReceiver(WorkerBatchReceiver):
         )
         actual = (spec.max_batch_tokens, spec.hidden_dim, spec.top_k, spec.dtype)
         if actual != expected:
-            raise ValueError("Worker position shape does not match the SHM endpoint")
-        if self._position_device is None:
-            self._position_device = spec.device
-        elif self._position_device != spec.device:
-            raise ValueError("all Worker positions must use the same device")
-        return ShmWorkerPositionBuffers(spec)
+            raise ValueError("Worker buffer shape does not match the SHM endpoint")
+        if self._execution_device is None:
+            self._execution_device = spec.device
+        elif self._execution_device != spec.device:
+            raise ValueError("all Worker execution slots must use the same device")
+        return ShmWorkerBatchBuffers(spec)
 
     async def begin_drain(
         self,
@@ -342,28 +345,26 @@ class ShmWorkerBatchReceiver(WorkerBatchReceiver):
             stop_all=stop_all,
         )
 
-    async def clear_expert_drains(self, experts: Iterable[tuple[int, int]]) -> None:
+    async def clear_drains(self, experts: Iterable[tuple[int, int]]) -> None:
         """Clear per-expert gates after later assignments become ready."""
 
         await self._queue.clear_expert_drains(experts)
 
-    async def wait_experts_idle(
+    async def wait_idle(
         self,
-        experts: Iterable[tuple[int, int]],
+        experts: Iterable[tuple[int, int]] | None,
         *,
         monotonic_deadline: float,
     ) -> None:
-        """Wait until no admitted batch names the selected experts."""
+        """Wait for selected expert use, or all work when experts is `None`."""
 
-        await self._queue.wait_experts_idle(
-            experts,
-            monotonic_deadline=monotonic_deadline,
-        )
-
-    async def wait_all_idle(self, *, monotonic_deadline: float) -> None:
-        """Wait until no waiting or active batch remains."""
-
-        await self._queue.wait_all_idle(monotonic_deadline=monotonic_deadline)
+        if experts is None:
+            await self._queue.wait_all_idle(monotonic_deadline=monotonic_deadline)
+        else:
+            await self._queue.wait_experts_idle(
+                experts,
+                monotonic_deadline=monotonic_deadline,
+            )
 
     async def close(self) -> None:
         """Stop notifications and close all idle shared-memory sessions."""
@@ -390,14 +391,14 @@ class ShmWorkerBatchReceiver(WorkerBatchReceiver):
                 self._spec,
                 expected_slot_count=self._maximum_concurrent_rpcs,
             )
-        except GrpcProtocolError as error:
+        except TransportProtocolError as error:
             await context.abort(grpc.StatusCode.INVALID_ARGUMENT, str(error))
             raise AssertionError("context.abort must terminate the handler") from error
-        device = self._position_device
+        device = self._execution_device
         if device is None:
             await context.abort(
                 grpc.StatusCode.FAILED_PRECONDITION,
-                "Worker execution positions are not initialized",
+                "Worker execution slots are not initialized",
             )
             raise AssertionError("context.abort must terminate the handler")
 
@@ -470,7 +471,7 @@ class ShmWorkerBatchReceiver(WorkerBatchReceiver):
             self._record_rejection(TransportErrorCode.BUSY.value)
             await context.abort(grpc.StatusCode.RESOURCE_EXHAUSTED, str(error))
             raise AssertionError("context.abort must terminate the handler") from error
-        except GrpcProtocolError as error:
+        except TransportProtocolError as error:
             self._record_rejection(TransportErrorCode.PROTOCOL.value)
             await context.abort(grpc.StatusCode.INVALID_ARGUMENT, str(error))
             raise AssertionError("context.abort must terminate the handler") from error
@@ -523,7 +524,7 @@ class ShmWorkerBatchReceiver(WorkerBatchReceiver):
     ) -> bytes:
         try:
             session_id = decode_close_request(payload)
-        except GrpcProtocolError as error:
+        except TransportProtocolError as error:
             await context.abort(grpc.StatusCode.INVALID_ARGUMENT, str(error))
             raise AssertionError("context.abort must terminate the handler") from error
         async with self._session_lock:

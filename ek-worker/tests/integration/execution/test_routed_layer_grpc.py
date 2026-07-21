@@ -15,15 +15,15 @@ from expertkit_transport.routing import (
     WorkerIdentity,
     execute_routed_layer,
 )
-from expertkit_transport.transports.base import WorkerPositionSpec
+from expertkit_transport.transports import WorkerEndpointConfig
+from expertkit_transport.transports.base import BatchBufferConfig
 from expertkit_transport.transports.grpc import (
-    GrpcBatchSpec,
     GrpcWorkerBatchReceiver,
     GrpcWorkerTransport,
 )
 
 from expertkit_worker.backends.torch import TorchBackend, TorchExpertWeights
-from expertkit_worker.execution import WorkerExecution
+from expertkit_worker.execution import WorkerExecutor
 from expertkit_worker.weights import ReadyWeightTable
 
 _INSTANCE_ID = 7
@@ -38,7 +38,7 @@ class _RunningWorker:
     identity: WorkerIdentity
     server: GrpcWorkerBatchReceiver
     transport: GrpcWorkerTransport
-    execution: WorkerExecution
+    execution: WorkerExecutor
     ready: ReadyWeightTable[TorchExpertWeights]
 
     @property
@@ -94,8 +94,8 @@ def _weight(seed: int) -> TorchExpertWeights:
     )
 
 
-def _batch_spec() -> GrpcBatchSpec:
-    return GrpcBatchSpec(
+def _batch_spec() -> WorkerEndpointConfig:
+    return WorkerEndpointConfig(
         instance_id=_INSTANCE_ID,
         num_layers=1,
         experts_per_layer=3,
@@ -127,20 +127,19 @@ async def _start_worker(
         device="cpu",
         acquire_many=ready.acquire_many,
     )
-    execution = WorkerExecution(
+    execution = WorkerExecutor(
         server,
         backend,
         instance_id=_INSTANCE_ID,
-        position_spec=WorkerPositionSpec(
+        buffer_config=BatchBufferConfig(
             max_batch_tokens=_MAX_BATCH_TOKENS,
             hidden_dim=_HIDDEN_DIM,
             top_k=_TOP_K,
             dtype=torch.float32,
             device="cpu",
         ),
-        active_positions=1,
+        slot_count=1,
     )
-    await server.start()
     await execution.start()
     transport = GrpcWorkerTransport(
         f"127.0.0.1:{server.bound_port}",

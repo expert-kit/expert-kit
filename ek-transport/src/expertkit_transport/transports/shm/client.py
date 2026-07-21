@@ -15,13 +15,12 @@ import grpc
 import torch
 
 from expertkit_transport.batches import WorkerBatch
-from expertkit_transport.errors import TransportError, TransportErrorCode
-from expertkit_transport.transports.base import WorkerTransport
-from expertkit_transport.transports.grpc.codec import (
-    GrpcProtocolError,
-    _validate_batch_against_spec,
+from expertkit_transport.errors import (
+    TransportError,
+    TransportErrorCode,
+    TransportProtocolError,
 )
-from expertkit_transport.transports.grpc.spec import GrpcBatchSpec
+from expertkit_transport.transports.base import WorkerEndpointConfig, WorkerTransport
 from expertkit_transport.transports.shm.buffers import (
     ShmTransferBufferPool,
     ShmTransferBuffers,
@@ -36,6 +35,7 @@ from expertkit_transport.transports.shm.codec import (
     encode_execute_request,
     encode_open_request,
 )
+from expertkit_transport.transports.validation import validate_worker_batch
 
 _OPEN_METHOD = "/ek.worker.v2.ComputationService/OpenSharedMemory"
 _EXECUTE_METHOD = "/ek.worker.v2.ComputationService/ExecuteSharedMemory"
@@ -101,16 +101,16 @@ def _selected_hidden_states(batch: WorkerBatch) -> torch.Tensor:
             return batch.hidden_states
         return torch.index_select(batch.hidden_states, 0, batch.token_indices)
     except (IndexError, RuntimeError) as error:
-        raise GrpcProtocolError("Worker batch token indices are invalid") from error
+        raise TransportProtocolError("Worker batch token indices are invalid") from error
 
 
 def _copy_request_to_slot(
     batch: WorkerBatch,
-    spec: GrpcBatchSpec,
+    spec: WorkerEndpointConfig,
     buffers: ShmTransferBuffers,
     stream: torch.cuda.Stream | None,
 ) -> int:
-    _validate_batch_against_spec(batch, spec)
+    validate_worker_batch(batch, spec)
     slot = buffers.slot
     if buffers.generation >= _UINT64_MAX:
         raise RuntimeError("shared-memory slot generation is exhausted")
@@ -162,7 +162,7 @@ def _copy_slot_to_output(
 def _validate_output(
     output: torch.Tensor,
     batch: WorkerBatch,
-    spec: GrpcBatchSpec,
+    spec: WorkerEndpointConfig,
     device: torch.device,
 ) -> None:
     if output.shape != (batch.token_count, spec.hidden_dim):
@@ -181,7 +181,7 @@ class ShmWorkerTransport(WorkerTransport):
     def __init__(
         self,
         endpoint: str,
-        batch_spec: GrpcBatchSpec,
+        endpoint_config: WorkerEndpointConfig,
         *,
         max_in_flight: int,
         device: torch.device | str,
@@ -205,10 +205,10 @@ class ShmWorkerTransport(WorkerTransport):
             raise ValueError("cpu_workers must be a positive integer")
 
         self._endpoint = endpoint
-        self._spec = batch_spec
+        self._spec = endpoint_config
         self._device = torch.device(device)
         self._buffers = ShmTransferBufferPool(
-            batch_spec,
+            endpoint_config,
             capacity=max_in_flight,
             device=self._device,
         )
@@ -393,7 +393,7 @@ class ShmWorkerTransport(WorkerTransport):
                 buffers,
                 stream,
             )
-        except GrpcProtocolError as error:
+        except TransportProtocolError as error:
             raise TransportError(
                 TransportErrorCode.INVALID_REQUEST,
                 retryable=False,
@@ -451,7 +451,7 @@ class ShmWorkerTransport(WorkerTransport):
                 output,
                 stream,
             )
-        except GrpcProtocolError as error:
+        except TransportProtocolError as error:
             raise TransportError(
                 TransportErrorCode.PROTOCOL,
                 retryable=False,

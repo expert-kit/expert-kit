@@ -15,25 +15,26 @@ import grpc
 import torch
 
 from expertkit_transport.batches import WorkerBatch
-from expertkit_transport.errors import TransportError, TransportErrorCode
+from expertkit_transport.errors import (
+    TransportError,
+    TransportErrorCode,
+    TransportProtocolError,
+)
 from expertkit_transport.tracing import TraceContext, Tracer, TraceSpan
 from expertkit_transport.transports.base import (
-    ReceivedWorkerBatch,
+    BatchBufferConfig,
+    ReceivedBatch,
+    WorkerBatchBuffers,
     WorkerBatchReceiver,
-    WorkerPositionBuffers,
-    WorkerPositionSpec,
+    WorkerEndpointConfig,
 )
 from expertkit_transport.transports.grpc.codec import (
-    GrpcProtocolError,
     decode_request_with_size,
     encode_error_response,
     encode_success_response,
 )
-from expertkit_transport.transports.grpc.spec import (
-    GrpcBatchSpec,
-    calculate_message_limits,
-)
-from expertkit_transport.transports.grpc.worker_buffers import GrpcWorkerPositionBuffers
+from expertkit_transport.transports.grpc.spec import calculate_message_limits
+from expertkit_transport.transports.grpc.worker_buffers import GrpcWorkerBatchBuffers
 from expertkit_transport.transports.queue import ReceiverQueue
 
 _EXECUTE_METHOD_NAME = "Execute"
@@ -69,7 +70,7 @@ class _NativeCallError(RuntimeError):
         self.diagnostic = diagnostic
 
 
-class _GrpcWorkItem(ReceivedWorkerBatch):
+class _GrpcReceivedBatch(ReceivedBatch):
     def __init__(
         self,
         owner: GrpcWorkerBatchReceiver,
@@ -114,7 +115,7 @@ class _GrpcWorkItem(ReceivedWorkerBatch):
         return None
 
     def release_input(self) -> None:
-        """Drop decoded protobuf Tensor views after the active-position copy."""
+        """Drop decoded protobuf Tensor views after the execution-slot copy."""
 
         self._owner._require_active(self)
         self._batch = None
@@ -157,7 +158,7 @@ class GrpcWorkerBatchReceiver(WorkerBatchReceiver):
     def __init__(
         self,
         listen: str,
-        batch_spec: GrpcBatchSpec,
+        endpoint_config: WorkerEndpointConfig,
         *,
         max_active_batches: int,
         max_pending_batches: int,
@@ -185,8 +186,8 @@ class GrpcWorkerBatchReceiver(WorkerBatchReceiver):
             raise ValueError("cpu_workers must be a positive integer")
 
         self._listen = listen
-        self._spec = batch_spec
-        self._limits = calculate_message_limits(batch_spec)
+        self._spec = endpoint_config
+        self._limits = calculate_message_limits(endpoint_config)
         self._maximum_concurrent_rpcs = max_active_batches + max_pending_batches
         self._queue = ReceiverQueue(
             max_pending_batches=max_pending_batches,
@@ -204,7 +205,7 @@ class GrpcWorkerBatchReceiver(WorkerBatchReceiver):
         self._on_rejection = on_rejection or (lambda _reason: None)
         self._server: grpc.aio.Server | None = None
         self._start_lock = asyncio.Lock()
-        self._position_device: torch.device | None = None
+        self._execution_device: torch.device | None = None
         self._closing = False
         self._close_task: asyncio.Task[None] | None = None
         self._bound_port: int | None = None
@@ -265,15 +266,15 @@ class GrpcWorkerBatchReceiver(WorkerBatchReceiver):
             self._server = server
             self._bound_port = port
 
-    async def take(self) -> ReceivedWorkerBatch:
+    async def receive(self) -> ReceivedBatch:
         """Move one waiting batch directly into Worker execution ownership."""
 
         item = await self._queue.take()
         item.finish_wait_span("active")
         return item
 
-    def allocate_position_buffers(self, spec: WorkerPositionSpec) -> WorkerPositionBuffers:
-        """Allocate fixed gRPC staging for one Worker active position."""
+    def create_batch_buffers(self, spec: BatchBufferConfig) -> WorkerBatchBuffers:
+        """Allocate fixed gRPC staging for one Worker execution slot."""
 
         expected = (
             self._spec.max_batch_tokens,
@@ -283,12 +284,12 @@ class GrpcWorkerBatchReceiver(WorkerBatchReceiver):
         )
         actual = (spec.max_batch_tokens, spec.hidden_dim, spec.top_k, spec.dtype)
         if actual != expected:
-            raise ValueError("Worker position shape does not match the gRPC endpoint")
-        if self._position_device is None:
-            self._position_device = spec.device
-        elif self._position_device != spec.device:
-            raise ValueError("all Worker positions must use the same device")
-        return GrpcWorkerPositionBuffers(spec)
+            raise ValueError("Worker buffer shape does not match the gRPC endpoint")
+        if self._execution_device is None:
+            self._execution_device = spec.device
+        elif self._execution_device != spec.device:
+            raise ValueError("all Worker execution slots must use the same device")
+        return GrpcWorkerBatchBuffers(spec)
 
     async def close(self) -> None:
         """Stop RPC admission and release waiting calls and CPU workers."""
@@ -312,28 +313,26 @@ class GrpcWorkerBatchReceiver(WorkerBatchReceiver):
             stop_all=stop_all,
         )
 
-    async def clear_expert_drains(self, experts: Iterable[tuple[int, int]]) -> None:
+    async def clear_drains(self, experts: Iterable[tuple[int, int]]) -> None:
         """Clear per-expert gates after later assignments become ready."""
 
         await self._queue.clear_expert_drains(experts)
 
-    async def wait_experts_idle(
+    async def wait_idle(
         self,
-        experts: Iterable[tuple[int, int]],
+        experts: Iterable[tuple[int, int]] | None,
         *,
         monotonic_deadline: float,
     ) -> None:
-        """Wait until no waiting or active batch uses the selected experts."""
+        """Wait for selected expert use, or all work when experts is `None`."""
 
-        await self._queue.wait_experts_idle(
-            experts,
-            monotonic_deadline=monotonic_deadline,
-        )
-
-    async def wait_all_idle(self, *, monotonic_deadline: float) -> None:
-        """Wait until the Transport waiting area and execution are both empty."""
-
-        await self._queue.wait_all_idle(monotonic_deadline=monotonic_deadline)
+        if experts is None:
+            await self._queue.wait_all_idle(monotonic_deadline=monotonic_deadline)
+        else:
+            await self._queue.wait_experts_idle(
+                experts,
+                monotonic_deadline=monotonic_deadline,
+            )
 
     def admitted_count(self, layer_id: int, expert_id: int) -> int:
         """Return waiting plus active batches that name one expert."""
@@ -360,7 +359,7 @@ class GrpcWorkerBatchReceiver(WorkerBatchReceiver):
                 if span is not None:
                     for key, value in _batch_trace_attributes(decoded.batch).items():
                         span.set_attribute(key, value)
-        except GrpcProtocolError as error:
+        except TransportProtocolError as error:
             self._record_rejection(TransportErrorCode.PROTOCOL.value)
             await context.abort(grpc.StatusCode.INVALID_ARGUMENT, str(error))
             raise AssertionError("context.abort must terminate the handler") from error
@@ -368,7 +367,7 @@ class GrpcWorkerBatchReceiver(WorkerBatchReceiver):
 
         remaining = context.time_remaining()
         deadline = math.inf if remaining is None else self._clock() + max(0.0, remaining)
-        item = _GrpcWorkItem(
+        item = _GrpcReceivedBatch(
             self,
             decoded.batch,
             deadline,
@@ -395,7 +394,7 @@ class GrpcWorkerBatchReceiver(WorkerBatchReceiver):
             await context.abort(grpc.StatusCode.INTERNAL, "failed to encode Worker response")
             raise AssertionError("context.abort must terminate the handler") from error
 
-    async def _admit(self, item: _GrpcWorkItem) -> TransportError | None:
+    async def _admit(self, item: _GrpcReceivedBatch) -> TransportError | None:
         rejection = await self._queue.admit(
             item,
             retained_bytes=item.retained_bytes,
@@ -404,7 +403,7 @@ class GrpcWorkerBatchReceiver(WorkerBatchReceiver):
             item.start_wait_span(self._tracer)
         return rejection
 
-    async def _cancel(self, item: _GrpcWorkItem) -> None:
+    async def _cancel(self, item: _GrpcReceivedBatch) -> None:
         item._cancelled = True
         item._cancelled_event.set()
         if await self._queue.cancel_waiting(item):
@@ -413,12 +412,12 @@ class GrpcWorkerBatchReceiver(WorkerBatchReceiver):
     async def _wait_pending_count(self, expected: int) -> None:
         await self._queue.wait_for_pending_count(expected)
 
-    async def _wait_cancelled(self, item: _GrpcWorkItem) -> None:
+    async def _wait_cancelled(self, item: _GrpcReceivedBatch) -> None:
         await item._cancelled_event.wait()
 
     async def _complete_success(
         self,
-        item: _GrpcWorkItem,
+        item: _GrpcReceivedBatch,
         partial_output: torch.Tensor,
     ) -> None:
         self._require_active(item)
@@ -446,7 +445,7 @@ class GrpcWorkerBatchReceiver(WorkerBatchReceiver):
 
     async def _complete_error(
         self,
-        item: _GrpcWorkItem,
+        item: _GrpcReceivedBatch,
         error: TransportError,
     ) -> None:
         self._require_active(item)
@@ -476,7 +475,7 @@ class GrpcWorkerBatchReceiver(WorkerBatchReceiver):
         finally:
             await self._finish_active(item)
 
-    async def _finish_active(self, item: _GrpcWorkItem) -> None:
+    async def _finish_active(self, item: _GrpcReceivedBatch) -> None:
         item._batch = None
         cleanup = asyncio.create_task(self._release_active(item))
         try:
@@ -485,10 +484,10 @@ class GrpcWorkerBatchReceiver(WorkerBatchReceiver):
             await cleanup
             raise
 
-    async def _release_active(self, item: _GrpcWorkItem) -> None:
+    async def _release_active(self, item: _GrpcReceivedBatch) -> None:
         await self._queue.finish(item)
 
-    def _require_active(self, item: _GrpcWorkItem) -> None:
+    def _require_active(self, item: _GrpcReceivedBatch) -> None:
         self._queue.require_active(item)
 
     def _trace_span(

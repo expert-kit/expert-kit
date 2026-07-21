@@ -3,7 +3,8 @@
 import pytest
 import torch
 
-from expertkit_transport.transports.grpc import GrpcBatchSpec, GrpcProtocolError
+from expertkit_transport.errors import TransportProtocolError
+from expertkit_transport.transports import WorkerEndpointConfig
 from expertkit_transport.transports.shm.codec import ExecuteSlot, OpenSession
 from expertkit_transport.transports.shm.memory import SharedMemoryLayout, SharedMemoryRegion
 from expertkit_transport.transports.shm.session import (
@@ -12,8 +13,8 @@ from expertkit_transport.transports.shm.session import (
 )
 
 
-def spec() -> GrpcBatchSpec:
-    return GrpcBatchSpec(7, 4, 8, 4, 3, 2, torch.float32)
+def spec() -> WorkerEndpointConfig:
+    return WorkerEndpointConfig(7, 4, 8, 4, 3, 2, torch.float32)
 
 
 def test_session_claims_valid_rows_and_releases_each_generation() -> None:
@@ -39,7 +40,7 @@ def test_session_claims_valid_rows_and_releases_each_generation() -> None:
         with pytest.raises(SharedMemorySlotBusy):
             session.claim(ExecuteSlot("a" * 32, 0, 2, 2, 9, 2, 5_000_000))
         session.release(0, 1)
-        with pytest.raises(GrpcProtocolError, match="stale"):
+        with pytest.raises(TransportProtocolError, match="stale"):
             session.claim(request)
         second = session.claim(ExecuteSlot("a" * 32, 0, 2, 2, 9, 2, 5_000_000))
         session.release(second.slot_index, second.generation)
@@ -61,7 +62,7 @@ def test_session_rejects_invalid_network_routing_and_releases_slot() -> None:
         device="cpu",
     )
     try:
-        with pytest.raises(GrpcProtocolError, match="zero routing weight"):
+        with pytest.raises(TransportProtocolError, match="zero routing weight"):
             session.claim(ExecuteSlot("a" * 32, 0, 1, 0, 1, 1, 5_000_000))
         assert session.active_count == 0
     finally:

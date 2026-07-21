@@ -8,7 +8,7 @@ import torch
 
 from expertkit_transport.batches import WorkerBatch
 from expertkit_transport.errors import TransportError, TransportErrorCode
-from expertkit_transport.transports.base import ReceivedWorkerBatch, ReceiverClosed
+from expertkit_transport.transports.base import ReceivedBatch, ReceiverClosed
 from expertkit_transport.transports.queue import ReceiverQueue
 
 
@@ -25,7 +25,7 @@ def _batch(*, layer_id: int = 2, experts: tuple[int, ...] = (1, 3)) -> WorkerBat
     )
 
 
-class _Batch(ReceivedWorkerBatch):
+class _Batch(ReceivedBatch):
     def __init__(self, batch: WorkerBatch) -> None:
         self._batch = batch
 

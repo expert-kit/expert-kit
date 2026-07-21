@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from enum import Enum, auto
 
 from expertkit_transport.errors import TransportError, TransportErrorCode
-from expertkit_transport.transports.base import ReceivedWorkerBatch, ReceiverClosed
+from expertkit_transport.transports.base import ReceivedBatch, ReceiverClosed
 
 _UINT32_MAX = (1 << 32) - 1
 _UINT64_MAX = (1 << 64) - 1
@@ -25,7 +25,7 @@ class _State(Enum):
 
 @dataclass(slots=True)
 class _Entry:
-    item: ReceivedWorkerBatch
+    item: ReceivedBatch
     layer_id: int
     expert_ids: tuple[int, ...]
     retained_bytes: int
@@ -80,7 +80,7 @@ class ReceiverQueue:
         self._clock = clock
         self._on_pending_changed = on_pending_changed or (lambda _count: None)
         self._waiting: deque[_Entry] = deque()
-        self._entries: dict[ReceivedWorkerBatch, _Entry] = {}
+        self._entries: dict[ReceivedBatch, _Entry] = {}
         self._retained_bytes = 0
         self._active_count = 0
         self._admitted_experts: Counter[tuple[int, int]] = Counter()
@@ -109,7 +109,7 @@ class ReceiverQueue:
 
     async def admit(
         self,
-        item: ReceivedWorkerBatch,
+        item: ReceivedBatch,
         *,
         retained_bytes: int,
     ) -> TransportError | None:
@@ -158,7 +158,7 @@ class ReceiverQueue:
             self._condition.notify_all()
         return None
 
-    async def take(self) -> ReceivedWorkerBatch:
+    async def take(self) -> ReceivedBatch:
         """Move the oldest waiting batch into active execution ownership."""
 
         async with self._condition:
@@ -173,7 +173,7 @@ class ReceiverQueue:
             self._condition.notify_all()
             return entry.item
 
-    async def cancel_waiting(self, item: ReceivedWorkerBatch) -> bool:
+    async def cancel_waiting(self, item: ReceivedBatch) -> bool:
         """Remove one cancelled waiting batch; active work remains tracked."""
 
         async with self._condition:
@@ -188,7 +188,7 @@ class ReceiverQueue:
             self._condition.notify_all()
             return True
 
-    async def finish(self, item: ReceivedWorkerBatch) -> None:
+    async def finish(self, item: ReceivedBatch) -> None:
         """Release one active batch after response communication is finished."""
 
         async with self._condition:
@@ -200,7 +200,7 @@ class ReceiverQueue:
             self._release_experts(entry)
             self._condition.notify_all()
 
-    def require_active(self, item: ReceivedWorkerBatch) -> None:
+    def require_active(self, item: ReceivedBatch) -> None:
         """Reject completion of a batch that is not currently active."""
 
         entry = self._entries.get(item)
@@ -277,7 +277,7 @@ class ReceiverQueue:
 
         return self._admitted_experts[(layer_id, expert_id)]
 
-    async def begin_close(self) -> tuple[ReceivedWorkerBatch, ...]:
+    async def begin_close(self) -> tuple[ReceivedBatch, ...]:
         """Stop admission and transfer ownership of discarded waiting batches.
 
         The receiver must finish protocol-specific cancellation for the returned

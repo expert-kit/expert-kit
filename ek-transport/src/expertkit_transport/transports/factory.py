@@ -5,9 +5,8 @@ from __future__ import annotations
 import torch
 from expertkit_proto.ek.control.v2 import lifecycle_pb2
 
-from expertkit_transport.transports.base import WorkerTransport
+from expertkit_transport.transports.base import WorkerEndpointConfig, WorkerTransport
 from expertkit_transport.transports.grpc.client import GrpcWorkerTransport
-from expertkit_transport.transports.grpc.spec import GrpcBatchSpec
 from expertkit_transport.transports.shm.client import ShmWorkerTransport
 
 
@@ -27,7 +26,7 @@ def create_worker_transport(
 ) -> WorkerTransport:
     """Create the data connection declared by one validated Worker route."""
 
-    batch_spec = GrpcBatchSpec(
+    endpoint_config = WorkerEndpointConfig(
         instance_id=instance_id,
         num_layers=num_layers,
         experts_per_layer=experts_per_layer,
@@ -39,14 +38,14 @@ def create_worker_transport(
     if transport_type == lifecycle_pb2.WORKER_TRANSPORT_GRPC:
         return GrpcWorkerTransport(
             endpoint,
-            batch_spec,
+            endpoint_config,
             max_in_flight=max_in_flight,
             device=device,
         )
     if transport_type == lifecycle_pb2.WORKER_TRANSPORT_SHM:
         return ShmWorkerTransport(
             endpoint,
-            batch_spec,
+            endpoint_config,
             max_in_flight=max_in_flight,
             device=device,
         )

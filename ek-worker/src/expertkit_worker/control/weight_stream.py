@@ -288,7 +288,7 @@ class WeightControlSession:
                     and state.key in self._current_target_keys
                 )
                 if ready_targets:
-                    await self._receiver.clear_expert_drains(ready_targets)
+                    await self._receiver.clear_drains(ready_targets)
 
         if superseded_tasks:
             await asyncio.gather(*superseded_tasks, return_exceptions=True)
@@ -388,7 +388,7 @@ class WeightControlSession:
                 and WeightKey(state.layer_id, state.expert_id) in self._current_target_keys
             )
         if ready:
-            await self._receiver.clear_expert_drains(sorted(ready))
+            await self._receiver.clear_drains(sorted(ready))
 
     def _start_drain(self, authorization: DrainAuthorization) -> None:
         superseded = self._superseded_drains.get(authorization.drain_id)
@@ -437,9 +437,9 @@ class WeightControlSession:
                 if deadline is None:
                     deadline = self._clock() + self._shutdown_grace_secs
                     self._shutdown_deadline = deadline
-                await self._receiver.wait_all_idle(monotonic_deadline=deadline)
+                await self._receiver.wait_idle(None, monotonic_deadline=deadline)
             else:
-                await self._receiver.wait_experts_idle(
+                await self._receiver.wait_idle(
                     wire_keys,
                     monotonic_deadline=math.inf,
                 )

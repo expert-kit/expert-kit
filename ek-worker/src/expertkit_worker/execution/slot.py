@@ -14,9 +14,9 @@ from expertkit_transport.batches import WorkerBatch
 from expertkit_transport.errors import TransportError, TransportErrorCode
 from expertkit_transport.tracing import Tracer, TraceSpan
 from expertkit_transport.transports.base import (
-    ReceivedWorkerBatch,
-    WorkerPositionBuffers,
-    WorkerPositionSpec,
+    BatchBufferConfig,
+    ReceivedBatch,
+    WorkerBatchBuffers,
 )
 
 from expertkit_worker.backends import (
@@ -37,7 +37,7 @@ def _trace_span(tracer: Tracer | None, name: str) -> Any:
 
 
 def _request_end_error(
-    received: ReceivedWorkerBatch,
+    received: ReceivedBatch,
     clock: Callable[[], float],
 ) -> TransportError | None:
     if received.cancelled:
@@ -56,8 +56,8 @@ def _request_end_error(
 
 
 @dataclass(slots=True)
-class PositionResult:
-    """Hold one active position until result communication has finished.
+class ExecutionResult:
+    """Hold one active slot until result communication has finished.
 
     Attributes:
         output: Tensor safe for the receiver adapter to send. CUDA gRPC returns a
@@ -66,18 +66,18 @@ class PositionResult:
 
     Note:
         Call :meth:`release` only after response communication no longer reads the
-        output. This closes Backend completion state and makes the fixed position
+        output. This closes Backend completion state and makes the fixed slot
         reusable.
     """
 
     output: torch.Tensor | None
     rejection: TransportError | None
-    _position: ActivePosition = field(repr=False)
+    _slot: ExecutionSlot = field(repr=False)
     _completion: BackendCompletion | None = field(repr=False)
     _released: bool = field(default=False, init=False, repr=False)
 
     def release(self) -> None:
-        """Release Backend references and return the active position exactly once."""
+        """Release Backend references and return the active slot exactly once."""
 
         if self._released:
             return
@@ -86,16 +86,16 @@ class PositionResult:
             if self._completion is not None:
                 self._completion.close()
         finally:
-            self._position._release_result(self)
+            self._slot._release_result(self)
 
 
-class ActivePosition:
+class ExecutionSlot:
     """Own fixed input, output, staging, and CUDA ordering for one active batch."""
 
     def __init__(
         self,
-        spec: WorkerPositionSpec,
-        transport_buffers: WorkerPositionBuffers,
+        spec: BatchBufferConfig,
+        transport_buffers: WorkerBatchBuffers,
         *,
         enable_cuda_timing: bool = False,
     ) -> None:
@@ -138,14 +138,14 @@ class ActivePosition:
         except BaseException:
             transport_buffers.close()
             raise
-        self._result: PositionResult | None = None
+        self._result: ExecutionResult | None = None
         self._busy = False
         self._closed = False
         self._state_lock = Lock()
 
     @property
     def device(self) -> torch.device:
-        """Return the device owned by this active position."""
+        """Return the device owned by this active slot."""
 
         return self._spec.device
 
@@ -165,20 +165,20 @@ class ActivePosition:
 
     @property
     def busy(self) -> bool:
-        """Return whether computation or communication still owns this position."""
+        """Return whether computation or communication still owns this slot."""
 
         with self._state_lock:
             return self._busy
 
     def execute(
         self,
-        received: ReceivedWorkerBatch,
+        received: ReceivedBatch,
         backend: ComputeBackend,
         *,
         clock: Callable[[], float] = time.monotonic,
         tracer: Tracer | None = None,
         batch_span: TraceSpan | None = None,
-    ) -> PositionResult:
+    ) -> ExecutionResult:
         """Run one received batch in the current bounded execution thread.
 
         Returns:
@@ -188,7 +188,7 @@ class ActivePosition:
         Raises:
             BackendRequestError: The request can be rejected safely.
             BackendFatalError: Backend, copy, or device state is unsafe to continue.
-            RuntimeError: The position is closed or already active.
+            RuntimeError: The slot is closed or already active.
         """
 
         self._claim()
@@ -242,13 +242,13 @@ class ActivePosition:
             raise
 
     def close(self) -> None:
-        """Release fixed resources after the position becomes idle."""
+        """Release fixed resources after the slot becomes idle."""
 
         with self._state_lock:
             if self._closed:
                 return
             if self._busy:
-                raise RuntimeError("cannot close an active computation position")
+                raise RuntimeError("cannot close an active computation slot")
             self._closed = True
         self._transport_buffers.close()
         self._hidden_states = None
@@ -261,7 +261,7 @@ class ActivePosition:
 
     def _execute_cpu(
         self,
-        received: ReceivedWorkerBatch,
+        received: ReceivedBatch,
         source: WorkerBatch,
         backend: ComputeBackend,
         hidden: torch.Tensor,
@@ -270,7 +270,7 @@ class ActivePosition:
         output: torch.Tensor,
         clock: Callable[[], float],
         tracer: Tracer | None,
-    ) -> PositionResult:
+    ) -> ExecutionResult:
         with _trace_span(tracer, "worker.input.prepare"):
             batch = self._copy_and_build_batch(
                 received,
@@ -304,7 +304,7 @@ class ActivePosition:
 
     def _execute_cuda(
         self,
-        received: ReceivedWorkerBatch,
+        received: ReceivedBatch,
         source: WorkerBatch,
         backend: ComputeBackend,
         hidden: torch.Tensor,
@@ -314,7 +314,7 @@ class ActivePosition:
         clock: Callable[[], float],
         tracer: Tracer | None,
         batch_span: TraceSpan | None,
-    ) -> PositionResult:
+    ) -> ExecutionResult:
         stream = self._require_stream()
         event = self._require_event()
         completion: BackendCompletion | None = None
@@ -388,7 +388,7 @@ class ActivePosition:
 
     def _copy_and_build_batch(
         self,
-        received: ReceivedWorkerBatch,
+        received: ReceivedBatch,
         source: WorkerBatch,
         hidden: torch.Tensor,
         expert_ids: torch.Tensor,
@@ -441,7 +441,7 @@ class ActivePosition:
         token_count: int,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         if not 0 < token_count <= self._spec.max_batch_tokens:
-            raise InvalidBackendInput("batch token count exceeds the active position")
+            raise InvalidBackendInput("batch token count exceeds the active slot")
         hidden, expert_ids, routing_weights, output = self._require_device_tensors()
         return (
             hidden[:token_count],
@@ -455,25 +455,25 @@ class ActivePosition:
         output: torch.Tensor | None,
         rejection: TransportError | None,
         completion: BackendCompletion | None,
-    ) -> PositionResult:
-        result = PositionResult(output, rejection, self, completion)
+    ) -> ExecutionResult:
+        result = ExecutionResult(output, rejection, self, completion)
         with self._state_lock:
             self._result = result
         return result
 
-    def _release_result(self, result: PositionResult) -> None:
+    def _release_result(self, result: ExecutionResult) -> None:
         with self._state_lock:
             if self._result is not result:
-                raise RuntimeError("position result does not own this active position")
+                raise RuntimeError("slot result does not own this active slot")
             self._result = None
             self._busy = False
 
     def _claim(self) -> None:
         with self._state_lock:
             if self._closed:
-                raise RuntimeError("active computation position is closed")
+                raise RuntimeError("active computation slot is closed")
             if self._busy:
-                raise RuntimeError("active computation position is already in use")
+                raise RuntimeError("active computation slot is already in use")
             self._busy = True
 
     def _require_device_tensors(
@@ -486,15 +486,15 @@ class ActivePosition:
             self._partial_output,
         )
         if any(tensor is None for tensor in tensors):
-            raise RuntimeError("active computation position is closed")
+            raise RuntimeError("active computation slot is closed")
         return tensors  # type: ignore[return-value]
 
     def _require_stream(self) -> torch.cuda.Stream:
         if self._stream is None:
-            raise RuntimeError("CUDA stream is not available for this position")
+            raise RuntimeError("CUDA stream is not available for this slot")
         return self._stream
 
     def _require_event(self) -> torch.cuda.Event:
         if self._event is None:
-            raise RuntimeError("CUDA event is not available for this position")
+            raise RuntimeError("CUDA event is not available for this slot")
         return self._event

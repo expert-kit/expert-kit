@@ -5,12 +5,12 @@ import time
 
 import torch
 from expertkit_transport.batches import WorkerBatch
-from expertkit_transport.transports.base import WorkerPositionSpec
-from expertkit_transport.transports.grpc import GrpcBatchSpec
+from expertkit_transport.transports import WorkerEndpointConfig
+from expertkit_transport.transports.base import BatchBufferConfig
 from expertkit_transport.transports.shm import ShmWorkerBatchReceiver, ShmWorkerTransport
 
 from expertkit_worker.backends.torch import TorchBackend, TorchExpertWeights
-from expertkit_worker.execution import WorkerExecution
+from expertkit_worker.execution import WorkerExecutor
 from expertkit_worker.weights import ReadyWeightTable
 
 _HIDDEN_DIM = 4
@@ -52,7 +52,7 @@ def _reference(
 
 def test_worker_execution_uses_shared_input_and_output_destinations() -> None:
     async def scenario() -> None:
-        batch_spec = GrpcBatchSpec(7, 1, 2, 4, _HIDDEN_DIM, 2, torch.float32)
+        batch_spec = WorkerEndpointConfig(7, 1, 2, 4, _HIDDEN_DIM, 2, torch.float32)
         weights = {0: _weight(11), 1: _weight(29)}
         ready: ReadyWeightTable[TorchExpertWeights] = ReadyWeightTable(1, 2)
         for expert_id, weight in weights.items():
@@ -71,14 +71,13 @@ def test_worker_execution_uses_shared_input_and_output_destinations() -> None:
             device="cpu",
             acquire_many=ready.acquire_many,
         )
-        execution = WorkerExecution(
+        execution = WorkerExecutor(
             server,
             backend,
             instance_id=7,
-            position_spec=WorkerPositionSpec(4, _HIDDEN_DIM, 2, torch.float32, "cpu"),
-            active_positions=1,
+            buffer_config=BatchBufferConfig(4, _HIDDEN_DIM, 2, torch.float32, "cpu"),
+            slot_count=1,
         )
-        await server.start()
         await execution.start()
         transport = ShmWorkerTransport(
             f"127.0.0.1:{server.bound_port}",

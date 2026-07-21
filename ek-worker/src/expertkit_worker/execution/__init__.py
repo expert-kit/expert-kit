@@ -1,6 +1,6 @@
-"""Bounded Worker execution and fixed active-position resources."""
+"""Bounded Worker execution and fixed slot resources."""
 
-from expertkit_worker.execution.position import ActivePosition, PositionResult
-from expertkit_worker.execution.service import WorkerExecution
+from expertkit_worker.execution.executor import WorkerExecutor
+from expertkit_worker.execution.slot import ExecutionResult, ExecutionSlot
 
-__all__ = ["ActivePosition", "PositionResult", "WorkerExecution"]
+__all__ = ["ExecutionResult", "ExecutionSlot", "WorkerExecutor"]

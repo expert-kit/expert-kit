@@ -8,8 +8,9 @@ import time
 from pathlib import Path
 
 import torch
-from expertkit_transport.transports.base import WorkerPositionSpec
-from expertkit_transport.transports.grpc import GrpcBatchSpec, GrpcWorkerBatchReceiver
+from expertkit_transport.transports import WorkerEndpointConfig
+from expertkit_transport.transports.base import BatchBufferConfig
+from expertkit_transport.transports.grpc import GrpcWorkerBatchReceiver
 from safetensors.torch import save as save_safetensors
 
 from expertkit_worker.app import WorkerApplication
@@ -31,7 +32,7 @@ from expertkit_worker.control import (
     WorkerRegistration,
     new_start_id,
 )
-from expertkit_worker.execution import WorkerExecution
+from expertkit_worker.execution import WorkerExecutor
 from expertkit_worker.observability import configure_logging, create_observability
 from expertkit_worker.weights import (
     CachedCpuWeight,
@@ -146,7 +147,7 @@ async def _run(args: argparse.Namespace) -> None:
         compute_dtype=torch.float32,
         device="cpu",
     )
-    batch_spec = GrpcBatchSpec(
+    batch_spec = WorkerEndpointConfig(
         instance_id=_INSTANCE_ID,
         num_layers=1,
         experts_per_layer=1,
@@ -190,18 +191,18 @@ async def _run(args: argparse.Namespace) -> None:
         gate=args.gate,
         active_marker=args.active_marker,
     )
-    execution = WorkerExecution(
+    execution = WorkerExecutor(
         receiver,
         backend,
         instance_id=_INSTANCE_ID,
-        position_spec=WorkerPositionSpec(
+        buffer_config=BatchBufferConfig(
             max_batch_tokens=_MAX_BATCH_TOKENS,
             hidden_dim=_HIDDEN_DIM,
             top_k=1,
             dtype=torch.float32,
             device="cpu",
         ),
-        active_positions=1,
+        slot_count=1,
     )
 
     disk_cache = DirectIOWeightDiskCache(
@@ -303,7 +304,6 @@ async def _run(args: argparse.Namespace) -> None:
         transfer=transfer,
         manager=manager,
         peer_server=peer_server,
-        computation_server=receiver,
         execution=execution,
         control=control,
         disk_cache=disk_cache,

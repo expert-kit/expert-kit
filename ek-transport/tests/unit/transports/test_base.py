@@ -1,13 +1,13 @@
-"""Tests for Worker-side Transport position contracts."""
+"""Tests for Worker-side Transport buffer contracts."""
 
 import pytest
 import torch
 
-from expertkit_transport.transports.base import WorkerPositionSpec
+from expertkit_transport.transports.base import BatchBufferConfig
 
 
-def test_worker_position_spec_normalizes_device() -> None:
-    spec = WorkerPositionSpec(
+def test_batch_buffer_config_normalizes_device() -> None:
+    spec = BatchBufferConfig(
         max_batch_tokens=8,
         hidden_dim=16,
         top_k=2,
@@ -28,7 +28,7 @@ def test_worker_position_spec_normalizes_device() -> None:
         ("device", "meta", "must be CPU or CUDA"),
     ],
 )
-def test_worker_position_spec_rejects_invalid_values(
+def test_batch_buffer_config_rejects_invalid_values(
     field: str,
     value: object,
     match: str,
@@ -43,4 +43,4 @@ def test_worker_position_spec_rejects_invalid_values(
     fields[field] = value
 
     with pytest.raises(ValueError, match=match):
-        WorkerPositionSpec(**fields)  # type: ignore[arg-type]
+        BatchBufferConfig(**fields)  # type: ignore[arg-type]

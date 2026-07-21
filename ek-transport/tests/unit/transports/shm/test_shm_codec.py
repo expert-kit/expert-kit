@@ -3,8 +3,8 @@
 import pytest
 import torch
 
-from expertkit_transport.errors import TransportError, TransportErrorCode
-from expertkit_transport.transports.grpc import GrpcBatchSpec, GrpcProtocolError
+from expertkit_transport.errors import TransportError, TransportErrorCode, TransportProtocolError
+from expertkit_transport.transports import WorkerEndpointConfig
 from expertkit_transport.transports.shm.codec import (
     ExecuteSlot,
     decode_execute_request,
@@ -18,8 +18,8 @@ from expertkit_transport.transports.shm.codec import (
 from expertkit_transport.transports.shm.memory import SharedMemoryLayout
 
 
-def spec() -> GrpcBatchSpec:
-    return GrpcBatchSpec(
+def spec() -> WorkerEndpointConfig:
+    return WorkerEndpointConfig(
         instance_id=7,
         num_layers=4,
         experts_per_layer=8,
@@ -62,7 +62,7 @@ def test_open_rejects_a_layout_that_differs_from_worker_admission() -> None:
         spec=spec(),
     )
 
-    with pytest.raises(GrpcProtocolError, match="slot count"):
+    with pytest.raises(TransportProtocolError, match="slot count"):
         decode_open_request(payload, spec(), expected_slot_count=3)
 
 
@@ -85,5 +85,5 @@ def test_execute_response_preserves_structured_error() -> None:
 
 
 def test_execute_rejects_a_stale_completion_generation() -> None:
-    with pytest.raises(GrpcProtocolError, match="generation"):
+    with pytest.raises(TransportProtocolError, match="generation"):
         decode_execute_response(encode_execute_success(2), 3, spec())

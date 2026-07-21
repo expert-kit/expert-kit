@@ -11,9 +11,9 @@ import pytest
 import torch
 from aiohttp import ClientSession
 from expertkit_transport.batches import WorkerBatch
-from expertkit_transport.transports.base import WorkerPositionSpec
+from expertkit_transport.transports import WorkerEndpointConfig
+from expertkit_transport.transports.base import BatchBufferConfig
 from expertkit_transport.transports.grpc import (
-    GrpcBatchSpec,
     GrpcWorkerBatchReceiver,
     decode_response,
     encode_request,
@@ -28,7 +28,7 @@ from expertkit_worker.backends import (
     ComputeBackend,
 )
 from expertkit_worker.config.models import ObservabilityConfig
-from expertkit_worker.execution import WorkerExecution
+from expertkit_worker.execution import WorkerExecutor
 from expertkit_worker.observability import create_observability
 
 pytest.importorskip("prometheus_client")
@@ -50,8 +50,8 @@ def _unused_port() -> int:
         return int(listener.getsockname()[1])
 
 
-def _spec() -> GrpcBatchSpec:
-    return GrpcBatchSpec(
+def _spec() -> WorkerEndpointConfig:
+    return WorkerEndpointConfig(
         instance_id=7,
         num_layers=1,
         experts_per_layer=1,
@@ -185,17 +185,16 @@ def test_tracing_extracts_parent_context_and_exports_off_the_rpc_path() -> None:
             interceptors=observability.grpc_interceptors,
             tracer=observability.tracer,
         )
-        execution = WorkerExecution(
+        execution = WorkerExecutor(
             server,
             _DoubleBackend(),
             instance_id=7,
-            position_spec=WorkerPositionSpec(2, 2, 1, torch.float32, "cpu"),
-            active_positions=1,
+            buffer_config=BatchBufferConfig(2, 2, 1, torch.float32, "cpu"),
+            slot_count=1,
             tracer=observability.tracer,
         )
         channel: grpc.aio.Channel | None = None
         await observability.start()
-        await server.start()
         await execution.start()
         try:
             channel = grpc.aio.insecure_channel(f"127.0.0.1:{server.bound_port}")

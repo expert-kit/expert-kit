@@ -10,9 +10,9 @@ import pytest
 import torch
 from expertkit_transport.batches import WorkerBatch
 from expertkit_transport.errors import TransportError, TransportErrorCode
-from expertkit_transport.transports.base import WorkerPositionSpec
+from expertkit_transport.transports import WorkerEndpointConfig
+from expertkit_transport.transports.base import BatchBufferConfig
 from expertkit_transport.transports.grpc import (
-    GrpcBatchSpec,
     GrpcWorkerBatchReceiver,
     GrpcWorkerTransport,
 )
@@ -28,7 +28,7 @@ from expertkit_worker.backends import (
     CompletedSubmission,
     ComputeBackend,
 )
-from expertkit_worker.execution import WorkerExecution
+from expertkit_worker.execution import WorkerExecutor
 from expertkit_worker.observability.api import WorkerMetrics
 
 
@@ -119,8 +119,8 @@ class BlockingBackend(TestBackend):
         return CompletedSubmission()
 
 
-def batch_spec() -> GrpcBatchSpec:
-    return GrpcBatchSpec(
+def batch_spec() -> WorkerEndpointConfig:
+    return WorkerEndpointConfig(
         instance_id=7,
         num_layers=4,
         experts_per_layer=8,
@@ -131,8 +131,8 @@ def batch_spec() -> GrpcBatchSpec:
     )
 
 
-def position_spec() -> WorkerPositionSpec:
-    return WorkerPositionSpec(
+def buffer_config() -> BatchBufferConfig:
+    return BatchBufferConfig(
         max_batch_tokens=4,
         hidden_dim=3,
         top_k=2,
@@ -164,22 +164,21 @@ async def start_stack(
     active: int = 1,
     pending: int = 1,
     metrics: WorkerMetrics | None = None,
-) -> tuple[GrpcWorkerBatchReceiver, GrpcWorkerTransport, WorkerExecution]:
+) -> tuple[GrpcWorkerBatchReceiver, GrpcWorkerTransport, WorkerExecutor]:
     server = GrpcWorkerBatchReceiver(
         "127.0.0.1:0",
         batch_spec(),
         max_active_batches=active,
         max_pending_batches=pending,
     )
-    execution = WorkerExecution(
+    execution = WorkerExecutor(
         server,
         backend,
         instance_id=7,
-        position_spec=position_spec(),
-        active_positions=active,
+        buffer_config=buffer_config(),
+        slot_count=active,
         metrics=metrics,
     )
-    await server.start()
     await execution.start()
     client = GrpcWorkerTransport(
         f"127.0.0.1:{server.bound_port}",
@@ -193,7 +192,7 @@ async def start_stack(
 
 async def close_stack(
     client: GrpcWorkerTransport,
-    execution: WorkerExecution,
+    execution: WorkerExecutor,
 ) -> None:
     async with asyncio.timeout(5):
         try:
@@ -257,7 +256,7 @@ def test_execution_maps_ready_weight_failure_without_stopping_worker() -> None:
     run(scenario())
 
 
-def test_execution_limits_active_work_to_fixed_positions() -> None:
+def test_execution_limits_active_work_to_fixed_slots() -> None:
     async def scenario() -> None:
         backend = BlockingBackend(expected_active=2)
         server, client, execution = await start_stack(backend, active=2, pending=2)
@@ -313,7 +312,7 @@ def test_cancelled_response_does_not_cancel_active_computation() -> None:
 
             backend.release.set()
             async with asyncio.timeout(2):
-                await server.wait_all_idle(monotonic_deadline=float("inf"))
+                await server.wait_idle(None, monotonic_deadline=float("inf"))
                 await client.execute(
                     worker_batch(),
                     second_output,

@@ -1,11 +1,11 @@
-"""Fixed Worker-side gRPC staging storage for one active position."""
+"""Fixed Worker-side gRPC staging storage for one execution slot."""
 
 from __future__ import annotations
 
 import torch
 
 from expertkit_transport.batches import WorkerBatch
-from expertkit_transport.transports.base import WorkerPositionBuffers, WorkerPositionSpec
+from expertkit_transport.transports.base import BatchBufferConfig, WorkerBatchBuffers
 
 
 def _require_tensor(
@@ -26,10 +26,10 @@ def _require_tensor(
         raise ValueError(f"{name} must be contiguous")
 
 
-class GrpcWorkerPositionBuffers(WorkerPositionBuffers):
+class GrpcWorkerBatchBuffers(WorkerBatchBuffers):
     """Reuse pinned Host staging for CUDA and direct fixed tensors for CPU."""
 
-    def __init__(self, spec: WorkerPositionSpec) -> None:
+    def __init__(self, spec: BatchBufferConfig) -> None:
         self._spec = spec
         self._closed = False
         if spec.device.type == "cuda":
@@ -65,7 +65,7 @@ class GrpcWorkerPositionBuffers(WorkerPositionBuffers):
 
     @property
     def host_staging_bytes(self) -> int:
-        """Return the fixed pinned Host allocation for this position."""
+        """Return the fixed pinned Host allocation for this execution slot."""
 
         if self._spec.device.type == "cpu":
             return 0
@@ -89,11 +89,11 @@ class GrpcWorkerPositionBuffers(WorkerPositionBuffers):
         if batch.hidden_states.device.type != "cpu":
             raise ValueError("a Worker-side gRPC batch must contain CPU tensors")
         if not 0 < batch.token_count <= self._spec.max_batch_tokens:
-            raise ValueError("received batch token count exceeds the fixed position")
+            raise ValueError("received batch token count exceeds the fixed slot")
         if batch.hidden_dim != self._spec.hidden_dim or batch.top_k != self._spec.top_k:
-            raise ValueError("received batch shape does not match the fixed position")
+            raise ValueError("received batch shape does not match the fixed slot")
         if batch.hidden_states.dtype != self._spec.dtype:
-            raise ValueError("received batch dtype does not match the fixed position")
+            raise ValueError("received batch dtype does not match the fixed slot")
         for name, tensor in (
             ("received hidden_states", batch.hidden_states),
             ("received expert_ids", batch.expert_ids),
@@ -167,7 +167,7 @@ class GrpcWorkerPositionBuffers(WorkerPositionBuffers):
             device=self._spec.device,
         )
         if not 0 < partial_output.shape[0] <= self._spec.max_batch_tokens:
-            raise ValueError("partial_output token count exceeds the fixed position")
+            raise ValueError("partial_output token count exceeds the fixed slot")
         if destination is not None:
             _require_tensor(
                 "output destination",
@@ -203,7 +203,7 @@ class GrpcWorkerPositionBuffers(WorkerPositionBuffers):
 
     def _require_open(self) -> None:
         if self._closed:
-            raise RuntimeError("Worker position buffers are closed")
+            raise RuntimeError("Worker batch buffers are closed")
 
     @staticmethod
     def _require_host(tensor: torch.Tensor | None) -> torch.Tensor:

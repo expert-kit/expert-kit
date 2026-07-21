@@ -11,8 +11,8 @@ import torch
 
 from expertkit_transport.batches import WorkerBatch
 from expertkit_transport.errors import TransportError, TransportErrorCode
+from expertkit_transport.transports import WorkerEndpointConfig
 from expertkit_transport.transports.grpc import (
-    GrpcBatchSpec,
     GrpcWorkerTransport,
     decode_request,
     encode_error_response,
@@ -23,8 +23,8 @@ from expertkit_transport.transports.grpc.spec import calculate_message_limits
 RawHandler = Callable[[bytes, grpc.aio.ServicerContext], Awaitable[bytes]]
 
 
-def batch_spec() -> GrpcBatchSpec:
-    return GrpcBatchSpec(
+def batch_spec() -> WorkerEndpointConfig:
+    return WorkerEndpointConfig(
         instance_id=7,
         num_layers=4,
         experts_per_layer=8,

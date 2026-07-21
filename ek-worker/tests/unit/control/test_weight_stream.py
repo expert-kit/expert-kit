@@ -9,10 +9,10 @@ from typing import Any
 import pytest
 from expertkit_proto.ek.control.v2 import weight_control_pb2
 from expertkit_transport.transports.base import (
-    ReceivedWorkerBatch,
+    BatchBufferConfig,
+    ReceivedBatch,
+    WorkerBatchBuffers,
     WorkerBatchReceiver,
-    WorkerPositionBuffers,
-    WorkerPositionSpec,
 )
 
 from expertkit_worker.control import (
@@ -150,10 +150,13 @@ class FakeReceiver(WorkerBatchReceiver):
         self.all_idle_deadline: float | None = None
         self.wait_error: Exception | None = None
 
-    async def take(self) -> ReceivedWorkerBatch:
+    async def start(self) -> None:
+        return None
+
+    async def receive(self) -> ReceivedBatch:
         raise NotImplementedError
 
-    def allocate_position_buffers(self, spec: WorkerPositionSpec) -> WorkerPositionBuffers:
+    def create_batch_buffers(self, spec: BatchBufferConfig) -> WorkerBatchBuffers:
         raise NotImplementedError
 
     async def begin_drain(
@@ -165,26 +168,24 @@ class FakeReceiver(WorkerBatchReceiver):
     ) -> None:
         self.begun.append((tuple(experts), min_topology_version, stop_all))
 
-    async def clear_expert_drains(self, experts: Iterable[tuple[int, int]]) -> None:
+    async def clear_drains(self, experts: Iterable[tuple[int, int]]) -> None:
         self.cleared.append(tuple(experts))
 
-    async def wait_experts_idle(
+    async def wait_idle(
         self,
-        experts: Iterable[tuple[int, int]],
+        experts: Iterable[tuple[int, int]] | None,
         *,
         monotonic_deadline: float,
     ) -> None:
-        assert monotonic_deadline == float("inf")
         if self.wait_error is not None:
             raise self.wait_error
-        self.expert_idle.append(tuple(experts))
-
-    async def wait_all_idle(self, *, monotonic_deadline: float) -> None:
-        assert monotonic_deadline > 0
-        if self.wait_error is not None:
-            raise self.wait_error
-        self.all_idle += 1
-        self.all_idle_deadline = monotonic_deadline
+        if experts is None:
+            assert monotonic_deadline > 0
+            self.all_idle += 1
+            self.all_idle_deadline = monotonic_deadline
+        else:
+            assert monotonic_deadline == float("inf")
+            self.expert_idle.append(tuple(experts))
 
     async def close(self) -> None:
         return None
@@ -478,7 +479,7 @@ class BlockingDrainReceiver(FakeReceiver):
         )
         self.drain_started.set()
 
-    async def wait_experts_idle(
+    async def wait_idle(
         self,
         experts: Iterable[tuple[int, int]],
         *,

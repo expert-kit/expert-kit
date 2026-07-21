@@ -8,13 +8,11 @@ from pathlib import Path
 import torch
 
 from expertkit_transport.batches import WorkerBatch
-from expertkit_transport.transports.grpc.codec import (
-    GrpcProtocolError,
-    validate_received_routing,
-)
-from expertkit_transport.transports.grpc.spec import GrpcBatchSpec
+from expertkit_transport.errors import TransportProtocolError
+from expertkit_transport.transports.base import WorkerEndpointConfig
 from expertkit_transport.transports.shm.codec import ExecuteSlot, OpenSession
 from expertkit_transport.transports.shm.memory import SharedMemoryRegion, SharedMemorySlot
+from expertkit_transport.transports.validation import validate_received_routing
 
 
 class SharedMemorySlotBusy(RuntimeError):
@@ -38,7 +36,7 @@ class WorkerSharedMemorySession:
         self,
         description: OpenSession,
         *,
-        spec: GrpcBatchSpec,
+        spec: WorkerEndpointConfig,
         device: torch.device | str,
         directory: Path = Path("/dev/shm"),
     ) -> None:
@@ -73,14 +71,14 @@ class WorkerSharedMemorySession:
 
         self._require_open()
         if request.session_id != self.session_id:
-            raise GrpcProtocolError("shared-memory request names the wrong session")
+            raise TransportProtocolError("shared-memory request names the wrong session")
         if not 0 <= request.slot_index < len(self._slots):
-            raise GrpcProtocolError("shared-memory slot index is outside the session")
+            raise TransportProtocolError("shared-memory slot index is outside the session")
         active = self._active_generations[request.slot_index]
         if active is not None:
             raise SharedMemorySlotBusy("shared-memory slot is still active")
         if request.generation <= self._last_generations[request.slot_index]:
-            raise GrpcProtocolError("shared-memory slot generation is stale")
+            raise TransportProtocolError("shared-memory slot generation is stale")
         self._active_generations[request.slot_index] = request.generation
         self._last_generations[request.slot_index] = request.generation
 

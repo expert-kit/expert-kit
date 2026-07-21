@@ -6,7 +6,7 @@ from dataclasses import dataclass
 
 import torch
 
-from expertkit_transport.transports.grpc.spec import GrpcBatchSpec
+from expertkit_transport.transports.base import WorkerEndpointConfig
 from expertkit_transport.transports.shm.memory import (
     SharedMemoryLayout,
     SharedMemoryRegion,
@@ -32,7 +32,7 @@ class ShmTransferBufferPool:
 
     def __init__(
         self,
-        batch_spec: GrpcBatchSpec,
+        endpoint_config: WorkerEndpointConfig,
         *,
         capacity: int,
         device: torch.device | str,
@@ -40,10 +40,10 @@ class ShmTransferBufferPool:
         self._device = torch.device(device)
         self.layout = SharedMemoryLayout(
             slot_count=capacity,
-            max_batch_tokens=batch_spec.max_batch_tokens,
-            hidden_dim=batch_spec.hidden_dim,
-            top_k=batch_spec.top_k,
-            dtype=batch_spec.dtype,
+            max_batch_tokens=endpoint_config.max_batch_tokens,
+            hidden_dim=endpoint_config.hidden_dim,
+            top_k=endpoint_config.top_k,
+            dtype=endpoint_config.dtype,
         )
         self.session_id = new_session_id()
         self._region: SharedMemoryRegion | None = SharedMemoryRegion.create(

@@ -3,12 +3,12 @@
 import pytest
 import torch
 
-from expertkit_transport.transports.grpc import GrpcBatchSpec
+from expertkit_transport.transports import WorkerEndpointConfig
 from expertkit_transport.transports.grpc.buffers import GrpcTransferBufferPool
 
 
-def batch_spec() -> GrpcBatchSpec:
-    return GrpcBatchSpec(
+def batch_spec() -> WorkerEndpointConfig:
+    return WorkerEndpointConfig(
         instance_id=7,
         num_layers=4,
         experts_per_layer=8,

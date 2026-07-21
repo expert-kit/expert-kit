@@ -4,27 +4,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-import torch
-from expertkit_proto.ek.worker.v2 import common_pb2
+from expertkit_transport.transports.base import WorkerEndpointConfig
+from expertkit_transport.transports.codec import (
+    MAX_DIAGNOSTIC_BYTES,
+    activation_dtype_to_protobuf,
+)
 
-_UINT32_MAX = (1 << 32) - 1
-_UINT64_MAX = (1 << 64) - 1
 _GRPC_MAX_MESSAGE_BYTES = (1 << 31) - 1
 _PROTOBUF_SAFETY_MARGIN_BYTES = 256
-MAX_DIAGNOSTIC_BYTES = 1024
-
-_DTYPE_TO_PROTO = {
-    torch.float16: common_pb2.ACTIVATION_DTYPE_FP16,
-    torch.bfloat16: common_pb2.ACTIVATION_DTYPE_BF16,
-    torch.float32: common_pb2.ACTIVATION_DTYPE_FP32,
-}
-_PROTO_TO_DTYPE = {wire: dtype for dtype, wire in _DTYPE_TO_PROTO.items()}
-
-
-def _require_unsigned(name: str, value: int, maximum: int, *, positive: bool = False) -> None:
-    minimum = 1 if positive else 0
-    if isinstance(value, bool) or not isinstance(value, int) or not minimum <= value <= maximum:
-        raise ValueError(f"{name} must be an integer in [{minimum}, {maximum}]")
 
 
 def _checked_add(*values: int) -> int:
@@ -58,53 +45,6 @@ def _bytes_field_size(field_number: int, payload_bytes: int) -> int:
 
 
 @dataclass(frozen=True, slots=True)
-class GrpcBatchSpec:
-    """Fix the authoritative model shape accepted by one gRPC endpoint."""
-
-    instance_id: int
-    num_layers: int
-    experts_per_layer: int
-    max_batch_tokens: int
-    hidden_dim: int
-    top_k: int
-    dtype: torch.dtype
-
-    def __post_init__(self) -> None:
-        _require_unsigned("instance_id", self.instance_id, _UINT64_MAX, positive=True)
-        for name in (
-            "num_layers",
-            "experts_per_layer",
-            "max_batch_tokens",
-            "hidden_dim",
-            "top_k",
-        ):
-            _require_unsigned(name, getattr(self, name), _UINT32_MAX, positive=True)
-        if self.top_k > self.experts_per_layer:
-            raise ValueError("top_k must not exceed experts_per_layer")
-        if self.dtype not in _DTYPE_TO_PROTO:
-            raise ValueError("dtype must be FP16, BF16, or FP32")
-        calculate_message_limits(self)
-
-    @property
-    def activation_element_bytes(self) -> int:
-        """Return the raw-byte width of one activation element."""
-
-        return torch.empty((), dtype=self.dtype).element_size()
-
-    @property
-    def protobuf_dtype(self) -> int:
-        """Return the v2 wire enum matching the Torch activation dtype."""
-
-        return _DTYPE_TO_PROTO[self.dtype]
-
-    @classmethod
-    def dtype_from_protobuf(cls, value: int) -> torch.dtype | None:
-        """Return the Torch dtype for a known v2 wire enum."""
-
-        return _PROTO_TO_DTYPE.get(value)
-
-
-@dataclass(frozen=True, slots=True)
 class GrpcMessageLimits:
     """Hold finite encoded-message limits for both gRPC directions."""
 
@@ -131,7 +71,7 @@ class GrpcMessageLimits:
         )
 
 
-def calculate_message_limits(spec: GrpcBatchSpec) -> GrpcMessageLimits:
+def calculate_message_limits(spec: WorkerEndpointConfig) -> GrpcMessageLimits:
     """Calculate finite protobuf limits without allocating maximum-size payloads."""
 
     token_count = spec.max_batch_tokens
@@ -151,7 +91,7 @@ def calculate_message_limits(spec: GrpcBatchSpec) -> GrpcMessageLimits:
         _tag_size(4, 0) + _varint_size(token_count),
         _tag_size(5, 0) + _varint_size(spec.hidden_dim),
         _tag_size(6, 0) + _varint_size(spec.top_k),
-        _tag_size(7, 0) + _varint_size(spec.protobuf_dtype),
+        _tag_size(7, 0) + _varint_size(activation_dtype_to_protobuf(spec.dtype)),
     )
     request_bytes = _checked_add(
         *scalar_fields,

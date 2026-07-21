@@ -1,4 +1,4 @@
-"""Tests for fixed active computation positions."""
+"""Tests for fixed active computation slots."""
 
 from __future__ import annotations
 
@@ -11,8 +11,8 @@ import torch
 from expertkit_transport.batches import WorkerBatch
 from expertkit_transport.errors import TransportError, TransportErrorCode
 from expertkit_transport.tracing import TraceAttribute, TraceContext, TraceSpan
-from expertkit_transport.transports.base import ReceivedWorkerBatch, WorkerPositionSpec
-from expertkit_transport.transports.grpc.worker_buffers import GrpcWorkerPositionBuffers
+from expertkit_transport.transports.base import BatchBufferConfig, ReceivedBatch
+from expertkit_transport.transports.grpc.worker_buffers import GrpcWorkerBatchBuffers
 
 from expertkit_worker.backends import (
     BackendBatch,
@@ -23,11 +23,11 @@ from expertkit_worker.backends import (
     BackendResourceEstimate,
     ComputeBackend,
 )
-from expertkit_worker.execution import ActivePosition
+from expertkit_worker.execution import ExecutionSlot
 
 
-class FakeReceivedBatch(ReceivedWorkerBatch):
-    """Expose controlled cancellation and input-lifetime state to a position."""
+class FakeReceivedBatch(ReceivedBatch):
+    """Expose controlled cancellation and input-lifetime state to a slot."""
 
     def __init__(self, batch: WorkerBatch, *, deadline: float = math.inf) -> None:
         self._batch: WorkerBatch | None = batch
@@ -62,10 +62,10 @@ class FakeReceivedBatch(ReceivedWorkerBatch):
         self._batch = None
 
     async def complete(self, partial_output: torch.Tensor) -> None:
-        raise AssertionError("position tests do not send responses")
+        raise AssertionError("slot tests do not send responses")
 
     async def reject(self, error: TransportError) -> None:
-        raise AssertionError("position tests do not send responses")
+        raise AssertionError("slot tests do not send responses")
 
 
 class RecordingSpan:
@@ -186,49 +186,49 @@ def worker_batch(dtype: torch.dtype = torch.float32) -> WorkerBatch:
     )
 
 
-def make_position(
+def make_slot(
     device: str,
     dtype: torch.dtype = torch.float32,
     *,
     enable_cuda_timing: bool = False,
-) -> ActivePosition:
-    spec = WorkerPositionSpec(
+) -> ExecutionSlot:
+    spec = BatchBufferConfig(
         max_batch_tokens=4,
         hidden_dim=3,
         top_k=2,
         dtype=dtype,
         device=device,
     )
-    return ActivePosition(
+    return ExecutionSlot(
         spec,
-        GrpcWorkerPositionBuffers(spec),
+        GrpcWorkerBatchBuffers(spec),
         enable_cuda_timing=enable_cuda_timing,
     )
 
 
-def test_cpu_position_reuses_fixed_inputs_and_output() -> None:
-    position = make_position("cpu")
+def test_cpu_slot_reuses_fixed_inputs_and_output() -> None:
+    slot = make_slot("cpu")
     backend = DoublingBackend()
 
     first = FakeReceivedBatch(worker_batch())
     expected = first.batch.hidden_states * 2
-    first_result = position.execute(first, backend)
+    first_result = slot.execute(first, backend)
     torch.testing.assert_close(first_result.output, expected)
     assert first.input_released is True
     assert backend.completions[0].waited is True
-    assert position.busy is True
+    assert slot.busy is True
     with pytest.raises(RuntimeError, match="already in use"):
-        position.execute(FakeReceivedBatch(worker_batch()), backend)
+        slot.execute(FakeReceivedBatch(worker_batch()), backend)
     first_result.release()
     assert backend.completions[0].closed is True
 
-    second_result = position.execute(FakeReceivedBatch(worker_batch()), backend)
+    second_result = slot.execute(FakeReceivedBatch(worker_batch()), backend)
     assert backend.input_pointers[0] == backend.input_pointers[1]
     assert backend.output_pointers[0] == backend.output_pointers[1]
     second_result.release()
-    assert position.device_bytes == 160
-    assert position.host_staging_bytes == 0
-    position.close()
+    assert slot.device_bytes == 160
+    assert slot.host_staging_bytes == 0
+    slot.close()
 
 
 @pytest.mark.parametrize(
@@ -238,17 +238,17 @@ def test_cpu_position_reuses_fixed_inputs_and_output() -> None:
         (False, 10.0, TransportErrorCode.DEADLINE_EXCEEDED),
     ],
 )
-def test_position_rejects_ended_request_before_backend_submission(
+def test_slot_rejects_ended_request_before_backend_submission(
     cancelled: bool,
     deadline: float,
     code: TransportErrorCode,
 ) -> None:
-    position = make_position("cpu")
+    slot = make_slot("cpu")
     backend = DoublingBackend()
     received = FakeReceivedBatch(worker_batch(), deadline=deadline)
     received.is_cancelled = cancelled
 
-    result = position.execute(received, backend, clock=lambda: 10.0)
+    result = slot.execute(received, backend, clock=lambda: 10.0)
 
     assert result.output is None
     assert result.rejection is not None
@@ -256,16 +256,16 @@ def test_position_rejects_ended_request_before_backend_submission(
     assert backend.calls == 0
     assert received.input_released is True
     result.release()
-    position.close()
+    slot.close()
 
 
-def test_position_tracks_submitted_work_after_cancellation() -> None:
-    position = make_position("cpu")
+def test_slot_tracks_submitted_work_after_cancellation() -> None:
+    slot = make_slot("cpu")
     backend = DoublingBackend()
     received = FakeReceivedBatch(worker_batch())
     backend.cancel_during_submit = received
 
-    result = position.execute(received, backend)
+    result = slot.execute(received, backend)
 
     assert result.output is None
     assert result.rejection is not None
@@ -274,10 +274,10 @@ def test_position_tracks_submitted_work_after_cancellation() -> None:
     assert backend.completions[0].closed is False
     result.release()
     assert backend.completions[0].closed is True
-    position.close()
+    slot.close()
 
 
-def test_position_maps_unclassified_backend_exception_to_fatal() -> None:
+def test_slot_maps_unclassified_backend_exception_to_fatal() -> None:
     class BrokenBackend(DoublingBackend):
         def submit(
             self,
@@ -286,24 +286,24 @@ def test_position_maps_unclassified_backend_exception_to_fatal() -> None:
         ) -> BackendCompletion:
             raise KeyError("broken state")
 
-    position = make_position("cpu")
+    slot = make_slot("cpu")
 
     with pytest.raises(BackendFatalError) as caught:
-        position.execute(FakeReceivedBatch(worker_batch()), BrokenBackend())
+        slot.execute(FakeReceivedBatch(worker_batch()), BrokenBackend())
 
     assert caught.value.reason is BackendFatalReason.UNEXPECTED
-    assert position.busy is False
-    position.close()
+    assert slot.busy is False
+    slot.close()
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
-def test_cuda_position_uses_one_stream_and_reuses_pinned_output() -> None:
-    position = make_position("cuda:0", torch.float16, enable_cuda_timing=True)
+def test_cuda_slot_uses_one_stream_and_reuses_pinned_output() -> None:
+    slot = make_slot("cuda:0", torch.float16, enable_cuda_timing=True)
     backend = DoublingBackend()
     tracer = RecordingTracer()
     batch_span = RecordingSpan()
 
-    first = position.execute(
+    first = slot.execute(
         FakeReceivedBatch(worker_batch(torch.float16)),
         backend,
         tracer=tracer,
@@ -319,7 +319,7 @@ def test_cuda_position_uses_one_stream_and_reuses_pinned_output() -> None:
     first.release()
 
     unsampled_span = RecordingSpan(recording=False)
-    second = position.execute(
+    second = slot.execute(
         FakeReceivedBatch(worker_batch(torch.float16)),
         backend,
         tracer=tracer,
@@ -344,6 +344,6 @@ def test_cuda_position_uses_one_stream_and_reuses_pinned_output() -> None:
     assert "worker.device.wait" in tracer.names
     assert not any(name.startswith("expertkit.cuda.") for name in unsampled_span.attributes)
     second.release()
-    assert position.device_bytes == 112
-    assert position.host_staging_bytes == 112
-    position.close()
+    assert slot.device_bytes == 112
+    assert slot.host_staging_bytes == 112
+    slot.close()

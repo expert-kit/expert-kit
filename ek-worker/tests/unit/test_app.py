@@ -113,7 +113,6 @@ def _application(
         transfer=AsyncService("transfer", events),
         manager=manager or FakeManager(events),
         peer_server=AsyncService("peer", events),
-        computation_server=AsyncService("computation", events),
         execution=FakeExecution(events),
         control=control or FakeControl(events),
         disk_cache=FakeDiskCache(events),
@@ -133,12 +132,11 @@ def test_application_starts_then_completes_controller_authorized_shutdown() -> N
         assert application.request_shutdown() is False
         await serving
 
-        assert events[:6] == [
+        assert events[:5] == [
             "start:observability",
             "start:transfer",
             "start:manager",
             "start:peer",
-            "start:computation",
             "start:execution",
         ]
         assert "shutdown:control" in events

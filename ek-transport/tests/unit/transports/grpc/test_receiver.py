@@ -13,9 +13,9 @@ import torch
 from expertkit_transport.batches import WorkerBatch
 from expertkit_transport.errors import TransportError, TransportErrorCode
 from expertkit_transport.tracing import TraceAttribute, TraceContext, Tracer, TraceSpan
-from expertkit_transport.transports.base import ReceiverClosed, WorkerPositionSpec
+from expertkit_transport.transports import WorkerEndpointConfig
+from expertkit_transport.transports.base import BatchBufferConfig, ReceiverClosed
 from expertkit_transport.transports.grpc import (
-    GrpcBatchSpec,
     GrpcWorkerBatchReceiver,
     GrpcWorkerTransport,
 )
@@ -77,8 +77,8 @@ class RecordingTracer:
             span.end()
 
 
-def batch_spec() -> GrpcBatchSpec:
-    return GrpcBatchSpec(
+def batch_spec() -> WorkerEndpointConfig:
+    return WorkerEndpointConfig(
         instance_id=7,
         num_layers=4,
         experts_per_layer=8,
@@ -156,15 +156,15 @@ async def await_with_loop_yields[T](awaitable: Awaitable[T]) -> T:
     return task.result()
 
 
-def test_receiver_allocates_direct_cpu_position_buffers() -> None:
+def test_receiver_creates_direct_cpu_batch_buffers() -> None:
     server = GrpcWorkerBatchReceiver(
         "127.0.0.1:0",
         batch_spec(),
         max_active_batches=1,
         max_pending_batches=1,
     )
-    buffers = server.allocate_position_buffers(
-        WorkerPositionSpec(
+    buffers = server.create_batch_buffers(
+        BatchBufferConfig(
             max_batch_tokens=4,
             hidden_dim=3,
             top_k=2,
@@ -201,7 +201,7 @@ def test_receiver_allocates_direct_cpu_position_buffers() -> None:
     run(server.close())
 
 
-def test_receiver_rejects_position_shape_mismatch() -> None:
+def test_receiver_rejects_batch_buffer_shape_mismatch() -> None:
     server = GrpcWorkerBatchReceiver(
         "127.0.0.1:0",
         batch_spec(),
@@ -210,8 +210,8 @@ def test_receiver_rejects_position_shape_mismatch() -> None:
     )
 
     with pytest.raises(ValueError, match="does not match"):
-        server.allocate_position_buffers(
-            WorkerPositionSpec(
+        server.create_batch_buffers(
+            BatchBufferConfig(
                 max_batch_tokens=5,
                 hidden_dim=3,
                 top_k=2,
@@ -223,15 +223,15 @@ def test_receiver_rejects_position_shape_mismatch() -> None:
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
-def test_receiver_reuses_pinned_cuda_position_staging() -> None:
+def test_receiver_reuses_pinned_cuda_batch_staging() -> None:
     server = GrpcWorkerBatchReceiver(
         "127.0.0.1:0",
         batch_spec(),
         max_active_batches=1,
         max_pending_batches=1,
     )
-    buffers = server.allocate_position_buffers(
-        WorkerPositionSpec(
+    buffers = server.create_batch_buffers(
+        BatchBufferConfig(
             max_batch_tokens=4,
             hidden_dim=3,
             top_k=2,
@@ -287,7 +287,7 @@ def test_receiver_hands_one_validated_batch_directly_to_execution() -> None:
             )
         )
 
-        received = await server.take()
+        received = await server.receive()
         assert received.batch.token_indices is None
         torch.testing.assert_close(
             received.batch.hidden_states,
@@ -305,9 +305,7 @@ def test_receiver_hands_one_validated_batch_directly_to_execution() -> None:
             _ = received.batch
 
         idle = asyncio.create_task(
-            server.wait_experts_idle(
-                ((2, 0), (2, 1), (2, 3)), monotonic_deadline=time.monotonic() + 2
-            )
+            server.wait_idle(((2, 0), (2, 1), (2, 3)), monotonic_deadline=time.monotonic() + 2)
         )
         await received.complete(partial_output)
         await submission
@@ -338,7 +336,7 @@ def test_unsampled_request_does_not_create_custom_spans() -> None:
             )
         )
 
-        received = await server.take()
+        received = await server.receive()
         await received.complete(received.batch.hidden_states)
         await submission
 
@@ -370,7 +368,7 @@ def test_receiver_maps_native_execution_rejection(
                 monotonic_deadline=float("inf"),
             )
         )
-        received = await server.take()
+        received = await server.receive()
 
         await received.reject(
             TransportError(code, retryable=True, diagnostic="execution did not start")
@@ -396,7 +394,7 @@ def test_receiver_delivers_structured_execution_rejection() -> None:
                 monotonic_deadline=float("inf"),
             )
         )
-        received = await server.take()
+        received = await server.receive()
         not_ready = TransportError(
             TransportErrorCode.EXPERT_NOT_READY,
             retryable=True,
@@ -485,7 +483,7 @@ def test_maximum_batch_accounts_only_retained_decoded_tensor_bytes() -> None:
         assert server.pending_retained_bytes == (
             calculate_message_limits(batch_spec()).retained_request_tensor_bytes
         )
-        received = await server.take()
+        received = await server.receive()
         assert server.pending_retained_bytes == 0
         await await_with_loop_yields(received.complete(received.batch.hidden_states))
         await await_with_loop_yields(submission)
@@ -552,7 +550,7 @@ def test_expert_drain_rejects_new_calls_and_preserves_admitted_work() -> None:
             stop_all=False,
         )
         idle = asyncio.create_task(
-            server.wait_experts_idle(
+            server.wait_idle(
                 ((2, 1),),
                 monotonic_deadline=time.monotonic() + 2,
             )
@@ -572,7 +570,7 @@ def test_expert_drain_rejects_new_calls_and_preserves_admitted_work() -> None:
         assert caught.value.retryable is True
         assert caught.value.min_topology_version == 13
 
-        admitted = await server.take()
+        admitted = await server.receive()
         await await_with_loop_yields(admitted.complete(admitted.batch.hidden_states))
         await await_with_loop_yields(first)
         await idle
@@ -592,14 +590,14 @@ def test_expert_drain_rejects_new_calls_and_preserves_admitted_work() -> None:
             )
         )
         await await_with_loop_yields(server._wait_pending_count(1))
-        unrelated_received = await server.take()
+        unrelated_received = await server.receive()
         await await_with_loop_yields(
             unrelated_received.complete(unrelated_received.batch.hidden_states)
         )
         await await_with_loop_yields(unrelated)
 
-        await server.clear_expert_drains(((2, 1),))
-        await server.clear_expert_drains(((2, 1),))
+        await server.clear_drains(((2, 1),))
+        await server.clear_drains(((2, 1),))
         resumed = asyncio.create_task(
             client.execute(
                 worker_batch(),
@@ -608,7 +606,7 @@ def test_expert_drain_rejects_new_calls_and_preserves_admitted_work() -> None:
             )
         )
         await await_with_loop_yields(server._wait_pending_count(1))
-        accepted = await server.take()
+        accepted = await server.receive()
         await await_with_loop_yields(accepted.complete(accepted.batch.hidden_states))
         await await_with_loop_yields(resumed)
 
@@ -661,11 +659,11 @@ def test_whole_worker_idle_wait_includes_waiting_and_active_batches() -> None:
         async with asyncio.timeout(2):
             await server._wait_pending_count(1)
 
-        idle = asyncio.create_task(server.wait_all_idle(monotonic_deadline=time.monotonic() + 2))
+        idle = asyncio.create_task(server.wait_idle(None, monotonic_deadline=time.monotonic() + 2))
         await asyncio.sleep(0)
         assert idle.done() is False
 
-        received = await server.take()
+        received = await server.receive()
         await asyncio.sleep(0)
         assert idle.done() is False
         await await_with_loop_yields(received.complete(received.batch.hidden_states))
@@ -688,7 +686,7 @@ def test_outer_grpc_concurrency_limit_bounds_active_plus_pending_calls() -> None
                 monotonic_deadline=float("inf"),
             )
         )
-        active = await server.take()
+        active = await server.receive()
         others = [
             asyncio.create_task(
                 client.execute(
@@ -699,7 +697,7 @@ def test_outer_grpc_concurrency_limit_bounds_active_plus_pending_calls() -> None
             )
             for output in outputs[1:]
         ]
-        second = await server.take()
+        second = await server.receive()
 
         await active.complete(active.batch.hidden_states)
         await second.complete(second.batch.hidden_states)
@@ -725,7 +723,7 @@ def test_cancellation_after_take_discards_response_but_releases_expert_use() -> 
                 monotonic_deadline=float("inf"),
             )
         )
-        received = await server.take()
+        received = await server.receive()
         submission.cancel()
         with pytest.raises(asyncio.CancelledError):
             await submission
@@ -789,7 +787,7 @@ def test_receiver_close_wakes_execution_waiting_on_take() -> None:
             max_pending_batches=1,
         )
         await server.start()
-        waiting = asyncio.create_task(server.take())
+        waiting = asyncio.create_task(server.receive())
         await server.close()
         await server.close()
 

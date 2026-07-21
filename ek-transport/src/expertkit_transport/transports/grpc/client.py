@@ -15,22 +15,22 @@ import grpc
 import torch
 
 from expertkit_transport.batches import WorkerBatch
-from expertkit_transport.errors import TransportError, TransportErrorCode
-from expertkit_transport.transports.base import WorkerTransport
+from expertkit_transport.errors import (
+    TransportError,
+    TransportErrorCode,
+    TransportProtocolError,
+)
+from expertkit_transport.transports.base import WorkerEndpointConfig, WorkerTransport
 from expertkit_transport.transports.grpc.buffers import (
     GrpcTransferBufferPool,
     GrpcTransferBuffers,
 )
 from expertkit_transport.transports.grpc.codec import (
-    GrpcProtocolError,
     _serialize_host_request,
-    _validate_batch_against_spec,
     decode_response,
 )
-from expertkit_transport.transports.grpc.spec import (
-    GrpcBatchSpec,
-    calculate_message_limits,
-)
+from expertkit_transport.transports.grpc.spec import calculate_message_limits
+from expertkit_transport.transports.validation import validate_worker_batch
 
 _EXECUTE_METHOD = "/ek.worker.v2.ComputationService/Execute"
 
@@ -93,16 +93,16 @@ def _selected_hidden_states(batch: WorkerBatch) -> torch.Tensor:
             return batch.hidden_states
         return torch.index_select(batch.hidden_states, 0, batch.token_indices)
     except (IndexError, RuntimeError) as error:
-        raise GrpcProtocolError("Worker batch token indices are invalid") from error
+        raise TransportProtocolError("Worker batch token indices are invalid") from error
 
 
 def _encode_with_staging(
     batch: WorkerBatch,
-    spec: GrpcBatchSpec,
+    spec: WorkerEndpointConfig,
     buffers: GrpcTransferBuffers,
     stream: torch.cuda.Stream | None,
 ) -> bytes:
-    _validate_batch_against_spec(batch, spec)
+    validate_worker_batch(batch, spec)
     token_count = batch.token_count
     with torch.inference_mode():
         if stream is None:
@@ -142,7 +142,7 @@ def _encode_with_staging(
 def _decode_into_output(
     payload: bytes,
     token_count: int,
-    spec: GrpcBatchSpec,
+    spec: WorkerEndpointConfig,
     buffers: GrpcTransferBuffers,
     output: torch.Tensor,
     stream: torch.cuda.Stream | None,
@@ -169,7 +169,7 @@ def _decode_into_output(
 def _validate_output(
     output: torch.Tensor,
     batch: WorkerBatch,
-    spec: GrpcBatchSpec,
+    spec: WorkerEndpointConfig,
     device: torch.device,
 ) -> None:
     if output.shape != (batch.token_count, spec.hidden_dim):
@@ -188,7 +188,7 @@ class GrpcWorkerTransport(WorkerTransport):
     def __init__(
         self,
         endpoint: str,
-        batch_spec: GrpcBatchSpec,
+        endpoint_config: WorkerEndpointConfig,
         *,
         max_in_flight: int,
         device: torch.device | str,
@@ -210,11 +210,11 @@ class GrpcWorkerTransport(WorkerTransport):
             raise ValueError("cpu_workers must be a positive integer")
 
         self._endpoint = endpoint
-        self._spec = batch_spec
+        self._spec = endpoint_config
         self._device = torch.device(device)
-        self._limits = calculate_message_limits(batch_spec)
+        self._limits = calculate_message_limits(endpoint_config)
         self._buffers = GrpcTransferBufferPool(
-            batch_spec,
+            endpoint_config,
             device=self._device,
             capacity=max_in_flight,
         )
@@ -344,7 +344,7 @@ class GrpcWorkerTransport(WorkerTransport):
                 buffers,
                 stream,
             )
-        except GrpcProtocolError as error:
+        except TransportProtocolError as error:
             raise TransportError(
                 TransportErrorCode.INVALID_REQUEST,
                 retryable=False,
@@ -379,7 +379,7 @@ class GrpcWorkerTransport(WorkerTransport):
                 output,
                 stream,
             )
-        except GrpcProtocolError as error:
+        except TransportProtocolError as error:
             raise TransportError(
                 TransportErrorCode.PROTOCOL,
                 retryable=False,

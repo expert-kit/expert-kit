@@ -10,14 +10,14 @@ import torch
 
 from expertkit_transport.batches import WorkerBatch
 from expertkit_transport.errors import TransportError, TransportErrorCode
-from expertkit_transport.transports.base import WorkerPositionSpec
-from expertkit_transport.transports.grpc import GrpcBatchSpec
+from expertkit_transport.transports import WorkerEndpointConfig
+from expertkit_transport.transports.base import BatchBufferConfig
 from expertkit_transport.transports.shm import ShmWorkerTransport
 from expertkit_transport.transports.shm.receiver import ShmWorkerBatchReceiver
 
 
-def spec() -> GrpcBatchSpec:
-    return GrpcBatchSpec(
+def spec() -> WorkerEndpointConfig:
+    return WorkerEndpointConfig(
         instance_id=7,
         num_layers=4,
         experts_per_layer=8,
@@ -51,7 +51,7 @@ async def start_pair() -> tuple[ShmWorkerBatchReceiver, ShmWorkerTransport]:
         max_active_batches=1,
         max_pending_batches=1,
     )
-    buffers = server.allocate_position_buffers(WorkerPositionSpec(4, 3, 2, torch.float32, "cpu"))
+    buffers = server.create_batch_buffers(BatchBufferConfig(4, 3, 2, torch.float32, "cpu"))
     buffers.close()
     await server.start()
     client = ShmWorkerTransport(
@@ -78,7 +78,7 @@ def test_shared_memory_path_compacts_and_returns_without_tensor_payloads() -> No
                 client.execute(batch(), output, monotonic_deadline=time.monotonic() + 5)
             )
             async with asyncio.timeout(2):
-                received = await server.take()
+                received = await server.receive()
             source = received.batch
             assert source.token_indices is None
             assert source.expert_ids.tolist() == [[1, -1], [0, 3]]
@@ -134,7 +134,7 @@ def test_cancellation_waits_for_worker_release_before_slot_reuse() -> None:
             submission = asyncio.create_task(
                 client.execute(batch(), output, monotonic_deadline=time.monotonic() + 5)
             )
-            received = await server.take()
+            received = await server.receive()
             submission.cancel()
             await asyncio.sleep(0)
             assert not submission.done()
@@ -150,7 +150,7 @@ def test_cancellation_waits_for_worker_release_before_slot_reuse() -> None:
             retry = asyncio.create_task(
                 client.execute(batch(), output, monotonic_deadline=time.monotonic() + 5)
             )
-            retried = await server.take()
+            retried = await server.receive()
             retry_destination = retried.output_destination
             assert retry_destination is not None
             retry_destination.copy_(retried.batch.hidden_states)
@@ -172,9 +172,7 @@ def test_shm_receiver_does_not_expose_grpc_tensor_execute() -> None:
             max_active_batches=1,
             max_pending_batches=1,
         )
-        buffers = server.allocate_position_buffers(
-            WorkerPositionSpec(4, 3, 2, torch.float32, "cpu")
-        )
+        buffers = server.create_batch_buffers(BatchBufferConfig(4, 3, 2, torch.float32, "cpu"))
         buffers.close()
         await server.start()
         channel = grpc.aio.insecure_channel(f"127.0.0.1:{server.bound_port}")

@@ -1,19 +1,21 @@
 """Tensor data-transfer implementations."""
 
 from expertkit_transport.transports.base import (
-    ReceivedWorkerBatch,
+    BatchBufferConfig,
+    ReceivedBatch,
     ReceiverClosed,
+    WorkerBatchBuffers,
     WorkerBatchReceiver,
-    WorkerPositionBuffers,
-    WorkerPositionSpec,
+    WorkerEndpointConfig,
     WorkerTransport,
 )
 
 __all__ = [
-    "ReceivedWorkerBatch",
+    "BatchBufferConfig",
+    "ReceivedBatch",
     "ReceiverClosed",
+    "WorkerBatchBuffers",
     "WorkerBatchReceiver",
-    "WorkerPositionBuffers",
-    "WorkerPositionSpec",
+    "WorkerEndpointConfig",
     "WorkerTransport",
 ]

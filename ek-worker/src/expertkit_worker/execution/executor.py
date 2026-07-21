@@ -1,4 +1,4 @@
-"""Bounded execution service that takes batches directly from Transport."""
+"""Bounded Worker execution that takes batches directly from Transport."""
 
 from __future__ import annotations
 
@@ -14,10 +14,10 @@ import structlog
 from expertkit_transport.errors import TransportError, TransportErrorCode
 from expertkit_transport.tracing import Tracer, TraceSpan
 from expertkit_transport.transports.base import (
-    ReceivedWorkerBatch,
+    BatchBufferConfig,
+    ReceivedBatch,
     ReceiverClosed,
     WorkerBatchReceiver,
-    WorkerPositionSpec,
 )
 
 from expertkit_worker.backends import (
@@ -28,7 +28,7 @@ from expertkit_worker.backends import (
     InvalidBackendInput,
     UnsupportedBackendBatch,
 )
-from expertkit_worker.execution.position import ActivePosition, PositionResult
+from expertkit_worker.execution.slot import ExecutionResult, ExecutionSlot
 from expertkit_worker.observability.api import NoopWorkerMetrics, WorkerMetrics
 
 logger = structlog.get_logger(__name__)
@@ -61,8 +61,8 @@ def _request_error(error: BackendRequestError) -> TransportError:
     )
 
 
-class WorkerExecution:
-    """Drive a fixed number of active positions without another waiting queue."""
+class WorkerExecutor:
+    """Drive a fixed number of active slots without another waiting queue."""
 
     def __init__(
         self,
@@ -70,23 +70,19 @@ class WorkerExecution:
         backend: ComputeBackend,
         *,
         instance_id: int,
-        position_spec: WorkerPositionSpec,
-        active_positions: int,
+        buffer_config: BatchBufferConfig,
+        slot_count: int,
         clock: Callable[[], float] = time.monotonic,
         metrics: WorkerMetrics | None = None,
         tracer: Tracer | None = None,
     ) -> None:
         if isinstance(instance_id, bool) or not isinstance(instance_id, int) or instance_id <= 0:
             raise ValueError("instance_id must be a positive integer")
-        if (
-            isinstance(active_positions, bool)
-            or not isinstance(active_positions, int)
-            or active_positions <= 0
-        ):
-            raise ValueError("active_positions must be a positive integer")
+        if isinstance(slot_count, bool) or not isinstance(slot_count, int) or slot_count <= 0:
+            raise ValueError("slot_count must be a positive integer")
         backend.capabilities.validate_runtime(
-            max_batch_tokens=position_spec.max_batch_tokens,
-            active_batches=active_positions,
+            max_batch_tokens=buffer_config.max_batch_tokens,
+            active_batches=slot_count,
         )
 
         self._receiver = receiver
@@ -95,23 +91,23 @@ class WorkerExecution:
         self._clock = clock
         self._metrics = metrics or NoopWorkerMetrics()
         self._tracer = tracer
-        self._positions: list[ActivePosition] = []
+        self._slots: list[ExecutionSlot] = []
         try:
-            for _ in range(active_positions):
-                buffers = receiver.allocate_position_buffers(position_spec)
-                self._positions.append(
-                    ActivePosition(
-                        position_spec,
+            for _ in range(slot_count):
+                buffers = receiver.create_batch_buffers(buffer_config)
+                self._slots.append(
+                    ExecutionSlot(
+                        buffer_config,
                         buffers,
                         enable_cuda_timing=tracer is not None,
                     )
                 )
         except BaseException:
-            for position in self._positions:
-                position.close()
+            for slot in self._slots:
+                slot.close()
             raise
         self._executor = ThreadPoolExecutor(
-            max_workers=active_positions,
+            max_workers=slot_count,
             thread_name_prefix="expertkit-worker-execution",
         )
         self._tasks: tuple[asyncio.Task[None], ...] = ()
@@ -121,33 +117,34 @@ class WorkerExecution:
 
     @property
     def fixed_device_bytes(self) -> int:
-        """Return device bytes reserved by all active input and output positions."""
+        """Return device bytes reserved by all active input and output slots."""
 
-        return sum(position.device_bytes for position in self._positions)
+        return sum(slot.device_bytes for slot in self._slots)
 
     @property
     def fixed_host_staging_bytes(self) -> int:
-        """Return Host staging bytes reserved by all active positions."""
+        """Return Host staging bytes reserved by all active slots."""
 
-        return sum(position.host_staging_bytes for position in self._positions)
+        return sum(slot.host_staging_bytes for slot in self._slots)
 
     async def start(self) -> None:
-        """Start exactly one receiver loop for each active computation position."""
+        """Start the receiver and one loop for each execution slot."""
 
         if self._closed:
             raise RuntimeError("Worker execution is closed")
         if self._tasks:
             return
+        await self._receiver.start()
         self._tasks = tuple(
             asyncio.create_task(
-                self._serve_position(position),
-                name=f"worker-active-position-{index}",
+                self._serve_slot(slot),
+                name=f"worker-active-slot-{index}",
             )
-            for index, position in enumerate(self._positions)
+            for index, slot in enumerate(self._slots)
         )
 
     async def wait(self) -> None:
-        """Wait for all position loops and re-raise the first fatal Backend error."""
+        """Wait for all slot loops and re-raise the first fatal Backend error."""
 
         if not self._tasks:
             raise RuntimeError("Worker execution has not been started")
@@ -174,13 +171,13 @@ class WorkerExecution:
             None,
             partial(self._executor.shutdown, wait=True, cancel_futures=True),
         )
-        for position in self._positions:
-            position.close()
+        for slot in self._slots:
+            slot.close()
 
-    async def _serve_position(self, position: ActivePosition) -> None:
+    async def _serve_slot(self, slot: ExecutionSlot) -> None:
         while True:
             try:
-                received = await self._receiver.take()
+                received = await self._receiver.receive()
             except ReceiverClosed:
                 return
             started_at = self._clock()
@@ -188,7 +185,7 @@ class WorkerExecution:
             fatal: BackendFatalError | None = None
             failed = True
             try:
-                fatal = await self._process(received, position)
+                fatal = await self._process(received, slot)
                 failed = fatal is not None
             finally:
                 self._metrics.batch_finished(
@@ -208,11 +205,11 @@ class WorkerExecution:
 
     async def _process(
         self,
-        received: ReceivedWorkerBatch,
-        position: ActivePosition,
+        received: ReceivedBatch,
+        slot: ExecutionSlot,
     ) -> BackendFatalError | None:
         if self._tracer is None or received.trace_context is None:
-            return await self._process_batch(received, position, None)
+            return await self._process_batch(received, slot, None)
         batch = received.batch
         attributes = {
             "expertkit.instance_id": batch.instance_id,
@@ -221,7 +218,7 @@ class WorkerExecution:
             "expertkit.token_count": batch.token_count,
             "expertkit.assignment_count": batch.token_count * batch.top_k,
             "expertkit.backend": type(self._backend).__name__,
-            "expertkit.device": str(position.device),
+            "expertkit.device": str(slot.device),
         }
         span_context = self._tracer.start_as_current_span(
             "worker.batch.execute",
@@ -229,12 +226,12 @@ class WorkerExecution:
             attributes=attributes,
         )
         with span_context as span:
-            return await self._process_batch(received, position, span)
+            return await self._process_batch(received, slot, span)
 
     async def _process_batch(
         self,
-        received: ReceivedWorkerBatch,
-        position: ActivePosition,
+        received: ReceivedBatch,
+        slot: ExecutionSlot,
         span: TraceSpan | None,
     ) -> BackendFatalError | None:
         try:
@@ -250,7 +247,7 @@ class WorkerExecution:
                 )
                 self._metrics.batch_rejected(TransportErrorCode.INVALID_REQUEST.value)
                 return None
-            result = await self._run_position(position, received, span)
+            result = await self._run_slot(slot, received, span)
         except BackendRequestError as error:
             rejection = _request_error(error)
             logger.warning(
@@ -277,7 +274,7 @@ class WorkerExecution:
                 self._metrics.batch_rejected(result.rejection.code.value)
                 await received.reject(result.rejection)
             elif result.output is None:
-                raise RuntimeError("active position produced neither output nor rejection")
+                raise RuntimeError("active slot produced neither output nor rejection")
             else:
                 await received.complete(result.output)
         except Exception:
@@ -287,16 +284,16 @@ class WorkerExecution:
             result.release()
         return None
 
-    async def _run_position(
+    async def _run_slot(
         self,
-        position: ActivePosition,
-        received: ReceivedWorkerBatch,
+        slot: ExecutionSlot,
+        received: ReceivedBatch,
         span: TraceSpan | None,
-    ) -> PositionResult:
+    ) -> ExecutionResult:
         loop = asyncio.get_running_loop()
         tracer = self._tracer if span is not None else None
         execute = partial(
-            position.execute,
+            slot.execute,
             received,
             self._backend,
             clock=self._clock,

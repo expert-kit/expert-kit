@@ -176,7 +176,7 @@ class BackendResourceEstimate:
                 raise ValueError(f"{name} must be a nonnegative integer")
 
     def total_bytes(self, active_batches: int) -> int:
-        """Return the worst-case temporary bytes for the active-position count."""
+        """Return the worst-case temporary bytes for the execution-slot count."""
 
         _require_positive_integer("active_batches", active_batches)
         return self.shared_temporary_bytes + self.temporary_bytes_per_active_batch * active_batches

@@ -24,7 +24,7 @@ class DeviceResourcePlan:
     """Describe fixed non-weight reserve and remaining weight capacity."""
 
     device_memory_limit_bytes: int
-    fixed_position_bytes: int
+    fixed_slot_bytes: int
     backend_temporary_bytes: int
     conversion_temporary_bytes: int
     allocator_headroom_bytes: int
@@ -35,23 +35,23 @@ class DeviceResourcePlan:
         """Return every planned non-weight byte including allocator headroom."""
 
         return (
-            self.fixed_position_bytes
+            self.fixed_slot_bytes
             + self.backend_temporary_bytes
             + self.conversion_temporary_bytes
             + self.allocator_headroom_bytes
         )
 
     @property
-    def bytes_to_allocate_after_fixed_positions(self) -> int:
-        """Return planned future device use after fixed positions already exist."""
+    def bytes_to_allocate_after_fixed_slots(self) -> int:
+        """Return planned future device use after fixed execution slots already exist."""
 
-        return self.device_memory_limit_bytes - self.fixed_position_bytes
+        return self.device_memory_limit_bytes - self.fixed_slot_bytes
 
 
 def plan_device_resources(
     *,
     device_memory_limit_bytes: int,
-    fixed_position_bytes: int,
+    fixed_slot_bytes: int,
     backend_estimate: BackendResourceEstimate,
     active_batches: int,
     conversion_temporary_bytes: int,
@@ -64,7 +64,7 @@ def plan_device_resources(
     """
 
     _positive_int("device_memory_limit_bytes", device_memory_limit_bytes)
-    _nonnegative_int("fixed_position_bytes", fixed_position_bytes)
+    _nonnegative_int("fixed_slot_bytes", fixed_slot_bytes)
     _positive_int("active_batches", active_batches)
     _nonnegative_int("conversion_temporary_bytes", conversion_temporary_bytes)
     if not isinstance(backend_estimate, BackendResourceEstimate):
@@ -76,7 +76,7 @@ def plan_device_resources(
         _MINIMUM_ALLOCATOR_HEADROOM_BYTES,
     )
     runtime_reserve_bytes = (
-        fixed_position_bytes
+        fixed_slot_bytes
         + backend_temporary_bytes
         + conversion_temporary_bytes
         + allocator_headroom_bytes
@@ -87,7 +87,7 @@ def plan_device_resources(
 
     return DeviceResourcePlan(
         device_memory_limit_bytes=device_memory_limit_bytes,
-        fixed_position_bytes=fixed_position_bytes,
+        fixed_slot_bytes=fixed_slot_bytes,
         backend_temporary_bytes=backend_temporary_bytes,
         conversion_temporary_bytes=conversion_temporary_bytes,
         allocator_headroom_bytes=allocator_headroom_bytes,
@@ -98,18 +98,18 @@ def plan_device_resources(
 def validate_available_device_memory(
     plan: DeviceResourcePlan,
     *,
-    available_bytes_after_fixed_positions: int,
+    available_bytes_after_fixed_slots: int,
 ) -> None:
     """Reject startup when current free device memory cannot honor the plan."""
 
     if not isinstance(plan, DeviceResourcePlan):
         raise TypeError("plan must be a DeviceResourcePlan")
     _nonnegative_int(
-        "available_bytes_after_fixed_positions",
-        available_bytes_after_fixed_positions,
+        "available_bytes_after_fixed_slots",
+        available_bytes_after_fixed_slots,
     )
-    required = plan.bytes_to_allocate_after_fixed_positions
-    if available_bytes_after_fixed_positions < required:
+    required = plan.bytes_to_allocate_after_fixed_slots
+    if available_bytes_after_fixed_slots < required:
         raise ValueError(
             "available device memory is smaller than the configured post-allocation plan"
         )

@@ -1,11 +1,11 @@
-"""Worker-side copies between shared memory and one execution position."""
+"""Worker-side copies between shared memory and one execution slot."""
 
 from __future__ import annotations
 
 import torch
 
 from expertkit_transport.batches import WorkerBatch
-from expertkit_transport.transports.base import WorkerPositionBuffers, WorkerPositionSpec
+from expertkit_transport.transports.base import BatchBufferConfig, WorkerBatchBuffers
 
 
 def _require_tensor(
@@ -26,10 +26,10 @@ def _require_tensor(
         raise ValueError(f"{name} must be contiguous")
 
 
-class ShmWorkerPositionBuffers(WorkerPositionBuffers):
+class ShmWorkerBatchBuffers(WorkerBatchBuffers):
     """Copy through the session's fixed mapping without private Host staging."""
 
-    def __init__(self, spec: WorkerPositionSpec) -> None:
+    def __init__(self, spec: BatchBufferConfig) -> None:
         self._spec = spec
         self._closed = False
 
@@ -54,11 +54,11 @@ class ShmWorkerPositionBuffers(WorkerPositionBuffers):
         if batch.hidden_states.device.type != "cpu":
             raise ValueError("a Worker-side SHM batch must contain CPU tensors")
         if not 0 < batch.token_count <= self._spec.max_batch_tokens:
-            raise ValueError("received batch token count exceeds the fixed position")
+            raise ValueError("received batch token count exceeds the fixed slot")
         if batch.hidden_dim != self._spec.hidden_dim or batch.top_k != self._spec.top_k:
-            raise ValueError("received batch shape does not match the fixed position")
+            raise ValueError("received batch shape does not match the fixed slot")
         if batch.hidden_states.dtype != self._spec.dtype:
-            raise ValueError("received batch dtype does not match the fixed position")
+            raise ValueError("received batch dtype does not match the fixed slot")
 
         shape = (batch.token_count, self._spec.hidden_dim)
         routing_shape = (batch.token_count, self._spec.top_k)
@@ -107,7 +107,7 @@ class ShmWorkerPositionBuffers(WorkerPositionBuffers):
 
         self._require_open()
         if not 0 < partial_output.shape[0] <= self._spec.max_batch_tokens:
-            raise ValueError("partial_output token count exceeds the fixed position")
+            raise ValueError("partial_output token count exceeds the fixed slot")
         _require_tensor(
             "partial_output",
             partial_output,
@@ -133,10 +133,10 @@ class ShmWorkerPositionBuffers(WorkerPositionBuffers):
         return destination
 
     def close(self) -> None:
-        """Mark the position buffers closed; the session owns all Host mappings."""
+        """Mark the batch buffers closed; the session owns all Host mappings."""
 
         self._closed = True
 
     def _require_open(self) -> None:
         if self._closed:
-            raise RuntimeError("Worker position buffers are closed")
+            raise RuntimeError("Worker batch buffers are closed")
