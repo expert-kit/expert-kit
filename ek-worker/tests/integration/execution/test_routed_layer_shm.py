@@ -4,9 +4,11 @@ import asyncio
 import time
 
 import torch
-from expertkit_transport.adapters.grpc import GrpcBatchSpec, GrpcWorkerServer
-from expertkit_transport.adapters.shm import ShmWorkerTransport
-from expertkit_transport.contracts import OutputSpec, WorkerBatch, WorkerPositionSpec
+from expertkit_transport.batches import WorkerBatch
+from expertkit_transport.buffers.base import OutputSpec
+from expertkit_transport.transports.base import WorkerPositionSpec
+from expertkit_transport.transports.grpc import GrpcBatchSpec, GrpcWorkerServer
+from expertkit_transport.transports.shm import ShmWorkerTransport
 
 from expertkit_worker.backends.torch import TorchBackend, TorchExpertWeights
 from expertkit_worker.execution import WorkerExecution

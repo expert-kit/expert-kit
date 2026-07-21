@@ -8,17 +8,14 @@ from collections.abc import Awaitable
 
 import pytest
 import torch
-from expertkit_transport.adapters.grpc import (
+from expertkit_transport.batches import WorkerBatch
+from expertkit_transport.buffers.base import OutputSpec
+from expertkit_transport.errors import TransportError, TransportErrorCode
+from expertkit_transport.transports.base import WorkerPositionSpec
+from expertkit_transport.transports.grpc import (
     GrpcBatchSpec,
     GrpcWorkerServer,
     GrpcWorkerTransport,
-)
-from expertkit_transport.contracts import (
-    OutputSpec,
-    TransportError,
-    TransportErrorCode,
-    WorkerBatch,
-    WorkerPositionSpec,
 )
 
 from expertkit_worker.backends import (

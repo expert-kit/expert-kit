@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import torch
 
-from expertkit_transport.contracts.buffers import (
+from expertkit_transport.buffers.base import (
     OutputBufferProvider,
     OutputSpec,
     PreparedOutput,

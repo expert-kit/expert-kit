@@ -8,8 +8,8 @@ from typing import Any
 
 import structlog
 import torch
-from expertkit_transport.adapters.grpc import GrpcBatchSpec, GrpcWorkerServer
-from expertkit_transport.contracts import WorkerPositionSpec
+from expertkit_transport.transports.base import WorkerPositionSpec
+from expertkit_transport.transports.grpc import GrpcBatchSpec, GrpcWorkerServer
 
 from expertkit_worker.app import WorkerApplication
 from expertkit_worker.backends import ComputeBackend

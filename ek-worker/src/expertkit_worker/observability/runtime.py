@@ -7,12 +7,7 @@ from collections.abc import Mapping, Sequence
 from functools import partial
 from typing import Any, Protocol
 
-from expertkit_transport.contracts import (
-    TraceAttribute,
-    TraceContext,
-    Tracer,
-    TraceSpan,
-)
+from expertkit_transport.tracing import TraceAttribute, TraceContext, Tracer, TraceSpan
 
 from expertkit_worker.config.models import ObservabilityConfig
 from expertkit_worker.observability.api import NoopWorkerMetrics, WorkerMetrics

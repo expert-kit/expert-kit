@@ -45,7 +45,7 @@ def routed_client() -> RoutedMoEClient:
 
 def test_forwards_final_assignments_once_with_wire_dtypes(monkeypatch) -> None:
     FakeTransport.instances.clear()
-    monkeypatch.setattr(client, "BlockingGrpcRoutedMoEClient", FakeTransport)
+    monkeypatch.setattr(client, "BlockingRoutedMoEClient", FakeTransport)
     routed = routed_client()
     hidden = torch.tensor([[1.0, 2.0, 3.0]], dtype=torch.float16)
     expert_ids = torch.tensor([[1, 3]], dtype=torch.int64)
@@ -62,7 +62,7 @@ def test_forwards_final_assignments_once_with_wire_dtypes(monkeypatch) -> None:
     transport = FakeTransport.instances[0]
     assert transport.endpoint == "127.0.0.1:50050"
     assert transport.configuration["dtype"] is torch.float16
-    assert transport.configuration["worker_transport"] == "grpc"
+    assert "worker_transport" not in transport.configuration
     assert transport.started_with == 2
     assert len(transport.calls) == 1
     assert transport.calls[0]["expert_ids"].dtype is torch.int32  # type: ignore[union-attr]
@@ -72,33 +72,9 @@ def test_forwards_final_assignments_once_with_wire_dtypes(monkeypatch) -> None:
     assert transport.closed is True
 
 
-def test_selects_shared_memory_worker_transport(monkeypatch) -> None:
-    FakeTransport.instances.clear()
-    monkeypatch.setattr(client, "BlockingGrpcRoutedMoEClient", FakeTransport)
-    routed = RoutedMoEClient(
-        "127.0.0.1:50050",
-        instance_id=7,
-        num_layers=2,
-        experts_per_layer=4,
-        hidden_dim=3,
-        top_k=2,
-        transport="shm",
-    )
-
-    routed.forward_layer(
-        layer_id=0,
-        hidden_states=torch.ones((1, 3)),
-        expert_ids=torch.tensor([[0, 1]], dtype=torch.int32),
-        routing_weights=torch.tensor([[0.5, 0.5]], dtype=torch.float32),
-    )
-
-    assert FakeTransport.instances[0].configuration["worker_transport"] == "shm"
-    routed.close()
-
-
 def test_reuses_one_transport_and_rejects_a_dtype_change(monkeypatch) -> None:
     FakeTransport.instances.clear()
-    monkeypatch.setattr(client, "BlockingGrpcRoutedMoEClient", FakeTransport)
+    monkeypatch.setattr(client, "BlockingRoutedMoEClient", FakeTransport)
     routed = routed_client()
     hidden = torch.ones((1, 3), dtype=torch.float32)
     experts = torch.tensor([[0, 1]], dtype=torch.int32)
@@ -127,7 +103,7 @@ def test_rejects_mismatched_router_shapes_before_transport_submission(
     monkeypatch,
 ) -> None:
     FakeTransport.instances.clear()
-    monkeypatch.setattr(client, "BlockingGrpcRoutedMoEClient", FakeTransport)
+    monkeypatch.setattr(client, "BlockingRoutedMoEClient", FakeTransport)
     routed = routed_client()
 
     with pytest.raises(ValueError, match="expert_ids"):
@@ -183,7 +159,7 @@ def test_rejects_invalid_routing_before_starting_transport(
     message: str,
 ) -> None:
     FakeTransport.instances.clear()
-    monkeypatch.setattr(client, "BlockingGrpcRoutedMoEClient", FakeTransport)
+    monkeypatch.setattr(client, "BlockingRoutedMoEClient", FakeTransport)
     routed = routed_client()
 
     with pytest.raises(ValueError, match=message):
@@ -200,7 +176,7 @@ def test_rejects_invalid_routing_before_starting_transport(
 
 def test_forwards_valid_invalid_assignment_with_zero_weight(monkeypatch) -> None:
     FakeTransport.instances.clear()
-    monkeypatch.setattr(client, "BlockingGrpcRoutedMoEClient", FakeTransport)
+    monkeypatch.setattr(client, "BlockingRoutedMoEClient", FakeTransport)
     routed = routed_client()
 
     routed.forward_layer(

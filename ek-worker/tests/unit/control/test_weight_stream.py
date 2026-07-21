@@ -8,7 +8,7 @@ from typing import Any
 
 import pytest
 from expertkit_proto.ek.control.v2 import weight_control_pb2
-from expertkit_transport.contracts import (
+from expertkit_transport.transports.base import (
     ReceivedWorkerBatch,
     WorkerBatchReceiver,
     WorkerPositionBuffers,

@@ -7,7 +7,7 @@ from collections.abc import Callable
 
 import torch
 import torch.nn.functional as functional
-from expertkit_transport.contracts import ACTIVATION_DTYPES
+from expertkit_transport.batches import ACTIVATION_DTYPES
 
 from expertkit_worker.backends.base import (
     BackendBatch,

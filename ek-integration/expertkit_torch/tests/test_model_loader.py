@@ -112,7 +112,6 @@ def test_expertkit_load_uses_real_layer_ids_and_restores_transformers_class(
         "experts_per_layer": 4,
         "hidden_dim": 4,
         "top_k": 2,
-        "transport": "grpc",
     }
     loaded.close()
     loaded.close()

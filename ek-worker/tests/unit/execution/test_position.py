@@ -8,17 +8,11 @@ from contextlib import contextmanager
 
 import pytest
 import torch
-from expertkit_transport.adapters.grpc.worker_buffers import GrpcWorkerPositionBuffers
-from expertkit_transport.contracts import (
-    ReceivedWorkerBatch,
-    TraceAttribute,
-    TraceContext,
-    TraceSpan,
-    TransportError,
-    TransportErrorCode,
-    WorkerBatch,
-    WorkerPositionSpec,
-)
+from expertkit_transport.batches import WorkerBatch
+from expertkit_transport.errors import TransportError, TransportErrorCode
+from expertkit_transport.tracing import TraceAttribute, TraceContext, TraceSpan
+from expertkit_transport.transports.base import ReceivedWorkerBatch, WorkerPositionSpec
+from expertkit_transport.transports.grpc.worker_buffers import GrpcWorkerPositionBuffers
 
 from expertkit_worker.backends import (
     BackendBatch,

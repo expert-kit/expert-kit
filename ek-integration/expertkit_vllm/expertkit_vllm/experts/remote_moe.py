@@ -10,8 +10,7 @@ from collections.abc import Callable, Iterable
 from typing import TYPE_CHECKING, Any
 
 import torch
-from expertkit_transport.adapters.grpc import BlockingGrpcRoutedMoEClient
-from expertkit_transport.contracts import validate_and_convert_routing
+from expertkit_transport import BlockingRoutedMoEClient, validate_and_convert_routing
 from expertkit_vllm.utils.config import collect_ek_client_config
 from torch import nn
 from vllm.config import CUDAGraphMode, get_current_vllm_config
@@ -32,7 +31,7 @@ from vllm.utils.torch_utils import (
 logger = logging.getLogger(__name__)
 
 _LAYER_PATTERN = re.compile(r"(?:^|\.)layers\.(\d+)(?:\.|$)")
-_CLIENTS: dict[tuple[object, ...], BlockingGrpcRoutedMoEClient] = {}
+_CLIENTS: dict[tuple[object, ...], BlockingRoutedMoEClient] = {}
 _CLIENTS_LOCK = threading.Lock()
 
 if TYPE_CHECKING:
@@ -113,12 +112,11 @@ def _num_layers() -> int:
 
 def _client_for(
     layer: RemoteMoERunner, hidden_states: torch.Tensor
-) -> BlockingGrpcRoutedMoEClient:
+) -> BlockingRoutedMoEClient:
     config = layer.client_config
     key = (
         config.controller_endpoint,
         config.instance_id,
-        config.transport,
         layer.num_experts,
         layer.top_k,
         layer.hidden_size,
@@ -129,7 +127,7 @@ def _client_for(
         existing = _CLIENTS.get(key)
         if existing is not None:
             return existing
-        client = BlockingGrpcRoutedMoEClient(
+        client = BlockingRoutedMoEClient(
             config.controller_endpoint,
             instance_id=config.instance_id,
             num_layers=_num_layers(),
@@ -138,7 +136,6 @@ def _client_for(
             top_k=layer.top_k,
             dtype=hidden_states.dtype,
             device=hidden_states.device,
-            worker_transport=config.transport,
         )
         try:
             client.start(timeout_seconds=config.timeout_seconds)

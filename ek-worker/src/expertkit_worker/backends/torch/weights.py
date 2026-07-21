@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import torch
-from expertkit_transport.contracts import ACTIVATION_DTYPES
+from expertkit_transport.batches import ACTIVATION_DTYPES
 
 
 @dataclass(frozen=True, slots=True)

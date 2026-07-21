@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 
 import torch
-from expertkit_transport.contracts import ACTIVATION_DTYPES
+from expertkit_transport.batches import ACTIVATION_DTYPES
 
 _UINT32_MAX = (1 << 32) - 1
 

@@ -6,13 +6,8 @@ import pytest
 import torch
 
 from expertkit_transport.buffers import OutputPool
-from expertkit_transport.contracts import (
-    OutputBufferProvider,
-    OutputSpec,
-    PreparedOutput,
-    TransportError,
-    TransportErrorCode,
-)
+from expertkit_transport.buffers.base import OutputBufferProvider, OutputSpec, PreparedOutput
+from expertkit_transport.errors import TransportError, TransportErrorCode
 
 
 class FakeOutput(PreparedOutput):

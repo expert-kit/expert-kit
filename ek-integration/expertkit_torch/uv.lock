@@ -163,6 +163,28 @@ nvtx = [
 ]
 
 [[package]]
+name = "expertkit-proto"
+version = "0.1.0"
+source = { editable = "../../ek-proto" }
+dependencies = [
+    { name = "grpcio" },
+    { name = "protobuf" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "grpcio", specifier = "==1.71.0" },
+    { name = "protobuf", specifier = "==5.29.4" },
+]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "grpcio-tools", specifier = "==1.71.0" },
+    { name = "pytest", specifier = ">=8.3,<9" },
+    { name = "ruff", specifier = ">=0.11,<1" },
+]
+
+[[package]]
 name = "expertkit-torch"
 version = "0.1.0"
 source = { editable = "." }
@@ -196,6 +218,7 @@ name = "expertkit-transport"
 version = "0.1.0"
 source = { editable = "../../ek-transport" }
 dependencies = [
+    { name = "expertkit-proto" },
     { name = "grpcio" },
     { name = "numpy" },
     { name = "protobuf" },
@@ -204,6 +227,7 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
+    { name = "expertkit-proto", editable = "../../ek-proto" },
     { name = "grpcio", specifier = "==1.71.0" },
     { name = "numpy", specifier = ">=2.1,<3" },
     { name = "protobuf", specifier = "==5.29.4" },

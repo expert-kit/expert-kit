@@ -10,13 +10,11 @@ from threading import Lock
 from typing import Any
 
 import torch
-from expertkit_transport.contracts import (
+from expertkit_transport.batches import WorkerBatch
+from expertkit_transport.errors import TransportError, TransportErrorCode
+from expertkit_transport.tracing import Tracer, TraceSpan
+from expertkit_transport.transports.base import (
     ReceivedWorkerBatch,
-    Tracer,
-    TraceSpan,
-    TransportError,
-    TransportErrorCode,
-    WorkerBatch,
     WorkerPositionBuffers,
     WorkerPositionSpec,
 )

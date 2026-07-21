@@ -8,8 +8,8 @@ import time
 from pathlib import Path
 
 import torch
-from expertkit_transport.adapters.grpc import GrpcBatchSpec, GrpcWorkerServer
-from expertkit_transport.contracts import WorkerPositionSpec
+from expertkit_transport.transports.base import WorkerPositionSpec
+from expertkit_transport.transports.grpc import GrpcBatchSpec, GrpcWorkerServer
 from safetensors.torch import save as save_safetensors
 
 from expertkit_worker.app import WorkerApplication

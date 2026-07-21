@@ -10,13 +10,14 @@ import grpc
 import pytest
 import torch
 from aiohttp import ClientSession
-from expertkit_transport.adapters.grpc import (
+from expertkit_transport.batches import WorkerBatch
+from expertkit_transport.transports.base import WorkerPositionSpec
+from expertkit_transport.transports.grpc import (
     GrpcBatchSpec,
     GrpcWorkerServer,
     decode_response,
     encode_request,
 )
-from expertkit_transport.contracts import WorkerBatch, WorkerPositionSpec
 
 from expertkit_worker.backends import (
     BackendBatch,

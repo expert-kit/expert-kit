@@ -18,7 +18,6 @@ from expertkit_torch.models._common import RoutedLayerIds
 
 ModelMode = Literal["expertkit", "local"]
 ModelDType = Literal["auto", "float16", "bfloat16", "float32"]
-ModelTransport = Literal["grpc", "shm"]
 
 _MODEL_LOAD_LOCK = threading.Lock()
 _MISSING = object()
@@ -186,7 +185,6 @@ def _validate_loading_arguments(
     controller_endpoint: str,
     instance_id: int,
     dtype: ModelDType,
-    transport: ModelTransport,
 ) -> str:
     resolved_path = str(model_path)
     if not resolved_path.strip():
@@ -195,8 +193,6 @@ def _validate_loading_arguments(
         raise ValueError("mode must be 'expertkit' or 'local'")
     if dtype not in _DTYPES:
         raise ValueError("dtype must be auto, float16, bfloat16, or float32")
-    if transport not in ("grpc", "shm"):
-        raise ValueError("transport must be 'grpc' or 'shm'")
     if mode == "expertkit":
         if not controller_endpoint.strip():
             raise ValueError("controller_endpoint must not be empty")
@@ -213,7 +209,6 @@ def load_model(
     instance_id: int = 1,
     device: str | torch.device = "cuda:0",
     dtype: ModelDType = "auto",
-    transport: ModelTransport = "grpc",
 ) -> LoadedModel:
     """Load one supported causal language model.
 
@@ -224,7 +219,6 @@ def load_model(
         instance_id: Model instance registered with the Controller.
         device: Single Frontend device that owns attention and routing.
         dtype: Checkpoint loading dtype or ``auto`` to use checkpoint metadata.
-        transport: Worker data path. Shared memory requires the same Host.
 
     Returns:
         A context-manageable object owning the model, tokenizer, and Transport
@@ -242,7 +236,6 @@ def load_model(
         controller_endpoint=controller_endpoint,
         instance_id=instance_id,
         dtype=dtype,
-        transport=transport,
     )
     config = AutoConfig.from_pretrained(resolved_path)
     model_type = str(config.model_type)
@@ -264,7 +257,6 @@ def load_model(
                     experts_per_layer=spec.experts_per_layer(config),
                     hidden_dim=config.hidden_size,
                     top_k=config.num_experts_per_tok,
-                    transport=transport,
                 )
                 replacement = spec.create_class(client, layer_ids)
                 with (

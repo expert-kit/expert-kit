@@ -17,7 +17,7 @@ from expertkit_proto.ek.control.v2 import (
     weight_control_pb2_grpc,
 )
 from expertkit_proto.ek.worker.v2 import common_pb2
-from expertkit_transport.contracts import ACTIVATION_DTYPES
+from expertkit_transport.batches import ACTIVATION_DTYPES
 
 _CONTROL_MESSAGE_BYTES = 1024 * 1024
 _UINT32_MAX = (1 << 32) - 1

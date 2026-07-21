@@ -65,8 +65,6 @@ def test_cli_writes_table_and_json(monkeypatch, tmp_path, capsys) -> None:
             "1",
             "--device",
             "cpu",
-            "--transport",
-            "shm",
             "--json-output",
             str(destination),
         ]
@@ -85,5 +83,4 @@ def test_cli_writes_table_and_json(monkeypatch, tmp_path, capsys) -> None:
         "instance_id": 1,
         "model_path": "/models/deepseek",
         "requested_dtype": "auto",
-        "transport": "shm",
     }

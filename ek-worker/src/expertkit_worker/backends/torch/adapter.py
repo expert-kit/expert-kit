@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import torch
-from expertkit_transport.contracts import ACTIVATION_DTYPES
+from expertkit_transport.batches import ACTIVATION_DTYPES
 
 from expertkit_worker.backends.torch.weights import TorchExpertWeights
 from expertkit_worker.weights.adapter import (

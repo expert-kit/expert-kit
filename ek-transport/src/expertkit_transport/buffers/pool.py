@@ -7,13 +7,8 @@ import time
 from collections.abc import Callable
 from types import TracebackType
 
-from expertkit_transport.contracts import (
-    OutputBufferProvider,
-    OutputSpec,
-    PreparedOutput,
-    TransportError,
-    TransportErrorCode,
-)
+from expertkit_transport.buffers.base import OutputBufferProvider, OutputSpec, PreparedOutput
+from expertkit_transport.errors import TransportError, TransportErrorCode
 
 
 def _deadline_error() -> TransportError:

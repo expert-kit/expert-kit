@@ -6,19 +6,21 @@ import asyncio
 from dataclasses import dataclass
 
 import torch
-from expertkit_transport.adapters.grpc import (
+from expertkit_transport.batches import RoutedLayerBatch
+from expertkit_transport.buffers import OutputPool
+from expertkit_transport.buffers.base import OutputSpec
+from expertkit_transport.routing import (
+    RoundRobinSelector,
+    TopologySnapshot,
+    WorkerConnection,
+    WorkerIdentity,
+    execute_routed_layer,
+)
+from expertkit_transport.transports.base import WorkerPositionSpec
+from expertkit_transport.transports.grpc import (
     GrpcBatchSpec,
     GrpcWorkerServer,
     GrpcWorkerTransport,
-)
-from expertkit_transport.buffers import OutputPool
-from expertkit_transport.contracts import OutputSpec, RoutedLayerBatch, WorkerPositionSpec
-from expertkit_transport.orchestration import (
-    RoundRobinSelector,
-    TopologySnapshot,
-    WorkerIdentity,
-    WorkerTarget,
-    execute_routed_layer,
 )
 
 from expertkit_worker.backends.torch import TorchBackend, TorchExpertWeights
@@ -41,10 +43,10 @@ class _RunningWorker:
     ready: ReadyWeightTable[TorchExpertWeights]
 
     @property
-    def target(self) -> WorkerTarget:
+    def target(self) -> WorkerConnection:
         """Return the Frontend routing target for this process start."""
 
-        return WorkerTarget(
+        return WorkerConnection(
             identity=self.identity,
             transport=self.transport,
             max_batch_tokens=_MAX_BATCH_TOKENS,

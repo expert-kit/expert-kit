@@ -7,7 +7,7 @@ from contextlib import suppress
 
 import ggml
 import torch
-from expertkit_transport.contracts import ACTIVATION_DTYPES
+from expertkit_transport.batches import ACTIVATION_DTYPES
 
 _WEIGHT_CONTEXT_BYTES = 8 * 1024
 _GGML_DTYPES = {

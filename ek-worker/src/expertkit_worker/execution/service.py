@@ -11,13 +11,11 @@ from contextlib import suppress
 from functools import partial
 
 import structlog
-from expertkit_transport.contracts import (
+from expertkit_transport.errors import TransportError, TransportErrorCode
+from expertkit_transport.tracing import Tracer, TraceSpan
+from expertkit_transport.transports.base import (
     ReceivedWorkerBatch,
     ReceiverClosed,
-    Tracer,
-    TraceSpan,
-    TransportError,
-    TransportErrorCode,
     WorkerBatchReceiver,
     WorkerPositionSpec,
 )
