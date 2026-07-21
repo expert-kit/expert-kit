@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from expertkit_transport.transports.base import WorkerEndpointConfig
-from expertkit_transport.transports.codec import (
+from expertkit_transport.transports.protobuf import (
     MAX_DIAGNOSTIC_BYTES,
     activation_dtype_to_protobuf,
 )

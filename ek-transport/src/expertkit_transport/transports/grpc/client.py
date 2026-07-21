@@ -21,7 +21,7 @@ from expertkit_transport.errors import (
     TransportProtocolError,
 )
 from expertkit_transport.transports.base import WorkerEndpointConfig, WorkerTransport
-from expertkit_transport.transports.grpc.buffers import (
+from expertkit_transport.transports.grpc.client_buffers import (
     GrpcTransferBufferPool,
     GrpcTransferBuffers,
 )

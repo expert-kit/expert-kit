@@ -9,7 +9,7 @@ from google.protobuf.message import DecodeError, Message
 
 from expertkit_transport.errors import TransportError, TransportProtocolError
 from expertkit_transport.transports.base import WorkerEndpointConfig
-from expertkit_transport.transports.codec import (
+from expertkit_transport.transports.protobuf import (
     activation_dtype_from_protobuf,
     activation_dtype_to_protobuf,
     decode_compute_error,

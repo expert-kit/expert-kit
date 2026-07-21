@@ -13,14 +13,14 @@ from google.protobuf.message import DecodeError
 from expertkit_transport.batches import WorkerBatch
 from expertkit_transport.errors import TransportError, TransportProtocolError
 from expertkit_transport.transports.base import WorkerEndpointConfig
-from expertkit_transport.transports.codec import (
+from expertkit_transport.transports.grpc.spec import (
+    calculate_message_limits,
+)
+from expertkit_transport.transports.protobuf import (
     activation_dtype_from_protobuf,
     activation_dtype_to_protobuf,
     decode_compute_error,
     encode_compute_error,
-)
-from expertkit_transport.transports.grpc.spec import (
-    calculate_message_limits,
 )
 from expertkit_transport.transports.validation import (
     validate_received_routing,

@@ -115,7 +115,7 @@ class WorkerBatch:
     """Describe one asynchronous computation sent to one Worker.
 
     `hidden_states` remains owned by the caller. When `token_indices` is present,
-    the adapter gathers those rows; the common middleware does not compact them.
+    the concrete Transport gathers those rows; routing does not compact them.
     The routing tensors are already aligned to the selected rows.
 
     Attributes:
@@ -135,7 +135,7 @@ class WorkerBatch:
     Note:
         Construction validates metadata, shapes, dtypes, and devices without
         reading Tensor values. This avoids a device-to-Host synchronization.
-        Orchestration and receiving adapters validate indices and routing values
+        Routing and the receiving Transport validate indices and routing values
         while they already process those values.
     """
 

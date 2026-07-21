@@ -114,7 +114,7 @@ class WorkerBatchBuffers(ABC):
     @property
     @abstractmethod
     def host_staging_bytes(self) -> int:
-        """Return fixed Host bytes allocated by this Transport adapter."""
+        """Return fixed Host bytes allocated by this Transport implementation."""
 
     @abstractmethod
     def copy_input(
@@ -132,7 +132,7 @@ class WorkerBatchBuffers(ABC):
         partial_output: torch.Tensor,
         destination: torch.Tensor | None,
     ) -> torch.Tensor:
-        """Copy or expose a valid output view that this adapter can send."""
+        """Copy or expose a valid output view that this Transport can send."""
 
     @abstractmethod
     def close(self) -> None:

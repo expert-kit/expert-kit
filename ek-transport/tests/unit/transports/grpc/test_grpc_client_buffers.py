@@ -4,7 +4,7 @@ import pytest
 import torch
 
 from expertkit_transport.transports import WorkerEndpointConfig
-from expertkit_transport.transports.grpc.buffers import GrpcTransferBufferPool
+from expertkit_transport.transports.grpc.client_buffers import GrpcTransferBufferPool
 
 
 def batch_spec() -> WorkerEndpointConfig:

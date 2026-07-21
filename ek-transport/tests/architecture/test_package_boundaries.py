@@ -187,7 +187,7 @@ def test_routing_does_not_import_protocol_transfer_buffers() -> None:
     _assert_no_import_prefix(
         routing_files,
         (
-            "expertkit_transport.transports.grpc.buffers",
-            "expertkit_transport.transports.shm.buffers",
+            "expertkit_transport.transports.grpc.client_buffers",
+            "expertkit_transport.transports.shm.client_buffers",
         ),
     )

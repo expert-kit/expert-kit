@@ -5,8 +5,8 @@ import torch
 from expertkit_proto.ek.worker.v2 import computation_pb2
 
 from expertkit_transport.transports import WorkerEndpointConfig
-from expertkit_transport.transports.codec import activation_dtype_to_protobuf
 from expertkit_transport.transports.grpc import calculate_message_limits
+from expertkit_transport.transports.protobuf import activation_dtype_to_protobuf
 
 
 def spec(**overrides: object) -> WorkerEndpointConfig:

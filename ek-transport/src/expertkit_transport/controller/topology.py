@@ -36,13 +36,13 @@ logger = logging.getLogger(__name__)
 
 
 @dataclass(slots=True)
-class _WorkerResource:
+class _WorkerConnectionResources:
     route: WorkerRoute
     target: WorkerConnection
     pool: OutputPool
 
 
-ResourceFactory = Callable[[WorkerRoute], Awaitable[_WorkerResource]]
+WorkerConnectionFactory = Callable[[WorkerRoute], Awaitable[_WorkerConnectionResources]]
 
 
 def _transport_error(
@@ -80,7 +80,7 @@ class ControllerTopologyWatcher(TopologyProvider):
         device: torch.device | str,
         reconnect_delay_seconds: float = 0.1,
         clock: Callable[[], float] = time.monotonic,
-        resource_factory: ResourceFactory | None = None,
+        resource_factory: WorkerConnectionFactory | None = None,
     ) -> None:
         if not controller_endpoint:
             raise ValueError("controller_endpoint must not be empty")
@@ -110,11 +110,11 @@ class ControllerTopologyWatcher(TopologyProvider):
         self._device = torch.device(device)
         self._reconnect_delay_seconds = reconnect_delay_seconds
         self._clock = clock
-        self._resource_factory = resource_factory or self._create_resource
+        self._resource_factory = resource_factory or self._create_worker_resources
 
         self._snapshot = TopologySnapshot(instance_id=instance_id, version=0, routes={})
         self._route_descriptions: RouteDescriptions = {}
-        self._resources: dict[WorkerIdentity, _WorkerResource] = {}
+        self._resources: dict[WorkerIdentity, _WorkerConnectionResources] = {}
         self._pools: dict[WorkerIdentity, OutputPool] = {}
         self._pools_view: Mapping[WorkerIdentity, OutputPool] = MappingProxyType(self._pools)
         self._messages = TopologyMessageAssembler(
@@ -247,7 +247,7 @@ class ControllerTopologyWatcher(TopologyProvider):
         self._pools.clear()
         if resources:
             await asyncio.gather(
-                *(self._close_resource(resource) for resource in resources),
+                *(self._close_worker_resources(resource) for resource in resources),
                 return_exceptions=False,
             )
 
@@ -310,7 +310,7 @@ class ControllerTopologyWatcher(TopologyProvider):
                         "one Worker process has inconsistent topology metadata"
                     )
 
-        created: dict[WorkerIdentity, _WorkerResource] = {}
+        created: dict[WorkerIdentity, _WorkerConnectionResources] = {}
         try:
             for identity, route in required.items():
                 current = self._resources.get(identity)
@@ -320,13 +320,13 @@ class ControllerTopologyWatcher(TopologyProvider):
         except BaseException:
             if created:
                 await asyncio.gather(
-                    *(self._close_resource(resource) for resource in created.values()),
+                    *(self._close_worker_resources(resource) for resource in created.values()),
                     return_exceptions=True,
                 )
             raise
 
         old_resources = self._resources
-        new_resources: dict[WorkerIdentity, _WorkerResource] = {}
+        new_resources: dict[WorkerIdentity, _WorkerConnectionResources] = {}
         for identity in required:
             resource = created.get(identity)
             if resource is None:
@@ -356,11 +356,11 @@ class ControllerTopologyWatcher(TopologyProvider):
             if new_resources.get(identity) is not resource
         )
         for resource in retired:
-            task = asyncio.create_task(self._retire_resource(resource))
+            task = asyncio.create_task(self._retire_worker_resources(resource))
             self._cleanup_tasks.add(task)
             task.add_done_callback(self._cleanup_tasks.discard)
 
-    async def _create_resource(self, route: WorkerRoute) -> _WorkerResource:
+    async def _create_worker_resources(self, route: WorkerRoute) -> _WorkerConnectionResources:
         transport = create_worker_transport(
             transport_type=route.transport_type,
             endpoint=route.endpoint,
@@ -398,10 +398,10 @@ class ControllerTopologyWatcher(TopologyProvider):
             max_active_batches=route.max_active_batches,
             max_pending_batches=route.max_pending_batches,
         )
-        return _WorkerResource(route=route, target=target, pool=pool)
+        return _WorkerConnectionResources(route=route, target=target, pool=pool)
 
-    async def _retire_resource(self, resource: _WorkerResource) -> None:
-        await self._close_resource(resource)
+    async def _retire_worker_resources(self, resource: _WorkerConnectionResources) -> None:
+        await self._close_worker_resources(resource)
         if (
             self._resources.get(resource.route.identity) is not resource
             and self._pools.get(resource.route.identity) is resource.pool
@@ -409,7 +409,7 @@ class ControllerTopologyWatcher(TopologyProvider):
             self._pools.pop(resource.route.identity, None)
 
     @staticmethod
-    async def _close_resource(resource: _WorkerResource) -> None:
+    async def _close_worker_resources(resource: _WorkerConnectionResources) -> None:
         try:
             await resource.target.transport.close()
         finally:

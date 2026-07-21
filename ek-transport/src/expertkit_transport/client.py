@@ -1,4 +1,4 @@
-"""High-level asynchronous and blocking Routed-MoE gRPC clients."""
+"""High-level asynchronous and blocking Routed-MoE Transport clients."""
 
 from __future__ import annotations
 

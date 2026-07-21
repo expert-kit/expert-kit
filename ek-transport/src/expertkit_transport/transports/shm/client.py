@@ -21,7 +21,7 @@ from expertkit_transport.errors import (
     TransportProtocolError,
 )
 from expertkit_transport.transports.base import WorkerEndpointConfig, WorkerTransport
-from expertkit_transport.transports.shm.buffers import (
+from expertkit_transport.transports.shm.client_buffers import (
     ShmTransferBufferPool,
     ShmTransferBuffers,
 )

@@ -16,7 +16,7 @@ from expertkit_transport.controller.messages import (
 )
 from expertkit_transport.controller.topology import (
     ControllerTopologyWatcher,
-    _WorkerResource,
+    _WorkerConnectionResources,
 )
 from expertkit_transport.errors import TransportError
 from expertkit_transport.routing import WorkerConnection
@@ -38,11 +38,11 @@ class FakePool:
         self.closed = True
 
 
-class FakeResourceFactory:
+class FakeWorkerConnectionFactory:
     def __init__(self) -> None:
-        self.created: list[_WorkerResource] = []
+        self.created: list[_WorkerConnectionResources] = []
 
-    async def __call__(self, route: WorkerRoute) -> _WorkerResource:
+    async def __call__(self, route: WorkerRoute) -> _WorkerConnectionResources:
         transport = FakeTransport()
         pool = FakePool()
         target = WorkerConnection(
@@ -52,7 +52,7 @@ class FakeResourceFactory:
             max_active_batches=route.max_active_batches,
             max_pending_batches=route.max_pending_batches,
         )
-        resource = _WorkerResource(route, target, pool)  # type: ignore[arg-type]
+        resource = _WorkerConnectionResources(route, target, pool)  # type: ignore[arg-type]
         self.created.append(resource)
         return resource
 
@@ -143,7 +143,7 @@ def run(coroutine: Awaitable[None]) -> None:
 
 def test_multipart_snapshot_is_installed_only_after_resources_are_ready() -> None:
     async def scenario() -> None:
-        factory = FakeResourceFactory()
+        factory = FakeWorkerConnectionFactory()
         topology = provider(factory)
         shared_worker = worker("worker-a")
 
@@ -192,7 +192,7 @@ def test_multipart_snapshot_is_installed_only_after_resources_are_ready() -> Non
 
 def test_changed_worker_metadata_replaces_its_resources_atomically() -> None:
     async def scenario() -> None:
-        factory = FakeResourceFactory()
+        factory = FakeWorkerConnectionFactory()
         topology = provider(factory)
         await topology._consume(snapshot(1, [route(0, 0, worker("worker-a"))]))
         old = factory.created[0]
@@ -248,7 +248,7 @@ def test_malformed_or_discontinuous_topology_is_rejected(
     messages: list[lifecycle_pb2.TopologyMessage],
 ) -> None:
     async def scenario() -> None:
-        topology = provider(FakeResourceFactory())
+        topology = provider(FakeWorkerConnectionFactory())
         with pytest.raises(TopologyProtocolError):
             for message in messages:
                 await topology._consume(message)
@@ -295,7 +295,7 @@ def test_watcher_reconnects_from_the_last_complete_version() -> None:
             dtype=torch.float16,
             device="cpu",
             reconnect_delay_seconds=0.001,
-            resource_factory=FakeResourceFactory(),
+            resource_factory=FakeWorkerConnectionFactory(),
         )
         try:
             await topology.start(monotonic_deadline=time.monotonic() + 1)

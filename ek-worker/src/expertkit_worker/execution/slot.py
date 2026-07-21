@@ -60,7 +60,7 @@ class ExecutionResult:
     """Hold one active slot until result communication has finished.
 
     Attributes:
-        output: Tensor safe for the receiver adapter to send. CUDA gRPC returns a
+        output: Tensor safe for the receiver to send. CUDA gRPC returns a
             pinned CPU view; CPU execution returns the fixed Backend output view.
         rejection: Cancellation or deadline result when no output should be sent.
 
@@ -159,7 +159,7 @@ class ExecutionSlot:
 
     @property
     def host_staging_bytes(self) -> int:
-        """Return fixed Host bytes allocated by the selected Transport adapter."""
+        """Return fixed Host bytes allocated by the selected Transport."""
 
         return self._transport_buffers.host_staging_bytes
 
