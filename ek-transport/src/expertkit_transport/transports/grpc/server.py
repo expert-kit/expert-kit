@@ -5,11 +5,9 @@ from __future__ import annotations
 import asyncio
 import math
 import time
-from collections import Counter, deque
 from collections.abc import Callable, Iterable, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import nullcontext, suppress
-from enum import StrEnum
 from functools import partial
 from typing import Any
 
@@ -21,7 +19,6 @@ from expertkit_transport.errors import TransportError, TransportErrorCode
 from expertkit_transport.tracing import TraceContext, Tracer, TraceSpan
 from expertkit_transport.transports.base import (
     ReceivedWorkerBatch,
-    ReceiverClosed,
     WorkerBatchReceiver,
     WorkerPositionBuffers,
     WorkerPositionSpec,
@@ -37,6 +34,7 @@ from expertkit_transport.transports.grpc.spec import (
     calculate_message_limits,
 )
 from expertkit_transport.transports.grpc.worker_buffers import GrpcWorkerPositionBuffers
+from expertkit_transport.transports.queue import ReceiverQueue
 from expertkit_transport.transports.shm.codec import (
     decode_close_request,
     decode_execute_request,
@@ -57,7 +55,6 @@ _EXECUTE_SHARED_MEMORY_METHOD_NAME = "ExecuteSharedMemory"
 _CLOSE_SHARED_MEMORY_METHOD_NAME = "CloseSharedMemory"
 _SERVICE_NAME = "ek.worker.v2.ComputationService"
 _MAX_SHARED_MEMORY_SESSIONS = 64
-_UINT32_MAX = (1 << 32) - 1
 _UINT64_MAX = (1 << 64) - 1
 _NATIVE_ERROR_STATUS = {
     TransportErrorCode.DEADLINE_EXCEEDED: grpc.StatusCode.DEADLINE_EXCEEDED,
@@ -79,33 +76,6 @@ def _batch_trace_attributes(batch: WorkerBatch) -> dict[str, str | int]:
         "expertkit.token_count": batch.token_count,
         "expertkit.assignment_count": batch.token_count * batch.top_k,
     }
-
-
-def _validate_drain_experts(
-    experts: Iterable[tuple[int, int]],
-) -> tuple[tuple[int, int], ...]:
-    resolved = tuple(experts)
-    seen: set[tuple[int, int]] = set()
-    for key in resolved:
-        if not isinstance(key, tuple) or len(key) != 2:
-            raise ValueError("each draining expert must contain layer and expert IDs")
-        for name, value in zip(("layer_id", "expert_id"), key, strict=True):
-            if (
-                isinstance(value, bool)
-                or not isinstance(value, int)
-                or not 0 <= value <= _UINT32_MAX
-            ):
-                raise ValueError(f"{name} must be an unsigned 32-bit integer")
-        if key in seen:
-            raise ValueError("draining experts must not contain duplicates")
-        seen.add(key)
-    return resolved
-
-
-class _CallState(StrEnum):
-    WAITING = "waiting"
-    ACTIVE = "active"
-    FINISHED = "finished"
 
 
 class _NativeCallError(RuntimeError):
@@ -144,8 +114,8 @@ class _GrpcWorkItem(ReceivedWorkerBatch):
         self.shared_slot_index = shared_slot_index
         self.shared_generation = shared_generation
         self._wait_span: TraceSpan | None = None
-        self.state = _CallState.WAITING
         self._cancelled = False
+        self._cancelled_event = asyncio.Event()
         self.response: asyncio.Future[bytes] = asyncio.get_running_loop().create_future()
 
     @property
@@ -208,76 +178,6 @@ class _GrpcWorkItem(ReceivedWorkerBatch):
         span.end()
 
 
-class _PendingArea:
-    def __init__(self, max_count: int, max_retained_bytes: int) -> None:
-        self.max_count = max_count
-        self.max_retained_bytes = max_retained_bytes
-        self._items: deque[_GrpcWorkItem] = deque()
-        self._retained_bytes = 0
-        self._condition = asyncio.Condition()
-        self._closing = False
-
-    @property
-    def count(self) -> int:
-        return len(self._items)
-
-    @property
-    def retained_bytes(self) -> int:
-        return self._retained_bytes
-
-    async def try_admit(self, item: _GrpcWorkItem) -> bool:
-        async with self._condition:
-            if self._closing:
-                return False
-            if len(self._items) >= self.max_count:
-                return False
-            if self._retained_bytes + item.retained_bytes > self.max_retained_bytes:
-                return False
-            self._items.append(item)
-            self._retained_bytes += item.retained_bytes
-            self._condition.notify_all()
-            return True
-
-    async def take(self) -> _GrpcWorkItem:
-        async with self._condition:
-            await self._condition.wait_for(lambda: self._items or self._closing)
-            if not self._items:
-                raise ReceiverClosed("gRPC receiver is closed")
-            item = self._items.popleft()
-            self._retained_bytes -= item.retained_bytes
-            item.state = _CallState.ACTIVE
-            self._condition.notify_all()
-            return item
-
-    async def cancel_waiting(self, item: _GrpcWorkItem) -> bool:
-        async with self._condition:
-            if item.state is not _CallState.WAITING:
-                return False
-            try:
-                self._items.remove(item)
-            except ValueError:
-                return False
-            self._retained_bytes -= item.retained_bytes
-            item.state = _CallState.FINISHED
-            self._condition.notify_all()
-            return True
-
-    async def close(self) -> tuple[_GrpcWorkItem, ...]:
-        async with self._condition:
-            self._closing = True
-            waiting = tuple(self._items)
-            self._items.clear()
-            self._retained_bytes = 0
-            for item in waiting:
-                item.state = _CallState.FINISHED
-            self._condition.notify_all()
-            return waiting
-
-    async def wait_for_count(self, expected: int) -> None:
-        async with self._condition:
-            await self._condition.wait_for(lambda: len(self._items) == expected or self._closing)
-
-
 class GrpcWorkerServer(WorkerBatchReceiver):
     """Receive plaintext unary calls and expose one Transport-owned waiting area."""
 
@@ -315,9 +215,11 @@ class GrpcWorkerServer(WorkerBatchReceiver):
         self._spec = batch_spec
         self._limits = calculate_message_limits(batch_spec)
         self._maximum_concurrent_rpcs = max_active_batches + max_pending_batches
-        self._pending = _PendingArea(
-            max_pending_batches,
-            max_pending_batches * self._limits.retained_request_tensor_bytes,
+        self._queue = ReceiverQueue(
+            max_pending_batches=max_pending_batches,
+            max_retained_bytes=(max_pending_batches * self._limits.retained_request_tensor_bytes),
+            clock=clock,
+            on_pending_changed=on_pending_changed,
         )
         self._executor = ThreadPoolExecutor(
             max_workers=resolved_cpu_workers,
@@ -327,14 +229,8 @@ class GrpcWorkerServer(WorkerBatchReceiver):
         self._interceptors = tuple(interceptors)
         self._tracer = tracer
         self._on_rejection = on_rejection or (lambda _reason: None)
-        self._on_pending_changed = on_pending_changed or (lambda _count: None)
         self._server: grpc.aio.Server | None = None
         self._start_lock = asyncio.Lock()
-        self._admitted_experts: Counter[tuple[int, int]] = Counter()
-        self._draining_experts: dict[tuple[int, int], int] = {}
-        self._stop_all_min_topology_version: int | None = None
-        self._active_count = 0
-        self._state_condition = asyncio.Condition()
         self._shared_sessions: dict[str, WorkerSharedMemorySession] = {}
         self._shared_session_lock = asyncio.Lock()
         self._position_device: torch.device | None = None
@@ -354,19 +250,19 @@ class GrpcWorkerServer(WorkerBatchReceiver):
     def pending_count(self) -> int:
         """Return the number of decoded calls waiting for Worker execution."""
 
-        return self._pending.count
+        return self._queue.pending_count
 
     @property
     def pending_retained_bytes(self) -> int:
         """Return raw Tensor bytes retained by waiting calls."""
 
-        return self._pending.retained_bytes
+        return self._queue.retained_bytes
 
     @property
     def active_count(self) -> int:
         """Return batches already taken by Worker execution."""
 
-        return self._active_count
+        return self._queue.active_count
 
     async def start(self) -> None:
         """Start the finite plaintext `grpc.aio` computation server."""
@@ -421,12 +317,8 @@ class GrpcWorkerServer(WorkerBatchReceiver):
     async def take(self) -> ReceivedWorkerBatch:
         """Move one waiting batch directly into Worker execution ownership."""
 
-        item = await self._pending.take()
+        item = await self._queue.take()
         item.finish_wait_span("active")
-        async with self._state_condition:
-            self._active_count += 1
-            self._record_pending_count()
-            self._state_condition.notify_all()
         return item
 
     def allocate_position_buffers(self, spec: WorkerPositionSpec) -> WorkerPositionBuffers:
@@ -463,35 +355,16 @@ class GrpcWorkerServer(WorkerBatchReceiver):
     ) -> None:
         """Reject new matching calls while preserving already admitted work."""
 
-        selected = _validate_drain_experts(experts)
-        if (
-            isinstance(min_topology_version, bool)
-            or not isinstance(min_topology_version, int)
-            or not 0 <= min_topology_version <= _UINT64_MAX
-        ):
-            raise ValueError("min_topology_version must be a uint64")
-        if not isinstance(stop_all, bool):
-            raise ValueError("stop_all must be a Boolean")
-        if not selected and not stop_all:
-            raise ValueError("an expert drain must name at least one expert")
-
-        async with self._state_condition:
-            for key in selected:
-                current = self._draining_experts.get(key, 0)
-                self._draining_experts[key] = max(current, min_topology_version)
-            if stop_all:
-                current = self._stop_all_min_topology_version or 0
-                self._stop_all_min_topology_version = max(current, min_topology_version)
-            self._state_condition.notify_all()
+        await self._queue.begin_drain(
+            experts,
+            min_topology_version=min_topology_version,
+            stop_all=stop_all,
+        )
 
     async def clear_expert_drains(self, experts: Iterable[tuple[int, int]]) -> None:
         """Clear per-expert gates after later assignments become ready."""
 
-        selected = _validate_drain_experts(experts)
-        async with self._state_condition:
-            for key in selected:
-                self._draining_experts.pop(key, None)
-            self._state_condition.notify_all()
+        await self._queue.clear_expert_drains(experts)
 
     async def wait_experts_idle(
         self,
@@ -501,40 +374,20 @@ class GrpcWorkerServer(WorkerBatchReceiver):
     ) -> None:
         """Wait until no waiting or active batch uses the selected experts."""
 
-        selected = _validate_drain_experts(experts)
-
-        def idle() -> bool:
-            return all(self._admitted_experts[key] == 0 for key in selected)
-
-        async with self._state_condition:
-            while not idle():
-                remaining = monotonic_deadline - self._clock()
-                if remaining <= 0:
-                    raise TimeoutError("deadline expired while waiting for admitted expert use")
-                if math.isinf(remaining):
-                    await self._state_condition.wait()
-                else:
-                    async with asyncio.timeout(remaining):
-                        await self._state_condition.wait()
+        await self._queue.wait_experts_idle(
+            experts,
+            monotonic_deadline=monotonic_deadline,
+        )
 
     async def wait_all_idle(self, *, monotonic_deadline: float) -> None:
         """Wait until the Transport waiting area and execution are both empty."""
 
-        async with self._state_condition:
-            while self._pending.count or self._active_count:
-                remaining = monotonic_deadline - self._clock()
-                if remaining <= 0:
-                    raise TimeoutError("deadline expired while waiting for all admitted work")
-                if math.isinf(remaining):
-                    await self._state_condition.wait()
-                else:
-                    async with asyncio.timeout(remaining):
-                        await self._state_condition.wait()
+        await self._queue.wait_all_idle(monotonic_deadline=monotonic_deadline)
 
     def admitted_count(self, layer_id: int, expert_id: int) -> int:
         """Return waiting plus active batches that name one expert."""
 
-        return self._admitted_experts[(layer_id, expert_id)]
+        return self._queue.admitted_count(layer_id, expert_id)
 
     async def _execute(
         self,
@@ -757,55 +610,26 @@ class GrpcWorkerServer(WorkerBatchReceiver):
         return encode_close_response()
 
     async def _admit(self, item: _GrpcWorkItem) -> TransportError | None:
-        async with self._state_condition:
-            draining = self._drain_error_locked(item)
-            if draining is not None:
-                return draining
-            admitted = await self._pending.try_admit(item)
-            if not admitted:
-                return TransportError(
-                    TransportErrorCode.BUSY,
-                    retryable=True,
-                    diagnostic="Worker Transport waiting area is full",
-                )
-            if self._tracer is not None and item.trace_context is not None:
-                item.start_wait_span(self._tracer)
-            for expert_id in item.distinct_expert_ids:
-                self._admitted_experts[(item.layer_id, expert_id)] += 1
-            self._record_pending_count()
-            self._state_condition.notify_all()
-        return None
-
-    def _drain_error_locked(self, item: _GrpcWorkItem) -> TransportError | None:
-        min_topology_version = self._stop_all_min_topology_version
-        for expert_id in item.distinct_expert_ids:
-            expert_version = self._draining_experts.get((item.layer_id, expert_id))
-            if expert_version is not None:
-                min_topology_version = max(min_topology_version or 0, expert_version)
-        if min_topology_version is None:
-            return None
-        return TransportError(
-            TransportErrorCode.DRAINING,
-            retryable=True,
-            min_topology_version=min_topology_version,
-            diagnostic="Worker is draining the requested expert route",
+        rejection = await self._queue.admit(
+            item,
+            retained_bytes=item.retained_bytes,
         )
+        if rejection is None and self._tracer is not None and item.trace_context is not None:
+            item.start_wait_span(self._tracer)
+        return rejection
 
     async def _cancel(self, item: _GrpcWorkItem) -> None:
-        async with self._state_condition:
-            item._cancelled = True
-            self._state_condition.notify_all()
-        if await self._pending.cancel_waiting(item):
+        item._cancelled = True
+        item._cancelled_event.set()
+        if await self._queue.cancel_waiting(item):
             item.finish_wait_span("cancelled")
-            self._record_pending_count()
-            await self._release_admitted(item, was_active=False)
+            self._release_shared_slot(item)
 
     async def _wait_pending_count(self, expected: int) -> None:
-        await self._pending.wait_for_count(expected)
+        await self._queue.wait_for_pending_count(expected)
 
     async def _wait_cancelled(self, item: _GrpcWorkItem) -> None:
-        async with self._state_condition:
-            await self._state_condition.wait_for(lambda: item.cancelled)
+        await item._cancelled_event.wait()
 
     async def _complete_success(
         self,
@@ -881,40 +705,27 @@ class GrpcWorkerServer(WorkerBatchReceiver):
 
     async def _finish_active(self, item: _GrpcWorkItem) -> None:
         item._batch = None
-        item.state = _CallState.FINISHED
-        cleanup = asyncio.create_task(self._release_admitted(item, was_active=True))
+        cleanup = asyncio.create_task(self._release_active(item))
         try:
             await asyncio.shield(cleanup)
         except asyncio.CancelledError:
             await cleanup
             raise
 
-    async def _release_admitted(
-        self,
-        item: _GrpcWorkItem,
-        *,
-        was_active: bool,
-    ) -> None:
-        async with self._state_condition:
-            if was_active:
-                self._active_count -= 1
-            for expert_id in item.distinct_expert_ids:
-                key = (item.layer_id, expert_id)
-                self._admitted_experts[key] -= 1
-                if self._admitted_experts[key] == 0:
-                    del self._admitted_experts[key]
-            if item.shared_session is not None:
-                if item.shared_slot_index is None or item.shared_generation is None:
-                    raise RuntimeError("shared-memory item has incomplete slot ownership")
-                item.shared_session.release(
-                    item.shared_slot_index,
-                    item.shared_generation,
-                )
-            self._state_condition.notify_all()
+    async def _release_active(self, item: _GrpcWorkItem) -> None:
+        self._release_shared_slot(item)
+        await self._queue.finish(item)
+
+    @staticmethod
+    def _release_shared_slot(item: _GrpcWorkItem) -> None:
+        if item.shared_session is None:
+            return
+        if item.shared_slot_index is None or item.shared_generation is None:
+            raise RuntimeError("shared-memory item has incomplete slot ownership")
+        item.shared_session.release(item.shared_slot_index, item.shared_generation)
 
     def _require_active(self, item: _GrpcWorkItem) -> None:
-        if item.state is not _CallState.ACTIVE:
-            raise RuntimeError("Worker batch completion requires one active received batch")
+        self._queue.require_active(item)
 
     def _trace_span(
         self,
@@ -931,22 +742,17 @@ class GrpcWorkerServer(WorkerBatchReceiver):
         with suppress(Exception):
             self._on_rejection(reason)
 
-    def _record_pending_count(self) -> None:
-        with suppress(Exception):
-            self._on_pending_changed(self._pending.count)
-
     async def _close(self) -> None:
         self._closing = True
         if self._server is not None:
             await self._server.stop(None)
-        waiting = await self._pending.close()
-        self._record_pending_count()
+        waiting = await self._queue.begin_close()
         for item in waiting:
             item._cancelled = True
+            item._cancelled_event.set()
             item.finish_wait_span("closed")
-            await self._release_admitted(item, was_active=False)
-        async with self._state_condition:
-            await self._state_condition.wait_for(lambda: self._active_count == 0)
+            self._release_shared_slot(item)
+        await self._queue.wait_active_empty()
         async with self._shared_session_lock:
             sessions = tuple(self._shared_sessions.values())
             self._shared_sessions.clear()
