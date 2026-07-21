@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import os
-from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -18,10 +17,12 @@ from expertkit_transport.transports.grpc import GrpcWorkerBatchReceiver
 from expertkit_transport.transports.shm import ShmWorkerBatchReceiver
 
 from expertkit_worker.app import WorkerApplication
-from expertkit_worker.backends import ComputeBackend
+from expertkit_worker.backends.factory import (
+    create_compute_backend,
+    create_weight_adapter,
+    torch_dtype,
+)
 from expertkit_worker.config import (
-    ActivationDType,
-    BackendName,
     GrpcTransportConfig,
     ShmTransportConfig,
     WorkerConfig,
@@ -29,158 +30,23 @@ from expertkit_worker.config import (
     validate_available_device_memory,
 )
 from expertkit_worker.control import (
-    ControllerConnection,
-    ControllerSupervisor,
     ExpertStateReporter,
-    HeartbeatSender,
-    WeightControlSession,
-    WorkerRegistration,
-    new_start_id,
 )
+from expertkit_worker.control.factory import create_controller_supervisor
 from expertkit_worker.execution import WorkerExecutor
 from expertkit_worker.observability import create_observability
 from expertkit_worker.weights import (
-    CpuWeightLoader,
     DirectIOWeightDiskCache,
-    DiskWriteback,
     ExpertStateChange,
-    PeerWeightServer,
     WeightManager,
-    max_safetensors_file_bytes,
 )
-from expertkit_worker.weights.adapter import WeightAdapter
-from expertkit_worker.weights.dram_cache import DramCache
-from expertkit_worker.weights.loader import CachedCpuWeight
-from expertkit_worker.weights.transfer import HttpWeightTransfer
+from expertkit_worker.weights.factory import (
+    WeightServices,
+    create_weight_disk_cache,
+    create_weight_services,
+)
 
 logger = structlog.get_logger(__name__)
-
-_DTYPE = {
-    ActivationDType.FP16: torch.float16,
-    ActivationDType.BF16: torch.bfloat16,
-    ActivationDType.FP32: torch.float32,
-}
-
-
-def _split_address(value: str) -> tuple[str, int]:
-    if value.startswith("["):
-        closing = value.index("]")
-        return value[1:closing], int(value[closing + 2 :])
-    host, port = value.rsplit(":", 1)
-    return host, int(port)
-
-
-def _dram_cache_limit(config: WorkerConfig, adapter: WeightAdapter[Any, Any]) -> int:
-    one_entry = (
-        max_safetensors_file_bytes(adapter.source_tensor_bytes()) + adapter.cpu_extra_bytes()
-    )
-    configured = config.weight_manager.dram_cache.max_bytes
-    if configured is not None:
-        resolved = int(configured)
-        if resolved < one_entry:
-            raise ValueError("weight_manager.dram_cache.max_bytes cannot fit one expert")
-        return resolved
-    expert_count = config.model.num_layers * config.model.experts_per_layer
-    return one_entry * expert_count
-
-
-def _create_weight_adapter(
-    config: WorkerConfig,
-    *,
-    source_dtype: torch.dtype,
-    compute_dtype: torch.dtype,
-    device: torch.device,
-) -> WeightAdapter[Any, Any]:
-    if config.worker.backend is BackendName.TORCH:
-        from expertkit_worker.backends.torch import TorchWeightAdapter
-
-        return TorchWeightAdapter(
-            hidden_dim=config.model.hidden_dim,
-            intermediate_dim=config.model.expert_intermediate_dim,
-            source_dtype=source_dtype,
-            compute_dtype=compute_dtype,
-            device=device,
-        )
-    if config.worker.backend is BackendName.GGML:
-        try:
-            from expertkit_worker.backends.ggml import GgmlWeightAdapter
-        except ModuleNotFoundError as error:
-            if error.name == "ggml":
-                raise RuntimeError("the GGML Backend requires the locked ggml extra") from error
-            raise
-
-        return GgmlWeightAdapter(
-            hidden_dim=config.model.hidden_dim,
-            intermediate_dim=config.model.expert_intermediate_dim,
-            source_dtype=source_dtype,
-            compute_dtype=compute_dtype,
-        )
-    try:
-        from expertkit_worker.backends.fused import FusedWeightAdapter
-    except ModuleNotFoundError as error:
-        if error.name == "triton":
-            raise RuntimeError("the fused Backend requires the locked fused extra") from error
-        raise
-
-    return FusedWeightAdapter(
-        num_layers=config.model.num_layers,
-        experts_per_layer=config.model.experts_per_layer,
-        hidden_dim=config.model.hidden_dim,
-        intermediate_dim=config.model.expert_intermediate_dim,
-        source_dtype=source_dtype,
-        compute_dtype=compute_dtype,
-        device=device,
-    )
-
-
-def _create_backend(
-    config: WorkerConfig,
-    *,
-    dtype: torch.dtype,
-    device: torch.device,
-    acquire_many: Callable[[int, tuple[int, ...]], Any],
-) -> ComputeBackend:
-    if config.worker.backend is BackendName.TORCH:
-        from expertkit_worker.backends.torch import TorchBackend
-
-        return TorchBackend(
-            hidden_dim=config.model.hidden_dim,
-            intermediate_dim=config.model.expert_intermediate_dim,
-            top_k=config.model.top_k,
-            dtype=dtype,
-            device=device,
-            acquire_many=acquire_many,
-        )
-    if config.worker.backend is BackendName.GGML:
-        from expertkit_worker.backends.ggml import GgmlBackend
-
-        if config.worker.ggml is None:
-            raise ValueError("worker.ggml configuration is missing after validation")
-        return GgmlBackend(
-            hidden_dim=config.model.hidden_dim,
-            intermediate_dim=config.model.expert_intermediate_dim,
-            top_k=config.model.top_k,
-            dtype=dtype,
-            cpu_threads=config.worker.ggml.cpu_threads,
-            acquire_many=acquire_many,
-        )
-    try:
-        from expertkit_worker.backends.fused import FusedBackend
-    except ModuleNotFoundError as error:
-        if error.name == "triton":
-            raise RuntimeError("the fused Backend requires the locked fused extra") from error
-        raise
-
-    return FusedBackend(
-        num_layers=config.model.num_layers,
-        experts_per_layer=config.model.experts_per_layer,
-        hidden_dim=config.model.hidden_dim,
-        intermediate_dim=config.model.expert_intermediate_dim,
-        top_k=config.model.top_k,
-        dtype=dtype,
-        device=device,
-        acquire_many=acquire_many,
-    )
 
 
 def _memory_info(device: torch.device) -> tuple[int, int]:
@@ -210,8 +76,8 @@ async def build_worker_application(config: WorkerConfig) -> WorkerApplication:
 
     if not isinstance(config, WorkerConfig):
         raise TypeError("config must be a WorkerConfig")
-    activation_dtype = _DTYPE[config.model.activation_dtype]
-    weight_dtype = _DTYPE[config.model.weight_dtype]
+    activation_dtype = torch_dtype(config.model.activation_dtype)
+    weight_dtype = torch_dtype(config.model.weight_dtype)
     device = torch.device(config.worker.device)
     if device.type == "cuda":
         torch.cuda.set_device(device)
@@ -223,18 +89,11 @@ async def build_worker_application(config: WorkerConfig) -> WorkerApplication:
     metrics = observability.metrics
     receiver: WorkerBatchReceiver | None = None
     execution: WorkerExecutor | None = None
-    manager: WeightManager[Any, Any] | None = None
-    peer_server: PeerWeightServer[Any, Any] | None = None
-    transfer: HttpWeightTransfer | None = None
     disk_cache: DirectIOWeightDiskCache | None = None
+    weight_services: WeightServices | None = None
     try:
-        disk_cache = DirectIOWeightDiskCache(
-            root=config.weight_manager.disk_cache.path,
-            model_name=config.model.name,
-            max_concurrent_operations=config.weight_manager.max_concurrent_loads,
-        )
-        await disk_cache.initialize()
-        adapter = _create_weight_adapter(
+        disk_cache = await create_weight_disk_cache(config)
+        adapter = create_weight_adapter(
             config,
             source_dtype=weight_dtype,
             compute_dtype=activation_dtype,
@@ -285,7 +144,7 @@ async def build_worker_application(config: WorkerConfig) -> WorkerApplication:
                 raise RuntimeError("Weight Manager is not installed in the selected Backend")
             return current.acquire_many(layer_id, expert_ids)
 
-        backend = _create_backend(
+        backend = create_compute_backend(
             config,
             dtype=activation_dtype,
             device=device,
@@ -322,27 +181,6 @@ async def build_worker_application(config: WorkerConfig) -> WorkerApplication:
             available_bytes_after_fixed_slots=available_bytes,
         )
 
-        transfer = HttpWeightTransfer(
-            max_connections=config.weight_manager.max_concurrent_loads,
-        )
-        dram_cache: DramCache[CachedCpuWeight[Any]] = DramCache(_dram_cache_limit(config, adapter))
-        loader = CpuWeightLoader(
-            model_name=config.model.name,
-            disk_cache=disk_cache,
-            weight_server_endpoint=str(config.weight_manager.weight_server_endpoint),
-            adapter=adapter,
-            cache=dram_cache,
-            transfer=transfer,
-            source_result=lambda source, success: metrics.weight_source_result(
-                source,
-                success=success,
-            ),
-        )
-        writeback = DiskWriteback(
-            disk_cache=disk_cache,
-            enabled=config.weight_manager.disk_cache.writeback,
-            max_pending=config.weight_manager.max_concurrent_loads,
-        )
         reporter = ExpertStateReporter(
             num_layers=config.model.num_layers,
             experts_per_layer=config.model.experts_per_layer,
@@ -354,69 +192,32 @@ async def build_worker_application(config: WorkerConfig) -> WorkerApplication:
             reporter.record(change)
             metrics.expert_state_changed(change.expert.state.value)
 
-        manager = WeightManager(
-            num_layers=config.model.num_layers,
-            experts_per_layer=config.model.experts_per_layer,
-            device=config.worker.device,
-            device_weight_capacity_bytes=resource_plan.weight_capacity_bytes,
-            max_concurrent_loads=config.weight_manager.max_concurrent_loads,
+        weight_services = await create_weight_services(
+            config,
+            disk_cache=disk_cache,
             adapter=adapter,
-            loader=loader,
-            writeback=writeback,
+            device_weight_capacity_bytes=resource_plan.weight_capacity_bytes,
             state_changed=state_changed,
+            source_result=lambda source, success: metrics.weight_source_result(
+                source,
+                success=success,
+            ),
             device_bytes_changed=metrics.device_weight_bytes_changed,
         )
+        disk_cache = weight_services.disk_cache
+        transfer = weight_services.transfer
+        manager = weight_services.manager
+        peer_server = weight_services.peer_server
         manager_holder[0] = manager
 
-        peer_host, peer_port = _split_address(config.weight_manager.peer.listen)
-        peer_server = PeerWeightServer(
-            model_name=config.model.name,
-            num_layers=config.model.num_layers,
-            experts_per_layer=config.model.experts_per_layer,
-            host=peer_host,
-            port=peer_port,
-            max_concurrent_requests=config.weight_manager.max_concurrent_loads,
-            loader=loader,
-        )
-
-        start_id = new_start_id()
-        connection = ControllerConnection(config.controller.endpoint)
-        heartbeat = HeartbeatSender(
-            worker_id=config.worker.id,
-            start_id=start_id,
-            interval_secs=config.controller.heartbeat_interval_secs,
-        )
-        weights = WeightControlSession(
-            worker_id=config.worker.id,
-            start_id=start_id,
-            max_experts=manager.max_experts,
-            shutdown_grace_secs=config.worker.shutdown_grace_secs,
+        control = create_controller_supervisor(
+            config,
+            activation_dtype=activation_dtype,
+            receiver=receiver,
             manager=manager,
             reporter=reporter,
-            receiver=receiver,
-        )
-        registration = WorkerRegistration(
-            worker_id=config.worker.id,
-            start_id=start_id,
-            instance_id=config.model.instance_id,
             computation_endpoint=computation_endpoint,
-            peer_weight_endpoint=str(config.weight_manager.peer.advertise),
-            backend=config.worker.backend.value,
-            activation_dtype=activation_dtype,
-            device=config.worker.device,
-            max_experts=manager.max_experts,
-            max_batch_tokens=config.worker.max_batch_tokens,
-            max_active_batches=config.worker.max_active_batches_per_device,
-            max_pending_batches=config.transport.max_pending_batches_per_device,
             transport_type=transport_type,
-        )
-        control = ControllerSupervisor(
-            connection=connection,
-            registration=registration,
-            heartbeat=heartbeat,
-            weights=weights,
-            registration_timeout_secs=config.controller.heartbeat_timeout_secs,
-            stable_stream_secs=config.controller.heartbeat_timeout_secs,
         )
         logger.info(
             "worker_resource_plan",
@@ -443,13 +244,9 @@ async def build_worker_application(config: WorkerConfig) -> WorkerApplication:
             await execution.close()
         elif receiver is not None:
             await receiver.close()
-        if peer_server is not None:
-            await peer_server.close()
-        if manager is not None:
-            await manager.close()
-        if transfer is not None:
-            await transfer.close()
-        if disk_cache is not None:
+        if weight_services is not None:
+            await weight_services.close()
+        elif disk_cache is not None:
             disk_cache.close()
         await observability.close()
         raise

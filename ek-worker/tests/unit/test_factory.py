@@ -10,7 +10,7 @@ import pytest
 import torch
 
 from expertkit_worker.config import WorkerConfig
-from expertkit_worker.factory import _split_address, build_worker_application
+from expertkit_worker.factory import build_worker_application
 from expertkit_worker.weights import DirectIOWeightDiskCache
 
 
@@ -57,12 +57,6 @@ def _config(cache_path: Path, *, backend: str = "torch") -> WorkerConfig:
     if backend == "ggml":
         document["worker"]["ggml"] = {"cpu_threads": 2}
     return WorkerConfig.model_validate(document)
-
-
-def test_split_address_handles_ipv4_hostnames_and_ipv6() -> None:
-    assert _split_address("127.0.0.1:5000") == ("127.0.0.1", 5000)
-    assert _split_address("worker.local:5001") == ("worker.local", 5001)
-    assert _split_address("[2001:db8::1]:5002") == ("2001:db8::1", 5002)
 
 
 def test_factory_builds_and_closes_ggml_worker(tmp_path: Path) -> None:
