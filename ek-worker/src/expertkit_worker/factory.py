@@ -383,6 +383,7 @@ async def build_worker_application(config: WorkerConfig) -> WorkerApplication:
             max_batch_tokens=config.worker.max_batch_tokens,
             max_active_batches=config.worker.max_active_batches_per_device,
             max_pending_batches=config.transport.max_pending_batches_per_device,
+            transport_type="grpc",
         )
         control = ControllerSupervisor(
             connection=connection,

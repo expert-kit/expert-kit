@@ -1,4 +1,4 @@
-"""Generate the single Python v2 protobuf binding distributed by this package."""
+"""Generate the Python bindings for Expert Kit v2 protocols."""
 
 from __future__ import annotations
 
@@ -7,17 +7,15 @@ import subprocess
 import sys
 from pathlib import Path
 
-TRANSPORT_ROOT = Path(__file__).resolve().parents[1]
-REPOSITORY_ROOT = TRANSPORT_ROOT.parent
-PROTO_ROOT = REPOSITORY_ROOT / "ek-proto"
-OUTPUT_ROOT = TRANSPORT_ROOT / "src" / "expertkit_transport" / "_proto"
+PROTO_ROOT = Path(__file__).resolve().parents[1]
+OUTPUT_ROOT = PROTO_ROOT / "src" / "expertkit_proto"
 PROTO_FILES = (
     PROTO_ROOT / "ek" / "worker" / "v2" / "common.proto",
     PROTO_ROOT / "ek" / "worker" / "v2" / "computation.proto",
     PROTO_ROOT / "ek" / "control" / "v2" / "lifecycle.proto",
     PROTO_ROOT / "ek" / "control" / "v2" / "weight_control.proto",
 )
-GENERATED_IMPORT_PREFIX = "expertkit_transport._proto."
+GENERATED_IMPORT_PREFIX = "expertkit_proto."
 
 
 def _rewrite_generated_imports(path: Path) -> None:

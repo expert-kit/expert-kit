@@ -3,9 +3,7 @@
 import grpc
 import warnings
 
-from expertkit_transport._proto.ek.worker.v2 import (
-    computation_pb2 as ek_dot_worker_dot_v2_dot_computation__pb2,
-)
+from expertkit_proto.ek.worker.v2 import computation_pb2 as ek_dot_worker_dot_v2_dot_computation__pb2
 
 GRPC_GENERATED_VERSION = '1.71.0'
 GRPC_VERSION = grpc.__version__

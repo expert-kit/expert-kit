@@ -620,6 +620,8 @@ mod tests {
             max_batch_tokens: 64,
             max_active_batches_per_device: 1,
             max_pending_batches_per_device: 1,
+            transport_type: crate::proto::ek::control::v2::WorkerTransportType::WorkerTransportGrpc
+                as i32,
         }
     }
 

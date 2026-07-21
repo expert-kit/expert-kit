@@ -1,8 +1,8 @@
 """Tests for atomic multipart weight-control message assembly."""
 
 import pytest
-from expertkit_transport._proto.ek.control.v2 import weight_control_pb2
-from expertkit_transport._proto.ek.worker.v2 import common_pb2
+from expertkit_proto.ek.control.v2 import weight_control_pb2
+from expertkit_proto.ek.worker.v2 import common_pb2
 
 from expertkit_worker.control import DrainAuthorizationAssembler, TargetListAssembler
 from expertkit_worker.weights.dram_cache import WeightKey

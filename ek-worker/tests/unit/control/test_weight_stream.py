@@ -7,7 +7,7 @@ from collections.abc import AsyncIterator, Coroutine, Iterable
 from typing import Any
 
 import pytest
-from expertkit_transport._proto.ek.control.v2 import weight_control_pb2
+from expertkit_proto.ek.control.v2 import weight_control_pb2
 from expertkit_transport.contracts import (
     ReceivedWorkerBatch,
     WorkerBatchReceiver,

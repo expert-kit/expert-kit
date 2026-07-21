@@ -5,8 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import torch
-
-from expertkit_transport._proto.ek.worker.v2 import common_pb2
+from expertkit_proto.ek.worker.v2 import common_pb2
 
 _UINT32_MAX = (1 << 32) - 1
 _UINT64_MAX = (1 << 64) - 1

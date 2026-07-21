@@ -34,6 +34,7 @@ def _registration() -> WorkerRegistration:
         max_batch_tokens=4096,
         max_active_batches=1,
         max_pending_batches=1,
+        transport_type="grpc",
     )
 
 

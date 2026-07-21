@@ -21,7 +21,7 @@ use crate::proto::ek::{
         DrainAuthorizationPart, ExpertRoute, ExpertState, ExpertStateKind, RegisterWorkerRequest,
         RegisterWorkerResponse, RouteChange, TargetExpert, TargetExpertListPart, TopologyMessage,
         TopologySnapshotPart, TopologyUpdatePart, WeightLoadErrorCode, WeightLoadStage,
-        WorkerRoute, WorkerRunState, topology_message,
+        WorkerRoute, WorkerRunState, WorkerTransportType, topology_message,
     },
     worker::v2::{ActivationDType, ExpertKey as ProtoExpertKey},
 };
@@ -1068,6 +1068,15 @@ fn validate_registration(registration: &RegisterWorkerRequest) -> Result<(), Con
             "activation dtype is invalid",
         ));
     }
+    if WorkerTransportType::try_from(registration.transport_type)
+        .ok()
+        .filter(|transport| *transport != WorkerTransportType::Unspecified)
+        .is_none()
+    {
+        return Err(ControllerStateError::InvalidRegistration(
+            "worker Transport type is invalid",
+        ));
+    }
     let Some(device) = registration.device.as_ref() else {
         return Err(ControllerStateError::InvalidRegistration(
             "one device is required",
@@ -1323,6 +1332,7 @@ fn worker_route(worker: &WorkerRecord) -> WorkerRoute {
         max_active_batches: worker.registration.max_active_batches_per_device,
         max_pending_batches: worker.registration.max_pending_batches_per_device,
         max_batch_tokens: worker.registration.max_batch_tokens,
+        transport_type: worker.registration.transport_type,
     }
 }
 
@@ -1467,6 +1477,7 @@ mod tests {
             max_batch_tokens: 4096,
             max_active_batches_per_device: 2,
             max_pending_batches_per_device: 2,
+            transport_type: WorkerTransportType::WorkerTransportGrpc as i32,
         }
     }
 
@@ -1554,6 +1565,20 @@ mod tests {
             state.open_heartbeat("worker-0", "start-0").await,
             Err(ControllerStateError::ReplacedWorker)
         );
+    }
+
+    #[tokio::test]
+    async fn registration_rejects_an_unspecified_transport() {
+        let state = ControllerV2State::new(8);
+        let mut request = registration("worker-0", "start-0");
+        request.transport_type = WorkerTransportType::Unspecified as i32;
+
+        assert!(matches!(
+            state.register(request).await,
+            Err(ControllerStateError::InvalidRegistration(
+                "worker Transport type is invalid"
+            ))
+        ));
     }
 
     #[tokio::test]
@@ -1771,6 +1796,10 @@ mod tests {
         assert_eq!(update.changes.len(), 1);
         assert_eq!(update.changes[0].expert_id, 2);
         assert_eq!(update.changes[0].replicas[0].worker_id, "worker-0");
+        assert_eq!(
+            update.changes[0].replicas[0].transport_type,
+            WorkerTransportType::WorkerTransportGrpc as i32
+        );
 
         assert!(
             state

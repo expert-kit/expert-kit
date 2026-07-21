@@ -4,9 +4,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from expertkit_proto.ek.worker.v2 import computation_pb2
 from google.protobuf.message import DecodeError, Message
 
-from expertkit_transport._proto.ek.worker.v2 import computation_pb2
 from expertkit_transport.adapters.grpc.codec import (
     GrpcProtocolError,
     decode_compute_error,

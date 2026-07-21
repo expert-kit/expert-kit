@@ -10,13 +10,13 @@ from typing import Any
 import grpc
 import pytest
 import torch
-from expertkit_transport._proto.ek.control.v2 import (
+from expertkit_proto.ek.control.v2 import (
     lifecycle_pb2,
     lifecycle_pb2_grpc,
     weight_control_pb2,
     weight_control_pb2_grpc,
 )
-from expertkit_transport._proto.ek.worker.v2 import common_pb2
+from expertkit_proto.ek.worker.v2 import common_pb2
 
 from expertkit_worker.control import (
     ControllerConnection,
@@ -44,6 +44,7 @@ def _registration(start_id: str = "start-1") -> WorkerRegistration:
         max_batch_tokens=4096,
         max_active_batches=2,
         max_pending_batches=2,
+        transport_type="grpc",
     )
 
 
@@ -205,6 +206,7 @@ def test_plaintext_connection_registers_and_reuses_channel_for_heartbeat() -> No
             assert result.placement_generation == 5
             assert servicer.registrations[0].device.max_experts == 8
             assert servicer.registrations[0].activation_dtype == common_pb2.ACTIVATION_DTYPE_BF16
+            assert servicer.registrations[0].transport_type == lifecycle_pb2.WORKER_TRANSPORT_GRPC
             assert servicer.heartbeats[0].sequence == 1
             assert weight_servicer.open is not None
             assert weight_servicer.open.start_id == "start-1"
@@ -220,4 +222,6 @@ def test_plaintext_connection_registers_and_reuses_channel_for_heartbeat() -> No
 def test_registration_and_identity_validation_rejects_invalid_values() -> None:
     with pytest.raises(ValueError, match="max_experts"):
         replace(_registration(), max_experts=0)
+    with pytest.raises(ValueError, match="transport_type"):
+        replace(_registration(), transport_type="rdma")
     assert new_start_id() != new_start_id()

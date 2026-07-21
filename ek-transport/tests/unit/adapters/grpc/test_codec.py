@@ -4,8 +4,8 @@ import gc
 
 import pytest
 import torch
+from expertkit_proto.ek.worker.v2 import computation_pb2
 
-from expertkit_transport._proto.ek.worker.v2 import computation_pb2
 from expertkit_transport.adapters.grpc import (
     GrpcBatchSpec,
     GrpcProtocolError,

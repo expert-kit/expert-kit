@@ -13,8 +13,8 @@ from typing import Literal
 
 import grpc
 import torch
+from expertkit_proto.ek.control.v2 import lifecycle_pb2, lifecycle_pb2_grpc
 
-from expertkit_transport._proto.ek.control.v2 import lifecycle_pb2, lifecycle_pb2_grpc
 from expertkit_transport.adapters.grpc.client import GrpcWorkerTransport
 from expertkit_transport.adapters.grpc.spec import GrpcBatchSpec
 from expertkit_transport.adapters.grpc.topology_messages import (

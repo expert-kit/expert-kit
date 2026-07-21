@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Protocol
 
-from expertkit_transport._proto.ek.control.v2 import weight_control_pb2
+from expertkit_proto.ek.control.v2 import weight_control_pb2
 
 from expertkit_worker.weights import TargetExpert
 from expertkit_worker.weights.dram_cache import WeightKey

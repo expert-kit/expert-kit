@@ -7,7 +7,7 @@ import time
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 
-from expertkit_transport._proto.ek.control.v2 import weight_control_pb2
+from expertkit_proto.ek.control.v2 import weight_control_pb2
 
 from expertkit_worker.control.parts import MAX_EXPERTS_PER_CONTROL_PART
 from expertkit_worker.weights import (

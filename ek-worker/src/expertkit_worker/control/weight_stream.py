@@ -10,7 +10,7 @@ from collections.abc import AsyncIterator, Callable, Iterable
 from dataclasses import dataclass
 from typing import Protocol
 
-from expertkit_transport._proto.ek.control.v2 import weight_control_pb2
+from expertkit_proto.ek.control.v2 import weight_control_pb2
 from expertkit_transport.contracts import WorkerBatchReceiver
 
 from expertkit_worker.control.parts import (

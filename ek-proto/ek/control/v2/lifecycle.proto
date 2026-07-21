@@ -22,6 +22,8 @@ message RegisterWorkerRequest {
   uint32 max_batch_tokens = 9;
   uint32 max_active_batches_per_device = 10;
   uint32 max_pending_batches_per_device = 11;
+  // Data Transport exposed by this Worker. Unspecified values are rejected.
+  WorkerTransportType transport_type = 12;
 }
 
 message WorkerDevice {
@@ -45,6 +47,13 @@ enum WorkerRunState {
   WORKER_RUN_STATE_UNSPECIFIED = 0;
   WORKER_RUNNING = 1;
   WORKER_SHUTTING_DOWN = 2;
+}
+
+// WorkerTransportType selects the Tensor data path, not the Controller RPC protocol.
+enum WorkerTransportType {
+  WORKER_TRANSPORT_TYPE_UNSPECIFIED = 0;
+  WORKER_TRANSPORT_GRPC = 1;
+  WORKER_TRANSPORT_SHM = 2;
 }
 
 message HeartbeatSummary {
@@ -101,6 +110,8 @@ message WorkerRoute {
   uint32 max_active_batches = 5;
   uint32 max_pending_batches = 6;
   uint32 max_batch_tokens = 7;
+  // Data Transport required to connect to computation_endpoint.
+  WorkerTransportType transport_type = 8;
 }
 
 // RouteChange replaces the complete replica list; an empty list removes the route.

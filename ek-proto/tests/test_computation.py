@@ -3,7 +3,7 @@
 import pytest
 from google.protobuf.message import DecodeError
 
-from expertkit_transport._proto.ek.worker.v2 import (
+from expertkit_proto.ek.worker.v2 import (
     common_pb2,
     computation_pb2,
     computation_pb2_grpc,

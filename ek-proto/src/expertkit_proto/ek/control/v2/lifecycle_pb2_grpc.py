@@ -3,7 +3,7 @@
 import grpc
 import warnings
 
-from expertkit_transport._proto.ek.control.v2 import lifecycle_pb2 as ek_dot_control_dot_v2_dot_lifecycle__pb2
+from expertkit_proto.ek.control.v2 import lifecycle_pb2 as ek_dot_control_dot_v2_dot_lifecycle__pb2
 
 GRPC_GENERATED_VERSION = '1.71.0'
 GRPC_VERSION = grpc.__version__

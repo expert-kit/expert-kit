@@ -8,8 +8,8 @@ from typing import Any
 import grpc
 import pytest
 import torch
+from expertkit_proto.ek.control.v2 import lifecycle_pb2, lifecycle_pb2_grpc
 
-from expertkit_transport._proto.ek.control.v2 import lifecycle_pb2, lifecycle_pb2_grpc
 from expertkit_transport.adapters.grpc.topology import (
     GrpcTopologyProvider,
     _WorkerResource,
@@ -62,6 +62,7 @@ def worker(
     *,
     start_id: str = "start-1",
     endpoint: str = "127.0.0.1:50051",
+    transport_type: int = lifecycle_pb2.WORKER_TRANSPORT_GRPC,
 ) -> lifecycle_pb2.WorkerRoute:
     return lifecycle_pb2.WorkerRoute(
         worker_id=worker_id,
@@ -71,6 +72,7 @@ def worker(
         max_active_batches=1,
         max_pending_batches=2,
         max_batch_tokens=16,
+        transport_type=transport_type,
     )
 
 
@@ -226,6 +228,12 @@ def test_changed_worker_metadata_replaces_its_resources_atomically() -> None:
         [lifecycle_pb2.TopologyMessage()],
         [snapshot(1, [route(0, 0)])],
         [snapshot(1, [route(10, 0, worker("worker-a"))])],
+        [
+            snapshot(
+                1,
+                [route(0, 0, worker("worker-a", transport_type=0))],
+            )
+        ],
         [
             snapshot(1, [route(0, 0, worker("worker-a"))]),
             update(0, 2, []),

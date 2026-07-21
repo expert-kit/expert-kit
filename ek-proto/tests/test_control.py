@@ -1,12 +1,12 @@
 """Protocol tests for v2 lifecycle, Topology, and weight-control messages."""
 
-from expertkit_transport._proto.ek.control.v2 import (
+from expertkit_proto.ek.control.v2 import (
     lifecycle_pb2,
     lifecycle_pb2_grpc,
     weight_control_pb2,
     weight_control_pb2_grpc,
 )
-from expertkit_transport._proto.ek.worker.v2 import common_pb2
+from expertkit_proto.ek.worker.v2 import common_pb2
 
 
 def test_control_service_streaming_shapes_are_stable() -> None:
@@ -42,6 +42,7 @@ def test_registration_round_trip_uses_one_device() -> None:
         max_batch_tokens=4096,
         max_active_batches_per_device=1,
         max_pending_batches_per_device=1,
+        transport_type=lifecycle_pb2.WORKER_TRANSPORT_GRPC,
     )
 
     decoded = lifecycle_pb2.RegisterWorkerRequest.FromString(request.SerializeToString())
@@ -49,6 +50,7 @@ def test_registration_round_trip_uses_one_device() -> None:
     assert decoded == request
     assert decoded.device.device == "cuda:0"
     assert decoded.device.max_experts == 8
+    assert decoded.transport_type == lifecycle_pb2.WORKER_TRANSPORT_GRPC
 
 
 def test_topology_message_keeps_snapshot_and_update_exclusive() -> None:
@@ -71,6 +73,7 @@ def test_topology_message_keeps_snapshot_and_update_exclusive() -> None:
                             max_active_batches=1,
                             max_pending_batches=1,
                             max_batch_tokens=4096,
+                            transport_type=lifecycle_pb2.WORKER_TRANSPORT_SHM,
                         )
                     ],
                 )
@@ -105,6 +108,7 @@ def test_worker_route_publishes_all_dispatch_limits() -> None:
         "max_active_batches": 5,
         "max_pending_batches": 6,
         "max_batch_tokens": 7,
+        "transport_type": 8,
     }
 
 

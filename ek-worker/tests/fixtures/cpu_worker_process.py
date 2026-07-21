@@ -286,6 +286,7 @@ async def _run(args: argparse.Namespace) -> None:
         max_batch_tokens=_MAX_BATCH_TOKENS,
         max_active_batches=1,
         max_pending_batches=1,
+        transport_type="grpc",
     )
     control = ControllerSupervisor(
         connection=connection,

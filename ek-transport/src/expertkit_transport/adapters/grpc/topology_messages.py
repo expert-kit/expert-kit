@@ -5,7 +5,8 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 
-from expertkit_transport._proto.ek.control.v2 import lifecycle_pb2
+from expertkit_proto.ek.control.v2 import lifecycle_pb2
+
 from expertkit_transport.orchestration import WorkerIdentity
 
 _MAX_ROUTES_PER_PART = 64
@@ -25,6 +26,7 @@ class GrpcWorkerRoute:
     max_active_batches: int
     max_pending_batches: int
     max_batch_tokens: int
+    transport_type: int
 
     @property
     def max_in_flight(self) -> int:
@@ -219,6 +221,11 @@ class TopologyMessageAssembler:
                 _validate_positive("max_active_batches", replica.max_active_batches)
                 _validate_positive("max_pending_batches", replica.max_pending_batches)
                 _validate_positive("max_batch_tokens", replica.max_batch_tokens)
+                if replica.transport_type not in {
+                    lifecycle_pb2.WORKER_TRANSPORT_GRPC,
+                    lifecycle_pb2.WORKER_TRANSPORT_SHM,
+                }:
+                    raise TopologyProtocolError("topology Worker Transport type is invalid")
                 identity = WorkerIdentity(replica.worker_id, replica.start_id)
                 if identity in identities:
                     raise TopologyProtocolError("topology route repeats one Worker process")
@@ -230,6 +237,7 @@ class TopologyMessageAssembler:
                     max_active_batches=replica.max_active_batches,
                     max_pending_batches=replica.max_pending_batches,
                     max_batch_tokens=replica.max_batch_tokens,
+                    transport_type=replica.transport_type,
                 )
                 existing = worker_metadata.setdefault(identity, description)
                 if existing != description:

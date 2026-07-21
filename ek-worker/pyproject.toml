@@ -9,6 +9,7 @@ description = "Expert Kit Python Worker"
 requires-python = ">=3.12"
 dependencies = [
     "aiohttp>=3.11,<4",
+    "expertkit-proto",
     "expertkit-transport",
     "grpcio==1.71.0",
     "pydantic>=2.11,<3",
@@ -35,6 +36,7 @@ observability = [
 ]
 
 [tool.uv.sources]
+expertkit-proto = { path = "../ek-proto", editable = true }
 expertkit-transport = { path = "../ek-transport", editable = true }
 
 [dependency-groups]

@@ -8,9 +8,9 @@ from dataclasses import dataclass
 
 import numpy as np
 import torch
+from expertkit_proto.ek.worker.v2 import computation_pb2
 from google.protobuf.message import DecodeError
 
-from expertkit_transport._proto.ek.worker.v2 import computation_pb2
 from expertkit_transport.adapters.grpc.spec import (
     MAX_DIAGNOSTIC_BYTES,
     GrpcBatchSpec,

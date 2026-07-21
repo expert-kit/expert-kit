@@ -10,13 +10,13 @@ from uuid import uuid4
 
 import grpc
 import torch
-from expertkit_transport._proto.ek.control.v2 import (
+from expertkit_proto.ek.control.v2 import (
     lifecycle_pb2,
     lifecycle_pb2_grpc,
     weight_control_pb2,
     weight_control_pb2_grpc,
 )
-from expertkit_transport._proto.ek.worker.v2 import common_pb2
+from expertkit_proto.ek.worker.v2 import common_pb2
 from expertkit_transport.contracts import ACTIVATION_DTYPES
 
 _CONTROL_MESSAGE_BYTES = 1024 * 1024
@@ -26,6 +26,10 @@ _DTYPE_TO_PROTO = {
     torch.float16: common_pb2.ACTIVATION_DTYPE_FP16,
     torch.bfloat16: common_pb2.ACTIVATION_DTYPE_BF16,
     torch.float32: common_pb2.ACTIVATION_DTYPE_FP32,
+}
+_TRANSPORT_TO_PROTO = {
+    "grpc": lifecycle_pb2.WORKER_TRANSPORT_GRPC,
+    "shm": lifecycle_pb2.WORKER_TRANSPORT_SHM,
 }
 
 
@@ -61,6 +65,7 @@ class WorkerRegistration:
     max_batch_tokens: int
     max_active_batches: int
     max_pending_batches: int
+    transport_type: str
 
     def __post_init__(self) -> None:
         for name in (
@@ -82,6 +87,8 @@ class WorkerRegistration:
             _require_positive_int(name, getattr(self, name), _UINT32_MAX)
         if self.activation_dtype not in ACTIVATION_DTYPES:
             raise ValueError("activation_dtype must be FP16, BF16, or FP32")
+        if self.transport_type not in _TRANSPORT_TO_PROTO:
+            raise ValueError("transport_type must be grpc or shm")
 
     def to_protobuf(self) -> lifecycle_pb2.RegisterWorkerRequest:
         """Encode the v2 registration request."""
@@ -101,6 +108,7 @@ class WorkerRegistration:
             max_batch_tokens=self.max_batch_tokens,
             max_active_batches_per_device=self.max_active_batches,
             max_pending_batches_per_device=self.max_pending_batches,
+            transport_type=_TRANSPORT_TO_PROTO[self.transport_type],
         )
 
 
