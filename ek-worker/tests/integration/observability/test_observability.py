@@ -14,7 +14,7 @@ from expertkit_transport.batches import WorkerBatch
 from expertkit_transport.transports.base import WorkerPositionSpec
 from expertkit_transport.transports.grpc import (
     GrpcBatchSpec,
-    GrpcWorkerServer,
+    GrpcWorkerBatchReceiver,
     decode_response,
     encode_request,
 )
@@ -177,7 +177,7 @@ def test_tracing_extracts_parent_context_and_exports_off_the_rpc_path() -> None:
             }
         )
         observability = create_observability(config, worker_id="worker-0")
-        server = GrpcWorkerServer(
+        server = GrpcWorkerBatchReceiver(
             "127.0.0.1:0",
             _spec(),
             max_active_batches=1,

@@ -6,8 +6,8 @@ import time
 import torch
 from expertkit_transport.batches import WorkerBatch
 from expertkit_transport.transports.base import WorkerPositionSpec
-from expertkit_transport.transports.grpc import GrpcBatchSpec, GrpcWorkerServer
-from expertkit_transport.transports.shm import ShmWorkerTransport
+from expertkit_transport.transports.grpc import GrpcBatchSpec
+from expertkit_transport.transports.shm import ShmWorkerBatchReceiver, ShmWorkerTransport
 
 from expertkit_worker.backends.torch import TorchBackend, TorchExpertWeights
 from expertkit_worker.execution import WorkerExecution
@@ -57,7 +57,7 @@ def test_worker_execution_uses_shared_input_and_output_destinations() -> None:
         ready: ReadyWeightTable[TorchExpertWeights] = ReadyWeightTable(1, 2)
         for expert_id, weight in weights.items():
             ready.publish(0, expert_id, weight)
-        server = GrpcWorkerServer(
+        server = ShmWorkerBatchReceiver(
             "127.0.0.1:0",
             batch_spec,
             max_active_batches=1,

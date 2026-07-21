@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 
 import torch
 
@@ -39,6 +40,7 @@ class WorkerSharedMemorySession:
         *,
         spec: GrpcBatchSpec,
         device: torch.device | str,
+        directory: Path = Path("/dev/shm"),
     ) -> None:
         self.session_id = description.session_id
         self._spec = spec
@@ -46,6 +48,7 @@ class WorkerSharedMemorySession:
             description.segment_name,
             description.layout,
             device=device,
+            directory=directory,
         )
         try:
             region.unlink()

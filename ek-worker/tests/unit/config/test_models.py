@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from expertkit_worker.config import WorkerConfig
+from expertkit_worker.config import ShmTransportConfig, WorkerConfig
 
 
 def _config(cache_path: Path, *, backend: str, device: str) -> dict[str, object]:
@@ -28,7 +28,11 @@ def _config(cache_path: Path, *, backend: str, device: str) -> dict[str, object]
             "device": device,
             "device_memory_limit": "2GiB",
         },
-        "transport": {"grpc": {"listen": "127.0.0.1:50051", "advertise": "worker:50051"}},
+        "transport": {
+            "type": "grpc",
+            "listen": "127.0.0.1:50051",
+            "advertise": "worker:50051",
+        },
         "controller": {"endpoint": "controller:50050"},
         "weight_manager": {
             "disk_cache": {"path": cache_path},
@@ -92,6 +96,51 @@ def test_device_memory_limit_must_be_positive(tmp_path: Path) -> None:
     worker["device_memory_limit"] = 0
 
     with pytest.raises(ValidationError, match="greater than 0"):
+        WorkerConfig.model_validate(raw)
+
+
+def test_shm_transport_uses_only_notification_rpc_fields(tmp_path: Path) -> None:
+    raw = _config(tmp_path, backend="torch", device="cuda:0")
+    raw["transport"] = {
+        "type": "shm",
+        "rpc_listen": "127.0.0.1:50051",
+        "rpc_advertise": "worker:50051",
+        "shared_memory_dir": "/dev/shm",
+    }
+
+    config = WorkerConfig.model_validate(raw)
+
+    assert isinstance(config.transport, ShmTransportConfig)
+    assert config.transport.max_pending_batches_per_device == 1
+    assert config.transport.shared_memory_dir == "/dev/shm"
+
+
+@pytest.mark.parametrize(
+    "transport",
+    [
+        {"grpc": {"listen": "127.0.0.1:50051", "advertise": "worker:50051"}},
+        {
+            "type": "grpc",
+            "listen": "127.0.0.1:50051",
+            "advertise": "worker:50051",
+            "rpc_listen": "127.0.0.1:50052",
+        },
+        {
+            "type": "shm",
+            "rpc_listen": "127.0.0.1:50051",
+            "rpc_advertise": "worker:50051",
+            "listen": "127.0.0.1:50052",
+        },
+    ],
+)
+def test_transport_rejects_old_or_mixed_fields(
+    tmp_path: Path,
+    transport: dict[str, object],
+) -> None:
+    raw = _config(tmp_path, backend="torch", device="cuda:0")
+    raw["transport"] = transport
+
+    with pytest.raises(ValidationError):
         WorkerConfig.model_validate(raw)
 
 

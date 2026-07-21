@@ -4,14 +4,16 @@ import asyncio
 import time
 from dataclasses import replace
 
+import grpc
 import pytest
 import torch
 
 from expertkit_transport.batches import WorkerBatch
 from expertkit_transport.errors import TransportError, TransportErrorCode
 from expertkit_transport.transports.base import WorkerPositionSpec
-from expertkit_transport.transports.grpc import GrpcBatchSpec, GrpcWorkerServer
+from expertkit_transport.transports.grpc import GrpcBatchSpec
 from expertkit_transport.transports.shm import ShmWorkerTransport
+from expertkit_transport.transports.shm.receiver import ShmWorkerBatchReceiver
 
 
 def spec() -> GrpcBatchSpec:
@@ -42,8 +44,8 @@ def batch() -> WorkerBatch:
     )
 
 
-async def start_pair() -> tuple[GrpcWorkerServer, ShmWorkerTransport]:
-    server = GrpcWorkerServer(
+async def start_pair() -> tuple[ShmWorkerBatchReceiver, ShmWorkerTransport]:
+    server = ShmWorkerBatchReceiver(
         "127.0.0.1:0",
         spec(),
         max_active_batches=1,
@@ -157,6 +159,36 @@ def test_cancellation_waits_for_worker_release_before_slot_reuse() -> None:
             await retry
         finally:
             await client.close()
+            await server.close()
+
+    asyncio.run(scenario())
+
+
+def test_shm_receiver_does_not_expose_grpc_tensor_execute() -> None:
+    async def scenario() -> None:
+        server = ShmWorkerBatchReceiver(
+            "127.0.0.1:0",
+            spec(),
+            max_active_batches=1,
+            max_pending_batches=1,
+        )
+        buffers = server.allocate_position_buffers(
+            WorkerPositionSpec(4, 3, 2, torch.float32, "cpu")
+        )
+        buffers.close()
+        await server.start()
+        channel = grpc.aio.insecure_channel(f"127.0.0.1:{server.bound_port}")
+        execute = channel.unary_unary(
+            "/ek.worker.v2.ComputationService/Execute",
+            request_serializer=lambda value: value,
+            response_deserializer=lambda value: value,
+        )
+        try:
+            with pytest.raises(grpc.aio.AioRpcError) as caught:
+                await execute(b"")
+            assert caught.value.code() is grpc.StatusCode.UNIMPLEMENTED
+        finally:
+            await channel.close()
             await server.close()
 
     asyncio.run(scenario())

@@ -16,7 +16,7 @@ from expertkit_transport.tracing import TraceAttribute, TraceContext, Tracer, Tr
 from expertkit_transport.transports.base import ReceiverClosed, WorkerPositionSpec
 from expertkit_transport.transports.grpc import (
     GrpcBatchSpec,
-    GrpcWorkerServer,
+    GrpcWorkerBatchReceiver,
     GrpcWorkerTransport,
 )
 from expertkit_transport.transports.grpc.spec import calculate_message_limits
@@ -117,8 +117,8 @@ async def start_pair(
     client_in_flight: int = 2,
     pending_changes: list[int] | None = None,
     tracer: Tracer | None = None,
-) -> tuple[GrpcWorkerServer, GrpcWorkerTransport]:
-    server = GrpcWorkerServer(
+) -> tuple[GrpcWorkerBatchReceiver, GrpcWorkerTransport]:
+    server = GrpcWorkerBatchReceiver(
         "127.0.0.1:0",
         batch_spec(),
         max_active_batches=max_active_batches,
@@ -137,7 +137,7 @@ async def start_pair(
     return server, client
 
 
-async def close_pair(server: GrpcWorkerServer, client: GrpcWorkerTransport) -> None:
+async def close_pair(server: GrpcWorkerBatchReceiver, client: GrpcWorkerTransport) -> None:
     await client.close()
     await server.close()
 
@@ -156,8 +156,8 @@ async def await_with_loop_yields[T](awaitable: Awaitable[T]) -> T:
     return task.result()
 
 
-def test_server_allocates_direct_cpu_position_buffers() -> None:
-    server = GrpcWorkerServer(
+def test_receiver_allocates_direct_cpu_position_buffers() -> None:
+    server = GrpcWorkerBatchReceiver(
         "127.0.0.1:0",
         batch_spec(),
         max_active_batches=1,
@@ -201,8 +201,8 @@ def test_server_allocates_direct_cpu_position_buffers() -> None:
     run(server.close())
 
 
-def test_server_rejects_position_shape_mismatch() -> None:
-    server = GrpcWorkerServer(
+def test_receiver_rejects_position_shape_mismatch() -> None:
+    server = GrpcWorkerBatchReceiver(
         "127.0.0.1:0",
         batch_spec(),
         max_active_batches=1,
@@ -223,8 +223,8 @@ def test_server_rejects_position_shape_mismatch() -> None:
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
-def test_server_reuses_pinned_cuda_position_staging() -> None:
-    server = GrpcWorkerServer(
+def test_receiver_reuses_pinned_cuda_position_staging() -> None:
+    server = GrpcWorkerBatchReceiver(
         "127.0.0.1:0",
         batch_spec(),
         max_active_batches=1,
@@ -274,7 +274,7 @@ def test_server_reuses_pinned_cuda_position_staging() -> None:
     run(server.close())
 
 
-def test_server_hands_one_validated_batch_directly_to_execution() -> None:
+def test_receiver_hands_one_validated_batch_directly_to_execution() -> None:
     async def scenario() -> None:
         pending_changes: list[int] = []
         server, client = await start_pair(pending_changes=pending_changes)
@@ -356,7 +356,7 @@ def test_unsampled_request_does_not_create_custom_spans() -> None:
         (TransportErrorCode.UNAVAILABLE, TransportErrorCode.UNAVAILABLE),
     ],
 )
-def test_server_maps_native_execution_rejection(
+def test_receiver_maps_native_execution_rejection(
     code: TransportErrorCode,
     expected: TransportErrorCode,
 ) -> None:
@@ -385,7 +385,7 @@ def test_server_maps_native_execution_rejection(
     run(scenario())
 
 
-def test_server_delivers_structured_execution_rejection() -> None:
+def test_receiver_delivers_structured_execution_rejection() -> None:
     async def scenario() -> None:
         server, client = await start_pair()
         output = prepare_output(client)
@@ -495,7 +495,7 @@ def test_maximum_batch_accounts_only_retained_decoded_tensor_bytes() -> None:
     run(scenario())
 
 
-def test_server_close_clears_pending_retained_bytes() -> None:
+def test_receiver_close_clears_pending_retained_bytes() -> None:
     async def scenario() -> None:
         tracer = RecordingTracer()
         server, client = await start_pair(tracer=tracer)
@@ -749,9 +749,9 @@ def test_cancellation_after_take_discards_response_but_releases_expert_use() -> 
         b"",
     ],
 )
-def test_server_rejects_malformed_wire_requests_with_native_status(payload: bytes) -> None:
+def test_receiver_rejects_malformed_wire_requests_with_native_status(payload: bytes) -> None:
     async def scenario() -> None:
-        server = GrpcWorkerServer(
+        server = GrpcWorkerBatchReceiver(
             "127.0.0.1:0",
             batch_spec(),
             max_active_batches=1,
@@ -780,9 +780,9 @@ def test_server_rejects_malformed_wire_requests_with_native_status(payload: byte
     run(scenario())
 
 
-def test_server_close_wakes_execution_waiting_on_take() -> None:
+def test_receiver_close_wakes_execution_waiting_on_take() -> None:
     async def scenario() -> None:
-        server = GrpcWorkerServer(
+        server = GrpcWorkerBatchReceiver(
             "127.0.0.1:0",
             batch_spec(),
             max_active_batches=1,
@@ -795,5 +795,31 @@ def test_server_close_wakes_execution_waiting_on_take() -> None:
 
         with pytest.raises(ReceiverClosed):
             await waiting
+
+    run(scenario())
+
+
+def test_grpc_receiver_does_not_expose_shared_memory_methods() -> None:
+    async def scenario() -> None:
+        server = GrpcWorkerBatchReceiver(
+            "127.0.0.1:0",
+            batch_spec(),
+            max_active_batches=1,
+            max_pending_batches=1,
+        )
+        await server.start()
+        channel = grpc.aio.insecure_channel(f"127.0.0.1:{server.bound_port}")
+        open_shared_memory = channel.unary_unary(
+            "/ek.worker.v2.ComputationService/OpenSharedMemory",
+            request_serializer=lambda value: value,
+            response_deserializer=lambda value: value,
+        )
+        try:
+            with pytest.raises(grpc.aio.AioRpcError) as caught:
+                await open_shared_memory(b"")
+            assert caught.value.code() is grpc.StatusCode.UNIMPLEMENTED
+        finally:
+            await channel.close()
+            await server.close()
 
     run(scenario())

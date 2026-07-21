@@ -21,9 +21,9 @@ worker:
   shutdown_grace_secs: 30
 
 transport:
-  grpc:
-    listen: 0.0.0.0:51051
-    advertise: 127.0.0.1:51051
+  type: grpc
+  listen: 0.0.0.0:51051
+  advertise: 127.0.0.1:51051
 
 controller:
   endpoint: 127.0.0.1:5001

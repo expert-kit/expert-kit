@@ -29,9 +29,9 @@ worker:
   max_active_batches_per_device: 2
   device_memory_limit: 8GiB
 transport:
-  grpc:
-    listen: 127.0.0.1:50051
-    advertise: worker-0.internal:50051
+  type: grpc
+  listen: 127.0.0.1:50051
+  advertise: worker-0.internal:50051
 controller:
   endpoint: controller.internal:50050
 weight_manager:

@@ -9,7 +9,7 @@ from expertkit_transport.transports.grpc.codec import (
     encode_request,
     encode_success_response,
 )
-from expertkit_transport.transports.grpc.server import GrpcWorkerServer
+from expertkit_transport.transports.grpc.receiver import GrpcWorkerBatchReceiver
 from expertkit_transport.transports.grpc.spec import (
     GrpcBatchSpec,
     GrpcMessageLimits,
@@ -20,7 +20,7 @@ __all__ = [
     "GrpcBatchSpec",
     "GrpcMessageLimits",
     "GrpcProtocolError",
-    "GrpcWorkerServer",
+    "GrpcWorkerBatchReceiver",
     "GrpcWorkerTransport",
     "calculate_message_limits",
     "decode_request",

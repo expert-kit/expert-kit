@@ -38,11 +38,10 @@ def _config(cache_path: Path, *, backend: str = "torch") -> WorkerConfig:
             "device_memory_limit": "513MiB" if backend == "fused" else "1GiB",
         },
         "transport": {
+            "type": "grpc",
             "max_pending_batches_per_device": 1,
-            "grpc": {
-                "listen": "127.0.0.1:50051",
-                "advertise": "worker-0:50051",
-            },
+            "listen": "127.0.0.1:50051",
+            "advertise": "worker-0:50051",
         },
         "controller": {"endpoint": "127.0.0.1:50050"},
         "weight_manager": {

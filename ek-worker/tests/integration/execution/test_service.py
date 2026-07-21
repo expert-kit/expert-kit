@@ -13,7 +13,7 @@ from expertkit_transport.errors import TransportError, TransportErrorCode
 from expertkit_transport.transports.base import WorkerPositionSpec
 from expertkit_transport.transports.grpc import (
     GrpcBatchSpec,
-    GrpcWorkerServer,
+    GrpcWorkerBatchReceiver,
     GrpcWorkerTransport,
 )
 
@@ -164,8 +164,8 @@ async def start_stack(
     active: int = 1,
     pending: int = 1,
     metrics: WorkerMetrics | None = None,
-) -> tuple[GrpcWorkerServer, GrpcWorkerTransport, WorkerExecution]:
-    server = GrpcWorkerServer(
+) -> tuple[GrpcWorkerBatchReceiver, GrpcWorkerTransport, WorkerExecution]:
+    server = GrpcWorkerBatchReceiver(
         "127.0.0.1:0",
         batch_spec(),
         max_active_batches=active,

@@ -9,7 +9,7 @@ from pathlib import Path
 
 import torch
 from expertkit_transport.transports.base import WorkerPositionSpec
-from expertkit_transport.transports.grpc import GrpcBatchSpec, GrpcWorkerServer
+from expertkit_transport.transports.grpc import GrpcBatchSpec, GrpcWorkerBatchReceiver
 from safetensors.torch import save as save_safetensors
 
 from expertkit_worker.app import WorkerApplication
@@ -162,7 +162,7 @@ async def _run(args: argparse.Namespace) -> None:
         else:
             args.pending_marker.unlink(missing_ok=True)
 
-    receiver = GrpcWorkerServer(
+    receiver = GrpcWorkerBatchReceiver(
         args.computation_listen,
         batch_spec,
         max_active_batches=1,

@@ -1,4 +1,4 @@
-"""Worker-side gRPC receiver with one bounded pending area."""
+"""Worker receiver for protobuf Tensor payloads over gRPC."""
 
 from __future__ import annotations
 
@@ -35,27 +35,9 @@ from expertkit_transport.transports.grpc.spec import (
 )
 from expertkit_transport.transports.grpc.worker_buffers import GrpcWorkerPositionBuffers
 from expertkit_transport.transports.queue import ReceiverQueue
-from expertkit_transport.transports.shm.codec import (
-    decode_close_request,
-    decode_execute_request,
-    decode_open_request,
-    encode_close_response,
-    encode_execute_error,
-    encode_execute_success,
-    encode_open_response,
-)
-from expertkit_transport.transports.shm.session import (
-    SharedMemorySlotBusy,
-    WorkerSharedMemorySession,
-)
 
 _EXECUTE_METHOD_NAME = "Execute"
-_OPEN_SHARED_MEMORY_METHOD_NAME = "OpenSharedMemory"
-_EXECUTE_SHARED_MEMORY_METHOD_NAME = "ExecuteSharedMemory"
-_CLOSE_SHARED_MEMORY_METHOD_NAME = "CloseSharedMemory"
 _SERVICE_NAME = "ek.worker.v2.ComputationService"
-_MAX_SHARED_MEMORY_SESSIONS = 64
-_UINT64_MAX = (1 << 64) - 1
 _NATIVE_ERROR_STATUS = {
     TransportErrorCode.DEADLINE_EXCEEDED: grpc.StatusCode.DEADLINE_EXCEEDED,
     TransportErrorCode.CANCELLED: grpc.StatusCode.CANCELLED,
@@ -90,16 +72,11 @@ class _NativeCallError(RuntimeError):
 class _GrpcWorkItem(ReceivedWorkerBatch):
     def __init__(
         self,
-        owner: GrpcWorkerServer,
+        owner: GrpcWorkerBatchReceiver,
         batch: WorkerBatch,
         monotonic_deadline: float,
         retained_bytes: int,
         trace_context: TraceContext | None,
-        *,
-        output_destination: torch.Tensor | None = None,
-        shared_session: WorkerSharedMemorySession | None = None,
-        shared_slot_index: int | None = None,
-        shared_generation: int | None = None,
     ) -> None:
         self._owner = owner
         self._batch: WorkerBatch | None = batch
@@ -109,10 +86,6 @@ class _GrpcWorkItem(ReceivedWorkerBatch):
         self._deadline = monotonic_deadline
         self.retained_bytes = retained_bytes
         self._trace_context = trace_context
-        self._output_destination = output_destination
-        self.shared_session = shared_session
-        self.shared_slot_index = shared_slot_index
-        self.shared_generation = shared_generation
         self._wait_span: TraceSpan | None = None
         self._cancelled = False
         self._cancelled_event = asyncio.Event()
@@ -138,7 +111,7 @@ class _GrpcWorkItem(ReceivedWorkerBatch):
 
     @property
     def output_destination(self) -> torch.Tensor | None:
-        return self._output_destination
+        return None
 
     def release_input(self) -> None:
         """Drop decoded protobuf Tensor views after the active-position copy."""
@@ -178,8 +151,8 @@ class _GrpcWorkItem(ReceivedWorkerBatch):
         span.end()
 
 
-class GrpcWorkerServer(WorkerBatchReceiver):
-    """Receive plaintext unary calls and expose one Transport-owned waiting area."""
+class GrpcWorkerBatchReceiver(WorkerBatchReceiver):
+    """Receive protobuf Tensor calls for one gRPC Worker endpoint."""
 
     def __init__(
         self,
@@ -231,8 +204,6 @@ class GrpcWorkerServer(WorkerBatchReceiver):
         self._on_rejection = on_rejection or (lambda _reason: None)
         self._server: grpc.aio.Server | None = None
         self._start_lock = asyncio.Lock()
-        self._shared_sessions: dict[str, WorkerSharedMemorySession] = {}
-        self._shared_session_lock = asyncio.Lock()
         self._position_device: torch.device | None = None
         self._closing = False
         self._close_task: asyncio.Task[None] | None = None
@@ -282,29 +253,9 @@ class GrpcWorkerServer(WorkerBatchReceiver):
                 request_deserializer=_identity,
                 response_serializer=_identity,
             )
-            open_shared_memory = grpc.unary_unary_rpc_method_handler(
-                self._open_shared_memory,
-                request_deserializer=_identity,
-                response_serializer=_identity,
-            )
-            execute_shared_memory = grpc.unary_unary_rpc_method_handler(
-                self._execute_shared_memory,
-                request_deserializer=_identity,
-                response_serializer=_identity,
-            )
-            close_shared_memory = grpc.unary_unary_rpc_method_handler(
-                self._close_shared_memory,
-                request_deserializer=_identity,
-                response_serializer=_identity,
-            )
             service = grpc.method_handlers_generic_handler(
                 _SERVICE_NAME,
-                {
-                    _EXECUTE_METHOD_NAME: method,
-                    _OPEN_SHARED_MEMORY_METHOD_NAME: open_shared_memory,
-                    _EXECUTE_SHARED_MEMORY_METHOD_NAME: execute_shared_memory,
-                    _CLOSE_SHARED_MEMORY_METHOD_NAME: close_shared_memory,
-                },
+                {_EXECUTE_METHOD_NAME: method},
             )
             server.add_generic_rpc_handlers((service,))
             port = server.add_insecure_port(self._listen)
@@ -444,171 +395,6 @@ class GrpcWorkerServer(WorkerBatchReceiver):
             await context.abort(grpc.StatusCode.INTERNAL, "failed to encode Worker response")
             raise AssertionError("context.abort must terminate the handler") from error
 
-    async def _open_shared_memory(
-        self,
-        payload: bytes,
-        context: grpc.aio.ServicerContext,
-    ) -> bytes:
-        if self._closing:
-            await context.abort(grpc.StatusCode.UNAVAILABLE, "Worker is shutting down")
-        try:
-            description = decode_open_request(
-                payload,
-                self._spec,
-                expected_slot_count=self._maximum_concurrent_rpcs,
-            )
-        except GrpcProtocolError as error:
-            await context.abort(grpc.StatusCode.INVALID_ARGUMENT, str(error))
-            raise AssertionError("context.abort must terminate the handler") from error
-        device = self._position_device
-        if device is None:
-            await context.abort(
-                grpc.StatusCode.FAILED_PRECONDITION,
-                "Worker execution positions are not initialized",
-            )
-            raise AssertionError("context.abort must terminate the handler")
-
-        async with self._shared_session_lock:
-            if description.session_id in self._shared_sessions:
-                await context.abort(
-                    grpc.StatusCode.ALREADY_EXISTS,
-                    "shared-memory session already exists",
-                )
-                raise AssertionError("context.abort must terminate the handler")
-            if len(self._shared_sessions) >= _MAX_SHARED_MEMORY_SESSIONS:
-                await context.abort(
-                    grpc.StatusCode.RESOURCE_EXHAUSTED,
-                    "Worker has too many shared-memory sessions",
-                )
-                raise AssertionError("context.abort must terminate the handler")
-            try:
-                session = await self._run_cpu(
-                    partial(
-                        WorkerSharedMemorySession,
-                        description,
-                        spec=self._spec,
-                        device=device,
-                    )
-                )
-            except (OSError, RuntimeError, ValueError) as error:
-                await context.abort(
-                    grpc.StatusCode.FAILED_PRECONDITION,
-                    f"cannot open shared-memory segment: {error}",
-                )
-                raise AssertionError("context.abort must terminate the handler") from error
-            self._shared_sessions[description.session_id] = session
-        return encode_open_response()
-
-    async def _execute_shared_memory(
-        self,
-        payload: bytes,
-        context: grpc.aio.ServicerContext,
-    ) -> bytes:
-        if self._closing:
-            self._record_rejection(TransportErrorCode.UNAVAILABLE.value)
-            await context.abort(grpc.StatusCode.UNAVAILABLE, "Worker is shutting down")
-        trace_enabled = self._tracer is not None and self._tracer.current_span_is_recording()
-        trace_context = self._tracer.capture_context() if trace_enabled else None
-        try:
-            with self._trace_span(
-                "worker.request.decode",
-                attributes={"expertkit.request_bytes": len(payload)},
-                enabled=trace_enabled,
-            ) as span:
-                request = decode_execute_request(payload, self._spec)
-                session = self._shared_sessions.get(request.session_id)
-                if session is None:
-                    await context.abort(
-                        grpc.StatusCode.NOT_FOUND,
-                        "shared-memory session is not registered",
-                    )
-                    raise AssertionError("context.abort must terminate the handler")
-                claimed = session.claim(request)
-                if span is not None:
-                    for key, value in _batch_trace_attributes(claimed.batch).items():
-                        span.set_attribute(key, value)
-                    tensor_bytes = request.token_count * (
-                        2 * self._spec.hidden_dim * self._spec.activation_element_bytes
-                        + 2 * self._spec.top_k * 4
-                    )
-                    span.set_attribute("expertkit.shared_tensor_bytes", tensor_bytes)
-        except SharedMemorySlotBusy as error:
-            self._record_rejection(TransportErrorCode.BUSY.value)
-            await context.abort(grpc.StatusCode.RESOURCE_EXHAUSTED, str(error))
-            raise AssertionError("context.abort must terminate the handler") from error
-        except GrpcProtocolError as error:
-            self._record_rejection(TransportErrorCode.PROTOCOL.value)
-            await context.abort(grpc.StatusCode.INVALID_ARGUMENT, str(error))
-            raise AssertionError("context.abort must terminate the handler") from error
-
-        deadline = (
-            math.inf
-            if request.timeout_micros == _UINT64_MAX
-            else self._clock() + request.timeout_micros / 1_000_000
-        )
-        item = _GrpcWorkItem(
-            self,
-            claimed.batch,
-            deadline,
-            0,
-            trace_context,
-            output_destination=claimed.output_destination,
-            shared_session=session,
-            shared_slot_index=claimed.slot_index,
-            shared_generation=claimed.generation,
-        )
-        try:
-            rejection = await self._admit(item)
-        except BaseException:
-            session.release(claimed.slot_index, claimed.generation)
-            raise
-        if rejection is not None:
-            session.release(claimed.slot_index, claimed.generation)
-            self._record_rejection(rejection.code.value)
-            return encode_execute_error(rejection, self._spec)
-
-        try:
-            return await asyncio.shield(item.response)
-        except asyncio.CancelledError:
-            cleanup = asyncio.create_task(self._cancel(item))
-            with suppress(BaseException):
-                await asyncio.shield(cleanup)
-            raise
-        except _NativeCallError as error:
-            await context.abort(error.status, error.diagnostic)
-            raise AssertionError("context.abort must terminate the handler") from error
-        except Exception as error:
-            await context.abort(grpc.StatusCode.INTERNAL, "failed to finish shared-memory response")
-            raise AssertionError("context.abort must terminate the handler") from error
-
-    async def _close_shared_memory(
-        self,
-        payload: bytes,
-        context: grpc.aio.ServicerContext,
-    ) -> bytes:
-        try:
-            session_id = decode_close_request(payload)
-        except GrpcProtocolError as error:
-            await context.abort(grpc.StatusCode.INVALID_ARGUMENT, str(error))
-            raise AssertionError("context.abort must terminate the handler") from error
-        async with self._shared_session_lock:
-            session = self._shared_sessions.get(session_id)
-            if session is None:
-                await context.abort(
-                    grpc.StatusCode.NOT_FOUND,
-                    "shared-memory session is not registered",
-                )
-                raise AssertionError("context.abort must terminate the handler")
-            if session.active_count:
-                await context.abort(
-                    grpc.StatusCode.FAILED_PRECONDITION,
-                    "shared-memory session still has active slots",
-                )
-                raise AssertionError("context.abort must terminate the handler")
-            self._shared_sessions.pop(session_id)
-            await self._run_cpu(session.close)
-        return encode_close_response()
-
     async def _admit(self, item: _GrpcWorkItem) -> TransportError | None:
         rejection = await self._queue.admit(
             item,
@@ -623,7 +409,6 @@ class GrpcWorkerServer(WorkerBatchReceiver):
         item._cancelled_event.set()
         if await self._queue.cancel_waiting(item):
             item.finish_wait_span("cancelled")
-            self._release_shared_slot(item)
 
     async def _wait_pending_count(self, expected: int) -> None:
         await self._queue.wait_for_pending_count(expected)
@@ -645,20 +430,11 @@ class GrpcWorkerServer(WorkerBatchReceiver):
                     "worker.response.encode",
                     enabled=item.trace_context is not None,
                 ):
-                    if item.output_destination is None:
-                        payload = await self._run_cpu(
-                            encode_success_response,
-                            partial_output,
-                            self._spec,
-                        )
-                    else:
-                        if partial_output.data_ptr() != item.output_destination.data_ptr():
-                            raise ValueError(
-                                "shared-memory response did not use its registered destination"
-                            )
-                        if item.shared_generation is None:
-                            raise RuntimeError("shared-memory response has no generation")
-                        payload = encode_execute_success(item.shared_generation)
+                    payload = await self._run_cpu(
+                        encode_success_response,
+                        partial_output,
+                        self._spec,
+                    )
                 if not item.cancelled and not item.response.done():
                     item.response.set_result(payload)
         except BaseException as error:
@@ -682,14 +458,11 @@ class GrpcWorkerServer(WorkerBatchReceiver):
                         "worker.response.encode",
                         enabled=item.trace_context is not None,
                     ):
-                        if item.shared_session is None:
-                            payload = await self._run_cpu(
-                                encode_error_response,
-                                error,
-                                self._spec,
-                            )
-                        else:
-                            payload = encode_execute_error(error, self._spec)
+                        payload = await self._run_cpu(
+                            encode_error_response,
+                            error,
+                            self._spec,
+                        )
                     if not item.cancelled and not item.response.done():
                         item.response.set_result(payload)
                 elif not item.response.done():
@@ -713,16 +486,7 @@ class GrpcWorkerServer(WorkerBatchReceiver):
             raise
 
     async def _release_active(self, item: _GrpcWorkItem) -> None:
-        self._release_shared_slot(item)
         await self._queue.finish(item)
-
-    @staticmethod
-    def _release_shared_slot(item: _GrpcWorkItem) -> None:
-        if item.shared_session is None:
-            return
-        if item.shared_slot_index is None or item.shared_generation is None:
-            raise RuntimeError("shared-memory item has incomplete slot ownership")
-        item.shared_session.release(item.shared_slot_index, item.shared_generation)
 
     def _require_active(self, item: _GrpcWorkItem) -> None:
         self._queue.require_active(item)
@@ -751,13 +515,7 @@ class GrpcWorkerServer(WorkerBatchReceiver):
             item._cancelled = True
             item._cancelled_event.set()
             item.finish_wait_span("closed")
-            self._release_shared_slot(item)
         await self._queue.wait_active_empty()
-        async with self._shared_session_lock:
-            sessions = tuple(self._shared_sessions.values())
-            self._shared_sessions.clear()
-            for session in sessions:
-                await self._run_cpu(session.close)
         loop = asyncio.get_running_loop()
         await loop.run_in_executor(
             None,

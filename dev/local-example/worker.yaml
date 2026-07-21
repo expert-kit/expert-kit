@@ -21,9 +21,9 @@ worker:
   shutdown_grace_secs: 30
 
 transport:
-  grpc:
-    listen: 0.0.0.0:51234
-    advertise: ek-worker:51234
+  type: grpc
+  listen: 0.0.0.0:51234
+  advertise: ek-worker:51234
 
 controller:
   endpoint: ek-controller:5001

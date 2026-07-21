@@ -6,10 +6,12 @@ from expertkit_transport.transports.shm.memory import (
     SharedMemoryRegion,
     SharedMemorySlot,
 )
+from expertkit_transport.transports.shm.receiver import ShmWorkerBatchReceiver
 
 __all__ = [
     "SharedMemoryLayout",
     "SharedMemoryRegion",
     "SharedMemorySlot",
+    "ShmWorkerBatchReceiver",
     "ShmWorkerTransport",
 ]

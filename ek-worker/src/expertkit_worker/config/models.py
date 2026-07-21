@@ -156,17 +156,28 @@ class WorkerProcessConfig(_StrictModel):
 
 
 class GrpcTransportConfig(_StrictModel):
-    """gRPC server bind and advertised addresses."""
+    """gRPC Tensor receiver settings for one Worker process."""
 
+    type: Literal["grpc"]
+    max_pending_batches_per_device: int = Field(gt=0)
     listen: NetworkAddress
     advertise: NetworkAddress
 
 
-class TransportConfig(_StrictModel):
-    """Worker-side Transport admission and gRPC settings."""
+class ShmTransportConfig(_StrictModel):
+    """Same-host shared-memory receiver and notification RPC settings."""
 
+    type: Literal["shm"]
     max_pending_batches_per_device: int = Field(gt=0)
-    grpc: GrpcTransportConfig
+    rpc_listen: NetworkAddress
+    rpc_advertise: NetworkAddress
+    shared_memory_dir: Literal["/dev/shm"] = "/dev/shm"
+
+
+TransportConfig = Annotated[
+    GrpcTransportConfig | ShmTransportConfig,
+    Field(discriminator="type"),
+]
 
 
 class ControllerConfig(_StrictModel):

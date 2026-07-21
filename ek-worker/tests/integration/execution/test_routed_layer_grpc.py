@@ -18,7 +18,7 @@ from expertkit_transport.routing import (
 from expertkit_transport.transports.base import WorkerPositionSpec
 from expertkit_transport.transports.grpc import (
     GrpcBatchSpec,
-    GrpcWorkerServer,
+    GrpcWorkerBatchReceiver,
     GrpcWorkerTransport,
 )
 
@@ -36,7 +36,7 @@ _MAX_BATCH_TOKENS = 4
 @dataclass(slots=True)
 class _RunningWorker:
     identity: WorkerIdentity
-    server: GrpcWorkerServer
+    server: GrpcWorkerBatchReceiver
     transport: GrpcWorkerTransport
     execution: WorkerExecution
     ready: ReadyWeightTable[TorchExpertWeights]
@@ -113,7 +113,7 @@ async def _start_worker(
 ) -> _RunningWorker:
     ready: ReadyWeightTable[TorchExpertWeights] = ReadyWeightTable(1, 3)
     ready.publish(0, expert_id, weight)
-    server = GrpcWorkerServer(
+    server = GrpcWorkerBatchReceiver(
         "127.0.0.1:0",
         _batch_spec(),
         max_active_batches=1,

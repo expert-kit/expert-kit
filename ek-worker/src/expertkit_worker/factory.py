@@ -4,18 +4,22 @@ from __future__ import annotations
 
 import os
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
 import structlog
 import torch
-from expertkit_transport.transports.base import WorkerPositionSpec
-from expertkit_transport.transports.grpc import GrpcBatchSpec, GrpcWorkerServer
+from expertkit_transport.transports.base import WorkerBatchReceiver, WorkerPositionSpec
+from expertkit_transport.transports.grpc import GrpcBatchSpec, GrpcWorkerBatchReceiver
+from expertkit_transport.transports.shm import ShmWorkerBatchReceiver
 
 from expertkit_worker.app import WorkerApplication
 from expertkit_worker.backends import ComputeBackend
 from expertkit_worker.config import (
     ActivationDType,
     BackendName,
+    GrpcTransportConfig,
+    ShmTransportConfig,
     WorkerConfig,
     plan_device_resources,
     validate_available_device_memory,
@@ -213,7 +217,7 @@ async def build_worker_application(config: WorkerConfig) -> WorkerApplication:
         worker_id=config.worker.id,
     )
     metrics = observability.metrics
-    receiver: GrpcWorkerServer | None = None
+    receiver: WorkerBatchReceiver | None = None
     execution: WorkerExecution | None = None
     manager: WeightManager[Any, Any] | None = None
     peer_server: PeerWeightServer[Any, Any] | None = None
@@ -241,16 +245,33 @@ async def build_worker_application(config: WorkerConfig) -> WorkerApplication:
             top_k=config.model.top_k,
             dtype=activation_dtype,
         )
-        receiver = GrpcWorkerServer(
-            config.transport.grpc.listen,
-            batch_spec,
-            max_active_batches=config.worker.max_active_batches_per_device,
-            max_pending_batches=config.transport.max_pending_batches_per_device,
-            interceptors=observability.grpc_interceptors,
-            tracer=observability.tracer,
-            on_rejection=metrics.batch_rejected,
-            on_pending_changed=metrics.pending_batches_changed,
-        )
+        receiver_options = {
+            "max_active_batches": config.worker.max_active_batches_per_device,
+            "max_pending_batches": config.transport.max_pending_batches_per_device,
+            "interceptors": observability.grpc_interceptors,
+            "tracer": observability.tracer,
+            "on_rejection": metrics.batch_rejected,
+            "on_pending_changed": metrics.pending_batches_changed,
+        }
+        if isinstance(config.transport, GrpcTransportConfig):
+            receiver = GrpcWorkerBatchReceiver(
+                config.transport.listen,
+                batch_spec,
+                **receiver_options,
+            )
+            computation_endpoint = config.transport.advertise
+            transport_type = "grpc"
+        elif isinstance(config.transport, ShmTransportConfig):
+            receiver = ShmWorkerBatchReceiver(
+                config.transport.rpc_listen,
+                batch_spec,
+                shared_memory_dir=Path(config.transport.shared_memory_dir),
+                **receiver_options,
+            )
+            computation_endpoint = config.transport.rpc_advertise
+            transport_type = "shm"
+        else:
+            raise AssertionError("validated Worker configuration selected no Transport")
 
         manager_holder: list[WeightManager[Any, Any] | None] = [None]
 
@@ -374,7 +395,7 @@ async def build_worker_application(config: WorkerConfig) -> WorkerApplication:
             worker_id=config.worker.id,
             start_id=start_id,
             instance_id=config.model.instance_id,
-            computation_endpoint=config.transport.grpc.advertise,
+            computation_endpoint=computation_endpoint,
             peer_weight_endpoint=str(config.weight_manager.peer.advertise),
             backend=config.worker.backend.value,
             activation_dtype=activation_dtype,
@@ -383,7 +404,7 @@ async def build_worker_application(config: WorkerConfig) -> WorkerApplication:
             max_batch_tokens=config.worker.max_batch_tokens,
             max_active_batches=config.worker.max_active_batches_per_device,
             max_pending_batches=config.transport.max_pending_batches_per_device,
-            transport_type="grpc",
+            transport_type=transport_type,
         )
         control = ControllerSupervisor(
             connection=connection,
