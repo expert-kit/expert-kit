@@ -16,9 +16,10 @@ use crate::{
         ControllerV2State, ExpertKey, MAX_CONTROL_ENTRIES_PER_PART, Placement, StateReportResult,
     },
     proto::ek::control::v2::{
-        ControllerWeightMessage, ExpertState, FullExpertStatePart, RegisterWorkerRequest,
-        StateReportAck, TargetExpert, WorkerWeightMessage, controller_weight_message,
-        weight_control_service_server::WeightControlService, worker_weight_message,
+        ControllerWeightMessage, ExpertState, ExpertStateKind, FullExpertStatePart,
+        RegisterWorkerRequest, StateReportAck, TargetExpert, WorkerWeightMessage,
+        controller_weight_message, weight_control_service_server::WeightControlService,
+        worker_weight_message,
     },
 };
 
@@ -112,6 +113,7 @@ impl WeightSession {
             .await
             .map_err(state_status)?;
         send_placement(&self.responses, &placement).await?;
+        log_placement(&self.worker_id, &self.start_id, &placement);
         send_new_drains(
             &self.state,
             &self.worker_id,
@@ -155,6 +157,7 @@ impl WeightSession {
                         .map_err(state_status)?;
                     if placement.changed {
                         send_placement(&self.responses, &placement).await?;
+                        log_placement(&self.worker_id, &self.start_id, &placement);
                     }
                     send_new_drains(
                         &self.state,
@@ -299,13 +302,18 @@ async fn apply_report(
     responses: &mpsc::Sender<Result<ControllerWeightMessage, Status>>,
     report: CompleteStateReport,
 ) -> Result<(), Status> {
+    let report_counts = count_expert_states(&report.experts);
+    let reported_experts = report.experts.len();
+    let placement_generation = report.placement_generation;
+    let report_sequence = report.report_sequence;
+    let full = report.full;
     let result = state
         .apply_state_report(
             worker_id,
             start_id,
-            report.placement_generation,
-            report.report_sequence,
-            report.full,
+            placement_generation,
+            report_sequence,
+            full,
             report.experts,
         )
         .await
@@ -316,6 +324,15 @@ async fn apply_report(
             .await
             .map_err(state_status)?;
         hooks.persist_ready(worker_id, &ready).await?;
+        log::info!(
+            "Worker expert state updated: id={worker_id} generation={placement_generation} \
+             sequence={report_sequence} full={full} reported={reported_experts} \
+             ready_updates={} failed_updates={} removed_updates={} ready_total={}",
+            report_counts.ready,
+            report_counts.failed,
+            report_counts.removed,
+            ready.len(),
+        );
     }
     send_response(
         responses,
@@ -328,6 +345,36 @@ async fn apply_report(
         },
     )
     .await
+}
+
+fn log_placement(worker_id: &str, start_id: &str, placement: &Placement) {
+    let expert_count: usize = placement.parts.iter().map(|part| part.experts.len()).sum();
+    log::info!(
+        "Worker placement sent: id={worker_id} start_id={start_id} \
+         generation={} experts={expert_count} changed={}",
+        placement.generation,
+        placement.changed,
+    );
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+struct ExpertStateCounts {
+    ready: usize,
+    failed: usize,
+    removed: usize,
+}
+
+fn count_expert_states(experts: &[ExpertState]) -> ExpertStateCounts {
+    let mut counts = ExpertStateCounts::default();
+    for expert in experts {
+        match ExpertStateKind::try_from(expert.state) {
+            Ok(ExpertStateKind::ExpertReady) => counts.ready += 1,
+            Ok(ExpertStateKind::ExpertFailed) => counts.failed += 1,
+            Ok(ExpertStateKind::ExpertRemoved) => counts.removed += 1,
+            _ => {}
+        }
+    }
+    counts
 }
 
 async fn send_placement(
@@ -482,9 +529,7 @@ impl FullStateAssembler {
 mod tests {
     use super::*;
     use crate::proto::ek::{
-        control::v2::{
-            ExpertStateKind, ExpertStateUpdates, WorkerDevice, controller_weight_message,
-        },
+        control::v2::{ExpertStateUpdates, WorkerDevice, controller_weight_message},
         worker::v2::ActivationDType,
     };
     use tokio::sync::Mutex;
@@ -541,6 +586,23 @@ mod tests {
             state: ExpertStateKind::ExpertReady as i32,
             failure: None,
         }
+    }
+
+    #[test]
+    fn expert_state_counts_support_progress_logging() {
+        let mut failed = ready(2);
+        failed.state = ExpertStateKind::ExpertFailed as i32;
+        let mut removed = ready(3);
+        removed.state = ExpertStateKind::ExpertRemoved as i32;
+
+        assert_eq!(
+            count_expert_states(&[ready(1), failed, removed]),
+            ExpertStateCounts {
+                ready: 1,
+                failed: 1,
+                removed: 1,
+            }
+        );
     }
 
     #[test]

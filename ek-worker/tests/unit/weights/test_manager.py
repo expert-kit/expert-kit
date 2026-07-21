@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from typing import Any
 
 import pytest
+from structlog.testing import capture_logs
 
 from expertkit_worker.weights import (
     ExpertState,
@@ -41,7 +42,7 @@ async def _await_with_loop_yields[T](awaitable: Awaitable[T]) -> T:
     task = asyncio.ensure_future(awaitable)
     async with asyncio.timeout(2):
         while not task.done():
-            await asyncio.sleep(0)
+            await asyncio.sleep(0.01)
     return task.result()
 
 
@@ -258,6 +259,35 @@ def test_manager_bounds_whole_load_pipeline_and_publishes_direct_references() ->
         assert byte_changes == [16, 32, 48, 0]
         assert writeback.started is True
         assert writeback.closed is True
+
+    run(scenario())
+
+
+def test_manager_logs_bounded_loading_progress_and_completion() -> None:
+    async def scenario() -> None:
+        loader = _FakeLoader()
+        manager, _ = _make_manager(loader)
+        manager.start()
+
+        with capture_logs() as logs:
+            await manager.apply_targets(3, [_target(0, 0), _target(0, 1)])
+            await _await_with_loop_yields(manager.wait_for_idle())
+
+        events = [entry["event"] for entry in logs]
+        assert events == [
+            "expert_placement_applied",
+            "expert_loading_started",
+            "expert_loading_progress",
+            "expert_loading_completed",
+        ]
+        assert logs[0]["placement_generation"] == 3
+        assert logs[0]["assigned_experts"] == 2
+        assert logs[2]["ready_experts"] == 1
+        assert logs[2]["progress_percent"] == 50
+        assert logs[3]["ready_experts"] == 2
+        assert logs[3]["loaded_device_bytes"] == 32
+
+        await _await_with_loop_yields(manager.close())
 
     run(scenario())
 
@@ -524,10 +554,12 @@ def test_whole_worker_shutdown_removes_current_targets_after_drain() -> None:
         await _await_with_loop_yields(manager.wait_for_idle())
 
         assert await manager.begin_shutdown() is True
-        assert await manager.remove_after_drain(
-            1,
-            (key,),
-            whole_worker_shutdown=True,
+        assert await _await_with_loop_yields(
+            manager.remove_after_drain(
+                1,
+                (key,),
+                whole_worker_shutdown=True,
+            )
         )
         with pytest.raises(WeightsNotReady):
             manager.acquire_many(0, (0,))

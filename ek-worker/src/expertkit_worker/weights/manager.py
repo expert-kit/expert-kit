@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from collections.abc import Callable, Iterable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -180,6 +181,11 @@ class WeightManager[CpuWeightT, ReadyWeightT]:
         self._removal_task: asyncio.Task[bool] | None = None
         self._ready_keys: set[WeightKey] = set()
         self._loaded_device_bytes = 0
+        self._logged_placement_generation = 0
+        self._load_started_at = 0.0
+        self._load_progress_step = 1
+        self._next_load_progress_count = 1
+        self._load_completion_logged = False
         self._fatal_error: WeightManagerFatalError | None = None
         self._fatal_event = asyncio.Event()
         self._close_task: asyncio.Task[None] | None = None
@@ -233,6 +239,7 @@ class WeightManager[CpuWeightT, ReadyWeightT]:
             raise ValueError("placement_generation must be positive")
         resolved = self._validate_targets(targets)
         changes: list[ExpertStateChange] = []
+        placement_log: dict[str, int] | None = None
         async with self._lock:
             if self._closed:
                 raise RuntimeError("Weight Manager is closed")
@@ -268,7 +275,47 @@ class WeightManager[CpuWeightT, ReadyWeightT]:
                 if key not in self._load_tasks and not self._shutting_down:
                     self._start_load_locked(key)
 
+            ready_count = len(self._ready_keys.intersection(resolved))
+            assigned_count = len(resolved)
+            loading_count = sum(key in self._load_tasks for key in resolved)
+            self._logged_placement_generation = placement_generation
+            self._load_started_at = time.monotonic()
+            self._load_progress_step = max(1, (assigned_count + 9) // 10)
+            self._next_load_progress_count = (
+                (ready_count // self._load_progress_step) + 1
+            ) * self._load_progress_step
+            self._load_completion_logged = assigned_count > 0 and ready_count == assigned_count
+            placement_log = {
+                "placement_generation": placement_generation,
+                "assigned_experts": assigned_count,
+                "ready_experts": ready_count,
+                "loading_experts": loading_count,
+                "added_experts": len(resolved.keys() - previous_targets.keys()),
+                "removed_experts": len(previous_targets.keys() - resolved.keys()),
+            }
+
         self._emit(changes)
+        assert placement_log is not None
+        logger.info("expert_placement_applied", **placement_log)
+        if placement_log["loading_experts"]:
+            logger.info(
+                "expert_loading_started",
+                placement_generation=placement_generation,
+                assigned_experts=placement_log["assigned_experts"],
+                ready_experts=placement_log["ready_experts"],
+                loading_experts=placement_log["loading_experts"],
+            )
+        elif (
+            placement_log["assigned_experts"]
+            and placement_log["ready_experts"] == placement_log["assigned_experts"]
+        ):
+            logger.info(
+                "expert_loading_completed",
+                placement_generation=placement_generation,
+                ready_experts=placement_log["ready_experts"],
+                duration_ms=0.0,
+                loaded_device_bytes=self._loaded_device_bytes,
+            )
         return True
 
     async def begin_shutdown(self) -> bool:
@@ -609,6 +656,8 @@ class WeightManager[CpuWeightT, ReadyWeightT]:
     async def _finish_ready(self, key: WeightKey, ready_weight: ReadyWeightT) -> None:
         changes: list[ExpertStateChange] = []
         loaded_device_bytes: int | None = None
+        progress_log: dict[str, int | float] | None = None
+        completed_log: dict[str, int | float] | None = None
         published = False
         try:
             async with self._lock:
@@ -641,12 +690,44 @@ class WeightManager[CpuWeightT, ReadyWeightT]:
                     )
                     if change is not None:
                         changes.append(change)
+                    if self._logged_placement_generation == self._placement_generation:
+                        assigned_count = len(self._targets)
+                        ready_count = len(self._ready_keys.intersection(self._targets))
+                        remaining_count = assigned_count - ready_count
+                        elapsed_ms = (time.monotonic() - self._load_started_at) * 1000
+                        if (
+                            assigned_count > 0
+                            and ready_count == assigned_count
+                            and not self._load_completion_logged
+                        ):
+                            self._load_completion_logged = True
+                            completed_log = {
+                                "placement_generation": self._placement_generation,
+                                "ready_experts": ready_count,
+                                "duration_ms": elapsed_ms,
+                                "loaded_device_bytes": self._loaded_device_bytes,
+                            }
+                        elif ready_count >= self._next_load_progress_count:
+                            while self._next_load_progress_count <= ready_count:
+                                self._next_load_progress_count += self._load_progress_step
+                            progress_log = {
+                                "placement_generation": self._placement_generation,
+                                "ready_experts": ready_count,
+                                "assigned_experts": assigned_count,
+                                "remaining_experts": remaining_count,
+                                "progress_percent": ready_count * 100.0 / assigned_count,
+                                "duration_ms": elapsed_ms,
+                            }
         finally:
             if not published:
                 self._adapter.release_ready_weight(ready_weight)
         self._emit(changes)
         if loaded_device_bytes is not None:
             self._emit_device_bytes(loaded_device_bytes)
+        if progress_log is not None:
+            logger.info("expert_loading_progress", **progress_log)
+        if completed_log is not None:
+            logger.info("expert_loading_completed", **completed_log)
 
     async def _finish_ready_without_leaking_on_cancel(
         self,
@@ -670,6 +751,7 @@ class WeightManager[CpuWeightT, ReadyWeightT]:
 
     async def _finish_failure(self, key: WeightKey, failure: WeightLoadFailure) -> None:
         changes: list[ExpertStateChange] = []
+        changed = False
         async with self._lock:
             if self._closed or key not in self._targets or key in self._ready_keys:
                 return
@@ -679,7 +761,20 @@ class WeightManager[CpuWeightT, ReadyWeightT]:
             )
             if change is not None:
                 changes.append(change)
+                changed = True
         self._emit(changes)
+        if changed:
+            logger.error(
+                "expert_loading_failed",
+                layer_id=key.layer_id,
+                expert_id=key.expert_id,
+                placement_generation=self._placement_generation,
+                source=failure.source.value,
+                stage=failure.stage.value,
+                error_code=failure.code.value,
+                retryable=failure.retryable,
+                diagnostic=failure.diagnostic,
+            )
 
     async def _set_fatal(self, key: WeightKey, error: WeightPlacementFatalError) -> None:
         async with self._lock:

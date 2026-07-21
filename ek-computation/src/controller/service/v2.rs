@@ -164,6 +164,7 @@ impl WorkerLifecycleHooks for DatabaseLifecycleHooks {
             .await
             .map_err(internal_status)?;
         request_immediate_poll();
+        log::info!("Worker left: id={worker_id} start_id={start_id} graceful={graceful}");
 
         let worker_id_owned = worker_id.to_owned();
         if graceful {
@@ -178,19 +179,29 @@ impl WorkerLifecycleHooks for DatabaseLifecycleHooks {
                 } else {
                     recover_unique_experts(&worker_id_owned).await;
                 }
-                let _ = StateWriterImpl::new()
-                    .delete_experts_by_node_hostname(&worker_id_owned)
-                    .await;
+                delete_stale_experts(&worker_id_owned).await;
             });
         } else {
             tokio::spawn(async move {
                 recover_unique_experts(&worker_id_owned).await;
-                let _ = StateWriterImpl::new()
-                    .delete_experts_by_node_hostname(&worker_id_owned)
-                    .await;
+                delete_stale_experts(&worker_id_owned).await;
             });
         }
         Ok(())
+    }
+}
+
+async fn delete_stale_experts(worker_id: &str) {
+    match StateWriterImpl::new()
+        .delete_experts_by_node_hostname(worker_id)
+        .await
+    {
+        Ok(count) => {
+            log::info!("Cleaned {count} stale expert rows for node {worker_id}");
+        }
+        Err(error) => {
+            log::error!("Failed to clean stale expert rows for node {worker_id}: {error}");
+        }
     }
 }
 
@@ -389,6 +400,9 @@ impl WorkerLifecycleServiceImpl {
                 if let Err(status) = self.hooks.shutting_down(&worker_id, &start_id).await {
                     break Err(status);
                 }
+                log::info!(
+                    "Worker requested graceful shutdown: id={worker_id} start_id={start_id}"
+                );
             }
         };
 
@@ -411,6 +425,22 @@ impl WorkerLifecycleService for WorkerLifecycleServiceImpl {
             .await
             .map_err(state_status)?;
         self.hooks.registered(&registration, &result).await?;
+        let device = registration
+            .device
+            .as_ref()
+            .expect("validated Worker registration has one device");
+        log::info!(
+            "Worker joined: id={} start_id={} backend={} device={} max_experts={} \
+             placement_generation={} topology_version={} replaced={}",
+            registration.worker_id,
+            registration.start_id,
+            registration.backend,
+            device.device,
+            device.max_experts,
+            result.response.current_placement_generation,
+            result.response.current_topology_version,
+            result.replaced_start_id.is_some(),
+        );
         Ok(Response::new(result.response))
     }
 
