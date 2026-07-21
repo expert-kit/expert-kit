@@ -164,6 +164,45 @@ def test_cancellation_waits_for_worker_release_before_slot_reuse() -> None:
     asyncio.run(scenario())
 
 
+def test_control_close_is_not_blocked_by_data_rpc_capacity() -> None:
+    async def scenario() -> None:
+        server, client = await start_pair()
+        first = asyncio.create_task(
+            client.execute(
+                batch(),
+                prepare(client),
+                monotonic_deadline=time.monotonic() + 5,
+            )
+        )
+        try:
+            await server._wait_pending_count(1)
+            with pytest.raises(TransportError) as caught:
+                await client.execute(
+                    batch(),
+                    prepare(client),
+                    monotonic_deadline=time.monotonic() + 5,
+                )
+            assert caught.value.code is TransportErrorCode.BUSY
+
+            received = await server.receive()
+            destination = received.output_destination
+            assert destination is not None
+            destination.copy_(received.batch.hidden_states)
+            received.release_input()
+            await received.complete(destination)
+            await first
+
+            await client.close()
+        finally:
+            if not first.done():
+                first.cancel()
+            await asyncio.gather(first, return_exceptions=True)
+            await client.close()
+            await server.close()
+
+    asyncio.run(scenario())
+
+
 def test_shm_receiver_does_not_expose_grpc_tensor_execute() -> None:
     async def scenario() -> None:
         server = ShmWorkerBatchReceiver(

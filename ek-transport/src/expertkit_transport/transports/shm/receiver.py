@@ -209,7 +209,7 @@ class ShmWorkerBatchReceiver(WorkerBatchReceiver):
         self._listen = listen
         self._spec = endpoint_config
         self._shared_memory_dir = shared_memory_dir
-        self._maximum_concurrent_rpcs = max_active_batches + max_pending_batches
+        self._slot_count = max_active_batches + max_pending_batches
         self._queue = ReceiverQueue(
             max_pending_batches=max_pending_batches,
             max_retained_bytes=0,
@@ -273,7 +273,7 @@ class ShmWorkerBatchReceiver(WorkerBatchReceiver):
             )
             server = grpc.aio.server(
                 options=options,
-                maximum_concurrent_rpcs=self._maximum_concurrent_rpcs,
+                maximum_concurrent_rpcs=(self._slot_count + _MAX_SHARED_MEMORY_SESSIONS),
                 interceptors=self._interceptors,
             )
             service = grpc.method_handlers_generic_handler(
@@ -389,7 +389,7 @@ class ShmWorkerBatchReceiver(WorkerBatchReceiver):
             description = decode_open_request(
                 payload,
                 self._spec,
-                expected_slot_count=self._maximum_concurrent_rpcs,
+                expected_slot_count=self._slot_count,
             )
         except TransportProtocolError as error:
             await context.abort(grpc.StatusCode.INVALID_ARGUMENT, str(error))
