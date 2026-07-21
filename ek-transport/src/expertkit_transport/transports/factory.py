@@ -41,6 +41,7 @@ def create_worker_transport(
             endpoint,
             batch_spec,
             max_in_flight=max_in_flight,
+            device=device,
         )
     if transport_type == lifecycle_pb2.WORKER_TRANSPORT_SHM:
         return ShmWorkerTransport(

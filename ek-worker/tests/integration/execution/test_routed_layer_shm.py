@@ -5,7 +5,6 @@ import time
 
 import torch
 from expertkit_transport.batches import WorkerBatch
-from expertkit_transport.buffers.base import OutputSpec
 from expertkit_transport.transports.base import WorkerPositionSpec
 from expertkit_transport.transports.grpc import GrpcBatchSpec, GrpcWorkerServer
 from expertkit_transport.transports.shm import ShmWorkerTransport
@@ -88,7 +87,7 @@ def test_worker_execution_uses_shared_input_and_output_destinations() -> None:
             device="cpu",
         )
         await transport.start()
-        output = transport.output_buffers.prepare(OutputSpec(4, _HIDDEN_DIM, torch.float32, "cpu"))
+        output = torch.empty((2, _HIDDEN_DIM), dtype=torch.float32)
         batch = WorkerBatch(
             instance_id=7,
             layer_id=0,
@@ -103,15 +102,14 @@ def test_worker_execution_uses_shared_input_and_output_destinations() -> None:
             distinct_expert_ids=(0, 1),
         )
         try:
-            await transport.submit(
+            await transport.execute(
                 batch,
                 output,
                 monotonic_deadline=time.monotonic() + 5,
             )
-            torch.testing.assert_close(output.tensor[:2], _reference(batch, weights))
+            torch.testing.assert_close(output, _reference(batch, weights))
         finally:
             await transport.close()
-            transport.output_buffers.release(output)
             await execution.close()
 
     asyncio.run(scenario())

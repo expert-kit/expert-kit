@@ -11,7 +11,6 @@ import pytest
 import torch
 
 from expertkit_transport.batches import WorkerBatch
-from expertkit_transport.buffers.base import OutputSpec
 from expertkit_transport.errors import TransportError, TransportErrorCode
 from expertkit_transport.tracing import TraceAttribute, TraceContext, Tracer, TraceSpan
 from expertkit_transport.transports.base import ReceiverClosed, WorkerPositionSpec
@@ -106,8 +105,9 @@ def worker_batch() -> WorkerBatch:
     )
 
 
-def prepare_output(client: GrpcWorkerTransport):
-    return client.output_buffers.prepare(OutputSpec(4, 3, torch.float16, "cpu"))
+def prepare_output(client: GrpcWorkerTransport) -> torch.Tensor:
+    del client
+    return torch.empty((2, 3), dtype=torch.float16)
 
 
 async def start_pair(
@@ -131,6 +131,7 @@ async def start_pair(
         f"127.0.0.1:{server.bound_port}",
         batch_spec(),
         max_in_flight=client_in_flight,
+        device="cpu",
     )
     await client.start()
     return server, client
@@ -279,7 +280,7 @@ def test_server_hands_one_validated_batch_directly_to_execution() -> None:
         server, client = await start_pair(pending_changes=pending_changes)
         output = prepare_output(client)
         submission = asyncio.create_task(
-            client.submit(
+            client.execute(
                 worker_batch(),
                 output,
                 monotonic_deadline=float("inf"),
@@ -313,13 +314,12 @@ def test_server_hands_one_validated_batch_directly_to_execution() -> None:
         await idle
 
         torch.testing.assert_close(
-            output.tensor[:2],
+            output,
             torch.tensor([[14.0, 16.0, 18.0], [2.0, 4.0, 6.0]], dtype=torch.float16),
         )
         assert server.active_count == 0
         assert server.admitted_count(2, 0) == 0
         assert pending_changes == [1, 0]
-        client.output_buffers.release(output)
         await close_pair(server, client)
 
     run(scenario())
@@ -331,7 +331,7 @@ def test_unsampled_request_does_not_create_custom_spans() -> None:
         server, client = await start_pair(tracer=tracer)
         output = prepare_output(client)
         submission = asyncio.create_task(
-            client.submit(
+            client.execute(
                 worker_batch(),
                 output,
                 monotonic_deadline=float("inf"),
@@ -344,7 +344,6 @@ def test_unsampled_request_does_not_create_custom_spans() -> None:
 
         assert received.trace_context is None
         assert tracer.spans == []
-        client.output_buffers.release(output)
         await close_pair(server, client)
 
     run(scenario())
@@ -365,7 +364,7 @@ def test_server_maps_native_execution_rejection(
         server, client = await start_pair()
         output = prepare_output(client)
         submission = asyncio.create_task(
-            client.submit(
+            client.execute(
                 worker_batch(),
                 output,
                 monotonic_deadline=float("inf"),
@@ -381,7 +380,6 @@ def test_server_maps_native_execution_rejection(
 
         assert caught.value.code is expected
         assert server.active_count == 0
-        client.output_buffers.release(output)
         await close_pair(server, client)
 
     run(scenario())
@@ -392,7 +390,7 @@ def test_server_delivers_structured_execution_rejection() -> None:
         server, client = await start_pair()
         output = prepare_output(client)
         submission = asyncio.create_task(
-            client.submit(
+            client.execute(
                 worker_batch(),
                 output,
                 monotonic_deadline=float("inf"),
@@ -413,7 +411,6 @@ def test_server_delivers_structured_execution_rejection() -> None:
         assert caught.value.code is TransportErrorCode.EXPERT_NOT_READY
         assert caught.value.unavailable_expert_ids == (3,)
         assert server.active_count == 0
-        client.output_buffers.release(output)
         await close_pair(server, client)
 
     run(scenario())
@@ -426,7 +423,7 @@ def test_application_pending_limit_returns_busy_and_cancellation_releases_input(
         first_output = prepare_output(client)
         second_output = prepare_output(client)
         first = asyncio.create_task(
-            client.submit(
+            client.execute(
                 worker_batch(),
                 first_output,
                 monotonic_deadline=float("inf"),
@@ -436,7 +433,7 @@ def test_application_pending_limit_returns_busy_and_cancellation_releases_input(
             await server._wait_pending_count(1)
 
         with pytest.raises(TransportError) as caught:
-            await client.submit(
+            await client.execute(
                 worker_batch(),
                 second_output,
                 monotonic_deadline=float("inf"),
@@ -458,8 +455,6 @@ def test_application_pending_limit_returns_busy_and_cancellation_releases_input(
         assert waiting[0].ended is True
         assert waiting[0].attributes["expertkit.outcome"] == "cancelled"
 
-        client.output_buffers.release(first_output)
-        client.output_buffers.release(second_output)
         await close_pair(server, client)
 
     run(scenario())
@@ -468,7 +463,7 @@ def test_application_pending_limit_returns_busy_and_cancellation_releases_input(
 def test_maximum_batch_accounts_only_retained_decoded_tensor_bytes() -> None:
     async def scenario() -> None:
         server, client = await start_pair()
-        output = prepare_output(client)
+        output = torch.empty((4, 3), dtype=torch.float16)
         batch = WorkerBatch(
             instance_id=7,
             layer_id=2,
@@ -483,7 +478,7 @@ def test_maximum_batch_accounts_only_retained_decoded_tensor_bytes() -> None:
             distinct_expert_ids=tuple(range(8)),
         )
         submission = asyncio.create_task(
-            client.submit(batch, output, monotonic_deadline=float("inf"))
+            client.execute(batch, output, monotonic_deadline=float("inf"))
         )
         await await_with_loop_yields(server._wait_pending_count(1))
 
@@ -495,7 +490,6 @@ def test_maximum_batch_accounts_only_retained_decoded_tensor_bytes() -> None:
         await await_with_loop_yields(received.complete(received.batch.hidden_states))
         await await_with_loop_yields(submission)
 
-        client.output_buffers.release(output)
         await close_pair(server, client)
 
     run(scenario())
@@ -507,7 +501,7 @@ def test_server_close_clears_pending_retained_bytes() -> None:
         server, client = await start_pair(tracer=tracer)
         output = prepare_output(client)
         submission = asyncio.create_task(
-            client.submit(
+            client.execute(
                 worker_batch(),
                 output,
                 monotonic_deadline=float("inf"),
@@ -525,7 +519,6 @@ def test_server_close_clears_pending_retained_bytes() -> None:
         assert waiting[0].attributes["expertkit.outcome"] in {"cancelled", "closed"}
         result = await asyncio.gather(submission, return_exceptions=True)
         assert isinstance(result[0], TransportError)
-        client.output_buffers.release(output)
         await client.close()
 
     run(scenario())
@@ -539,7 +532,7 @@ def test_expert_drain_rejects_new_calls_and_preserves_admitted_work() -> None:
         unrelated_output = prepare_output(client)
         resumed_output = prepare_output(client)
         first = asyncio.create_task(
-            client.submit(
+            client.execute(
                 worker_batch(),
                 first_output,
                 monotonic_deadline=float("inf"),
@@ -569,7 +562,7 @@ def test_expert_drain_rejects_new_calls_and_preserves_admitted_work() -> None:
 
         with pytest.raises(TransportError) as caught:
             await await_with_loop_yields(
-                client.submit(
+                client.execute(
                     worker_batch(),
                     rejected_output,
                     monotonic_deadline=float("inf"),
@@ -592,7 +585,7 @@ def test_expert_drain_rejects_new_calls_and_preserves_admitted_work() -> None:
             distinct_expert_ids=(2,),
         )
         unrelated = asyncio.create_task(
-            client.submit(
+            client.execute(
                 unrelated_batch,
                 unrelated_output,
                 monotonic_deadline=float("inf"),
@@ -608,7 +601,7 @@ def test_expert_drain_rejects_new_calls_and_preserves_admitted_work() -> None:
         await server.clear_expert_drains(((2, 1),))
         await server.clear_expert_drains(((2, 1),))
         resumed = asyncio.create_task(
-            client.submit(
+            client.execute(
                 worker_batch(),
                 resumed_output,
                 monotonic_deadline=float("inf"),
@@ -619,8 +612,6 @@ def test_expert_drain_rejects_new_calls_and_preserves_admitted_work() -> None:
         await await_with_loop_yields(accepted.complete(accepted.batch.hidden_states))
         await await_with_loop_yields(resumed)
 
-        for output in (first_output, rejected_output, unrelated_output, resumed_output):
-            client.output_buffers.release(output)
         await await_with_loop_yields(close_pair(server, client))
 
     run(scenario())
@@ -640,7 +631,7 @@ def test_whole_worker_drain_rejects_every_new_batch() -> None:
 
         with pytest.raises(TransportError) as caught:
             await await_with_loop_yields(
-                client.submit(
+                client.execute(
                     unrelated,
                     output,
                     monotonic_deadline=float("inf"),
@@ -651,7 +642,6 @@ def test_whole_worker_drain_rejects_every_new_batch() -> None:
         assert caught.value.min_topology_version == 0
         assert server.pending_count == 0
         assert server.pending_retained_bytes == 0
-        client.output_buffers.release(output)
         await await_with_loop_yields(close_pair(server, client))
 
     run(scenario())
@@ -662,7 +652,7 @@ def test_whole_worker_idle_wait_includes_waiting_and_active_batches() -> None:
         server, client = await start_pair(max_active_batches=2)
         output = prepare_output(client)
         submission = asyncio.create_task(
-            client.submit(
+            client.execute(
                 worker_batch(),
                 output,
                 monotonic_deadline=float("inf"),
@@ -682,7 +672,6 @@ def test_whole_worker_idle_wait_includes_waiting_and_active_batches() -> None:
         await await_with_loop_yields(submission)
         await idle
 
-        client.output_buffers.release(output)
         await await_with_loop_yields(close_pair(server, client))
 
     run(scenario())
@@ -693,7 +682,7 @@ def test_outer_grpc_concurrency_limit_bounds_active_plus_pending_calls() -> None
         server, client = await start_pair(client_in_flight=3)
         outputs = [prepare_output(client) for _ in range(3)]
         first = asyncio.create_task(
-            client.submit(
+            client.execute(
                 worker_batch(),
                 outputs[0],
                 monotonic_deadline=float("inf"),
@@ -702,7 +691,7 @@ def test_outer_grpc_concurrency_limit_bounds_active_plus_pending_calls() -> None
         active = await server.take()
         others = [
             asyncio.create_task(
-                client.submit(
+                client.execute(
                     worker_batch(),
                     output,
                     monotonic_deadline=float("inf"),
@@ -720,8 +709,6 @@ def test_outer_grpc_concurrency_limit_bounds_active_plus_pending_calls() -> None
         assert len(failures) == 1
         assert failures[0].code is TransportErrorCode.BUSY
         assert server.active_count == 0
-        for output in outputs:
-            client.output_buffers.release(output)
         await close_pair(server, client)
 
     run(scenario())
@@ -732,7 +719,7 @@ def test_cancellation_after_take_discards_response_but_releases_expert_use() -> 
         server, client = await start_pair()
         output = prepare_output(client)
         submission = asyncio.create_task(
-            client.submit(
+            client.execute(
                 worker_batch(),
                 output,
                 monotonic_deadline=float("inf"),
@@ -750,7 +737,6 @@ def test_cancellation_after_take_discards_response_but_releases_expert_use() -> 
         await received.complete(received.batch.hidden_states)
         assert server.active_count == 0
         assert server.admitted_count(2, 1) == 0
-        client.output_buffers.release(output)
         await close_pair(server, client)
 
     run(scenario())

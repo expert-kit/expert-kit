@@ -4,7 +4,6 @@ import pytest
 import torch
 
 from expertkit_transport.batches import RoutedLayerBatch, WorkerBatch
-from expertkit_transport.buffers.base import OutputBufferProvider, PreparedOutput
 from expertkit_transport.errors import TransportError, TransportErrorCode
 from expertkit_transport.routing import (
     RoundRobinSelector,
@@ -17,17 +16,13 @@ from expertkit_transport.transports.base import WorkerTransport
 
 
 class FakeTransport(WorkerTransport):
-    @property
-    def output_buffers(self) -> OutputBufferProvider:
-        raise NotImplementedError
-
     async def start(self) -> None:
         return None
 
-    async def submit(
+    async def execute(
         self,
         batch: WorkerBatch,
-        output: PreparedOutput,
+        output: torch.Tensor,
         *,
         monotonic_deadline: float,
     ) -> None:

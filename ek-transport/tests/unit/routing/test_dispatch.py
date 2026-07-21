@@ -6,8 +6,7 @@ import pytest
 import torch
 
 from expertkit_transport.batches import RoutedLayerBatch, WorkerBatch
-from expertkit_transport.buffers import OutputPool, TorchOutputBufferProvider
-from expertkit_transport.buffers.base import OutputBufferProvider, OutputSpec, PreparedOutput
+from expertkit_transport.buffers import OutputPool
 from expertkit_transport.errors import TransportError, TransportErrorCode
 from expertkit_transport.routing import (
     RoundRobinSelector,
@@ -33,19 +32,14 @@ class FakeTransport(WorkerTransport):
         self.started = started
         self.gate = gate
         self.error = error
-        self._buffers = TorchOutputBufferProvider()
-
-    @property
-    def output_buffers(self) -> OutputBufferProvider:
-        return self._buffers
 
     async def start(self) -> None:
         return None
 
-    async def submit(
+    async def execute(
         self,
         batch: WorkerBatch,
-        output: PreparedOutput,
+        output: torch.Tensor,
         *,
         monotonic_deadline: float,
     ) -> None:
@@ -55,8 +49,7 @@ class FakeTransport(WorkerTransport):
             await self.gate.wait()
         if self.error is not None:
             raise self.error
-        self._buffers.before_receive(output)
-        output.tensor[: batch.token_count].fill_(self.value)
+        output.fill_(self.value)
 
     async def close(self) -> None:
         return None
@@ -84,11 +77,12 @@ def routed_batch() -> RoutedLayerBatch:
 
 
 def pools_for(targets: tuple[WorkerConnection, ...]) -> dict[WorkerIdentity, OutputPool]:
-    spec = OutputSpec(8, 4, torch.float16, "cpu")
     return {
         worker.identity: OutputPool(
-            worker.transport.output_buffers,
-            spec,
+            max_batch_tokens=8,
+            hidden_dim=4,
+            dtype=torch.float16,
+            device="cpu",
             capacity=worker.max_in_flight,
         )
         for worker in targets

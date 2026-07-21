@@ -15,7 +15,6 @@ import torch
 from expertkit_proto.ek.control.v2 import lifecycle_pb2, lifecycle_pb2_grpc
 
 from expertkit_transport.buffers import OutputPool
-from expertkit_transport.buffers.base import OutputSpec
 from expertkit_transport.controller.messages import (
     RouteDescriptions,
     TopologyMessageAssembler,
@@ -377,14 +376,11 @@ class ControllerTopologyWatcher(TopologyProvider):
         )
         try:
             pool = OutputPool(
-                transport.output_buffers,
-                OutputSpec(
-                    max_batch_tokens=route.max_batch_tokens,
-                    hidden_dim=self._hidden_dim,
-                    dtype=self._dtype,
-                    device=self._device,
-                ),
-                route.max_in_flight,
+                max_batch_tokens=route.max_batch_tokens,
+                hidden_dim=self._hidden_dim,
+                dtype=self._dtype,
+                device=self._device,
+                capacity=route.max_in_flight,
             )
         except BaseException:
             await transport.close()

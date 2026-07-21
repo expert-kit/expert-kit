@@ -1,25 +1,21 @@
 """Tests for immutable ready-route Topology snapshots."""
 
 import pytest
+import torch
 
 from expertkit_transport.batches import WorkerBatch
-from expertkit_transport.buffers.base import OutputBufferProvider, PreparedOutput
 from expertkit_transport.routing import TopologySnapshot, WorkerConnection, WorkerIdentity
 from expertkit_transport.transports.base import WorkerTransport
 
 
 class FakeTransport(WorkerTransport):
-    @property
-    def output_buffers(self) -> OutputBufferProvider:
-        raise NotImplementedError
-
     async def start(self) -> None:
         return None
 
-    async def submit(
+    async def execute(
         self,
         batch: WorkerBatch,
-        output: PreparedOutput,
+        output: torch.Tensor,
         *,
         monotonic_deadline: float,
     ) -> None:
@@ -74,6 +70,6 @@ def test_snapshot_rejects_inconsistent_metadata_for_one_process() -> None:
         )
 
 
-def test_worker_target_requires_positive_published_limits() -> None:
+def test_worker_connection_requires_positive_published_limits() -> None:
     with pytest.raises(ValueError, match="max_batch_tokens"):
         target("worker-a", max_batch_tokens=0)

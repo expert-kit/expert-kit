@@ -38,7 +38,10 @@ def test_creates_grpc_transport_from_published_type(monkeypatch) -> None:
 
     assert transport.endpoint == "worker:50052"
     assert transport.batch_spec.instance_id == 7
-    assert transport.options == {"max_in_flight": 3}
+    assert transport.options == {
+        "max_in_flight": 3,
+        "device": torch.device("cpu"),
+    }
 
 
 def test_creates_shm_transport_from_published_type(monkeypatch) -> None:

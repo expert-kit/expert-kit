@@ -1,4 +1,4 @@
-"""Reusable Frontend Tensor and Host staging buffers for gRPC calls."""
+"""Fixed Host staging owned privately by one gRPC Worker connection."""
 
 from __future__ import annotations
 
@@ -6,143 +6,109 @@ from dataclasses import dataclass
 
 import torch
 
-from expertkit_transport.buffers.base import OutputBufferProvider, OutputSpec, PreparedOutput
 from expertkit_transport.transports.grpc.spec import GrpcBatchSpec
 
 
 @dataclass(slots=True)
-class GrpcPreparedOutput(PreparedOutput):
-    """Hold one result Tensor and the Host staging owned by its call slot."""
+class GrpcTransferBuffers:
+    """Hold the Host Tensors and Events reused by one in-flight gRPC call."""
 
-    _tensor: torch.Tensor
     host_hidden_states: torch.Tensor
     host_expert_ids: torch.Tensor
     host_routing_weights: torch.Tensor
-    host_partial_output: torch.Tensor
+    host_partial_output: torch.Tensor | None
     request_copy_event: torch.cuda.Event | None
     receive_event: torch.cuda.Event | None
-    consume_event: torch.cuda.Event | None
     request_copy_recorded: bool = False
     receive_recorded: bool = False
-    consume_recorded: bool = False
+
+
+class GrpcTransferBufferPool:
+    """Preallocate and recycle the private staging for one gRPC connection."""
+
+    def __init__(
+        self,
+        batch_spec: GrpcBatchSpec,
+        *,
+        device: torch.device | str,
+        capacity: int,
+    ) -> None:
+        self._device = torch.device(device)
+        uses_cuda = self._device.type == "cuda"
+        host_options = {"device": "cpu", "pin_memory": uses_cuda}
+        self._all = tuple(
+            GrpcTransferBuffers(
+                host_hidden_states=torch.empty(
+                    (batch_spec.max_batch_tokens, batch_spec.hidden_dim),
+                    dtype=batch_spec.dtype,
+                    **host_options,
+                ),
+                host_expert_ids=torch.empty(
+                    (batch_spec.max_batch_tokens, batch_spec.top_k),
+                    dtype=torch.int32,
+                    **host_options,
+                ),
+                host_routing_weights=torch.empty(
+                    (batch_spec.max_batch_tokens, batch_spec.top_k),
+                    dtype=torch.float32,
+                    **host_options,
+                ),
+                host_partial_output=(
+                    torch.empty(
+                        (batch_spec.max_batch_tokens, batch_spec.hidden_dim),
+                        dtype=batch_spec.dtype,
+                        **host_options,
+                    )
+                    if uses_cuda
+                    else None
+                ),
+                request_copy_event=torch.cuda.Event() if uses_cuda else None,
+                receive_event=torch.cuda.Event() if uses_cuda else None,
+            )
+            for _ in range(capacity)
+        )
+        self._available = list(self._all)
+        self._closed = False
 
     @property
-    def tensor(self) -> torch.Tensor:
-        """Return the maximum-size Frontend result Tensor."""
+    def allocated(self) -> tuple[GrpcTransferBuffers, ...]:
+        """Return fixed slots for diagnostics and allocation tests."""
 
-        return self._tensor
+        return self._all
 
+    def take(self) -> GrpcTransferBuffers:
+        """Take one slot after the caller has acquired connection admission."""
 
-class GrpcOutputBufferProvider(OutputBufferProvider):
-    """Allocate bounded gRPC output and request/response staging Tensors."""
+        if self._closed:
+            raise RuntimeError("gRPC transfer buffers are closed")
+        try:
+            return self._available.pop()
+        except IndexError as error:
+            raise RuntimeError("gRPC admission and transfer buffers diverged") from error
 
-    def __init__(self, batch_spec: GrpcBatchSpec) -> None:
-        self._batch_spec = batch_spec
+    def put(self, buffers: GrpcTransferBuffers) -> None:
+        """Return one slot after its request no longer accesses caller Tensors."""
 
-    def prepare(self, spec: OutputSpec) -> PreparedOutput:
-        """Allocate one result and its fixed maximum Host staging Tensors."""
-
-        self._validate_spec(spec)
-        device = torch.device(spec.device)
-        uses_cuda = device.type == "cuda"
-        host_options = {"device": "cpu", "pin_memory": uses_cuda}
-        output_tensor = torch.empty(
-            (spec.max_batch_tokens, spec.hidden_dim),
-            dtype=spec.dtype,
-            device=device,
-        )
-        host_partial_output = (
-            torch.empty(
-                (spec.max_batch_tokens, spec.hidden_dim),
-                dtype=spec.dtype,
-                **host_options,
-            )
-            if uses_cuda
-            else output_tensor
-        )
-        return GrpcPreparedOutput(
-            _tensor=output_tensor,
-            host_hidden_states=torch.empty(
-                (spec.max_batch_tokens, spec.hidden_dim),
-                dtype=spec.dtype,
-                **host_options,
-            ),
-            host_expert_ids=torch.empty(
-                (spec.max_batch_tokens, self._batch_spec.top_k),
-                dtype=torch.int32,
-                **host_options,
-            ),
-            host_routing_weights=torch.empty(
-                (spec.max_batch_tokens, self._batch_spec.top_k),
-                dtype=torch.float32,
-                **host_options,
-            ),
-            host_partial_output=host_partial_output,
-            request_copy_event=torch.cuda.Event() if uses_cuda else None,
-            receive_event=torch.cuda.Event() if uses_cuda else None,
-            consume_event=torch.cuda.Event() if uses_cuda else None,
-        )
-
-    def validate(self, output: PreparedOutput, spec: OutputSpec) -> None:
-        """Reject buffers not created for this gRPC endpoint and output spec."""
-
-        self._validate_spec(spec)
-        prepared = self.require_prepared(output)
-        expected = (spec.max_batch_tokens, spec.hidden_dim)
-        if prepared.tensor.shape != expected:
-            raise ValueError("gRPC output Tensor has the wrong shape")
-        if prepared.tensor.dtype != spec.dtype:
-            raise ValueError("gRPC output Tensor has the wrong dtype")
-        if prepared.tensor.device != torch.device(spec.device):
-            raise ValueError("gRPC output Tensor is on the wrong device")
-
-    def before_receive(self, output: PreparedOutput) -> None:
-        """Order a response write after prior receive and consumption work."""
-
-        prepared = self.require_prepared(output)
-        if prepared.tensor.device.type != "cuda":
-            return
-        stream = torch.cuda.current_stream(prepared.tensor.device)
-        if prepared.receive_recorded:
-            assert prepared.receive_event is not None
-            stream.wait_event(prepared.receive_event)
-        if prepared.consume_recorded:
-            assert prepared.consume_event is not None
-            stream.wait_event(prepared.consume_event)
-
-    def after_consume(self, output: PreparedOutput) -> None:
-        """Record the Frontend stream work that consumed this output."""
-
-        prepared = self.require_prepared(output)
-        if prepared.tensor.device.type == "cuda":
-            assert prepared.consume_event is not None
-            prepared.consume_event.record(torch.cuda.current_stream(prepared.tensor.device))
-            prepared.consume_recorded = True
-
-    def release(self, output: PreparedOutput) -> None:
-        """Wait for outstanding staging and result use before releasing storage."""
-
-        prepared = self.require_prepared(output)
-        for recorded, event in (
-            (prepared.request_copy_recorded, prepared.request_copy_event),
-            (prepared.receive_recorded, prepared.receive_event),
-            (prepared.consume_recorded, prepared.consume_event),
+        if all(candidate is not buffers for candidate in self._all) or any(
+            candidate is buffers for candidate in self._available
         ):
-            if recorded:
-                assert event is not None
-                event.synchronize()
+            raise RuntimeError("invalid gRPC transfer buffer return")
+        self._available.append(buffers)
 
-    def require_prepared(self, output: PreparedOutput) -> GrpcPreparedOutput:
-        """Return the concrete gRPC buffers or reject another provider's object."""
+    def close(self) -> None:
+        """Wait for outstanding device copies before releasing fixed staging."""
 
-        if not isinstance(output, GrpcPreparedOutput):
-            raise TypeError("gRPC Transport requires a gRPC prepared output")
-        return output
-
-    def _validate_spec(self, spec: OutputSpec) -> None:
-        if spec.max_batch_tokens != self._batch_spec.max_batch_tokens:
-            raise ValueError("output max_batch_tokens does not match the gRPC endpoint")
-        if spec.hidden_dim != self._batch_spec.hidden_dim:
-            raise ValueError("output hidden dimension does not match the gRPC endpoint")
-        if spec.dtype != self._batch_spec.dtype:
-            raise ValueError("output dtype does not match the gRPC endpoint")
+        if self._closed:
+            return
+        if len(self._available) != len(self._all):
+            raise RuntimeError("cannot close gRPC transfer buffers while calls are active")
+        for buffers in self._all:
+            for recorded, event in (
+                (buffers.request_copy_recorded, buffers.request_copy_event),
+                (buffers.receive_recorded, buffers.receive_event),
+            ):
+                if recorded:
+                    assert event is not None
+                    event.synchronize()
+        self._available.clear()
+        self._closed = True

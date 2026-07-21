@@ -188,13 +188,8 @@ async def execute_routed_layer(
 
     accumulator: torch.Tensor | None = None
     if len(plans) == 1 and plans[0].batch.token_indices is None:
-        try:
-            pool = pools[plans[0].target.identity]
-        except KeyError as error:
-            raise RuntimeError("no output pool for selected Worker process") from error
         direct_result, direct_failure = await dispatch_complete_plan(
             plans[0],
-            pool,
             monotonic_deadline=monotonic_deadline,
         )
         if direct_failure is None:

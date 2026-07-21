@@ -15,7 +15,6 @@ import grpc
 import torch
 
 from expertkit_transport.batches import WorkerBatch
-from expertkit_transport.buffers.base import OutputBufferProvider, PreparedOutput
 from expertkit_transport.errors import TransportError, TransportErrorCode
 from expertkit_transport.transports.base import WorkerTransport
 from expertkit_transport.transports.grpc.codec import (
@@ -24,8 +23,8 @@ from expertkit_transport.transports.grpc.codec import (
 )
 from expertkit_transport.transports.grpc.spec import GrpcBatchSpec
 from expertkit_transport.transports.shm.buffers import (
-    ShmOutputBufferProvider,
-    ShmPreparedOutput,
+    ShmTransferBufferPool,
+    ShmTransferBuffers,
 )
 from expertkit_transport.transports.shm.codec import (
     SHM_CONTROL_MESSAGE_BYTES,
@@ -108,19 +107,17 @@ def _selected_hidden_states(batch: WorkerBatch) -> torch.Tensor:
 def _copy_request_to_slot(
     batch: WorkerBatch,
     spec: GrpcBatchSpec,
-    prepared: ShmPreparedOutput,
+    buffers: ShmTransferBuffers,
     stream: torch.cuda.Stream | None,
 ) -> int:
     _validate_batch_against_spec(batch, spec)
-    slot = prepared.slot
-    if slot is None:
-        raise RuntimeError("shared-memory output slot is released")
-    if prepared.generation >= _UINT64_MAX:
+    slot = buffers.slot
+    if buffers.generation >= _UINT64_MAX:
         raise RuntimeError("shared-memory slot generation is exhausted")
-    if prepared.receive_recorded:
-        assert prepared.receive_event is not None
-        prepared.receive_event.synchronize()
-    prepared.generation += 1
+    if buffers.receive_recorded:
+        assert buffers.receive_event is not None
+        buffers.receive_event.synchronize()
+    buffers.generation += 1
     token_count = batch.token_count
     with torch.inference_mode():
         hidden_states = _selected_hidden_states(batch)
@@ -129,7 +126,7 @@ def _copy_request_to_slot(
             slot.expert_ids[:token_count].copy_(batch.expert_ids)
             slot.routing_weights[:token_count].copy_(batch.routing_weights)
         else:
-            assert prepared.request_copy_event is not None
+            assert buffers.request_copy_event is not None
             with torch.cuda.stream(stream):
                 slot.hidden_states[:token_count].copy_(hidden_states, non_blocking=True)
                 slot.expert_ids[:token_count].copy_(batch.expert_ids, non_blocking=True)
@@ -137,33 +134,45 @@ def _copy_request_to_slot(
                     batch.routing_weights,
                     non_blocking=True,
                 )
-                prepared.request_copy_event.record(stream)
-                prepared.request_copy_recorded = True
-            prepared.request_copy_event.synchronize()
-    return prepared.generation
+                buffers.request_copy_event.record(stream)
+                buffers.request_copy_recorded = True
+            buffers.request_copy_event.synchronize()
+    return buffers.generation
 
 
 def _copy_slot_to_output(
     token_count: int,
-    provider: ShmOutputBufferProvider,
-    prepared: ShmPreparedOutput,
+    buffers: ShmTransferBuffers,
+    output: torch.Tensor,
     stream: torch.cuda.Stream | None,
 ) -> None:
-    slot = prepared.slot
-    if slot is None:
-        raise RuntimeError("shared-memory output slot is released")
+    slot = buffers.slot
     source = slot.partial_output[:token_count]
     if stream is None:
-        provider.before_receive(prepared)
-        prepared.tensor[:token_count].copy_(source)
+        output[:token_count].copy_(source)
         return
 
-    assert prepared.receive_event is not None
+    assert buffers.receive_event is not None
     with torch.cuda.stream(stream):
-        provider.before_receive(prepared)
-        prepared.tensor[:token_count].copy_(source, non_blocking=True)
-        prepared.receive_event.record(stream)
-        prepared.receive_recorded = True
+        output[:token_count].copy_(source, non_blocking=True)
+        buffers.receive_event.record(stream)
+        buffers.receive_recorded = True
+
+
+def _validate_output(
+    output: torch.Tensor,
+    batch: WorkerBatch,
+    spec: GrpcBatchSpec,
+    device: torch.device,
+) -> None:
+    if output.shape != (batch.token_count, spec.hidden_dim):
+        raise ValueError("shared-memory output must have shape [token_count, hidden_dim]")
+    if output.dtype != spec.dtype:
+        raise ValueError("shared-memory output dtype does not match the endpoint")
+    if output.device != device or output.device != batch.hidden_states.device:
+        raise ValueError("shared-memory output and Worker batch must use the configured device")
+    if not output.is_contiguous():
+        raise ValueError("shared-memory output must be contiguous")
 
 
 class ShmWorkerTransport(WorkerTransport):
@@ -197,10 +206,11 @@ class ShmWorkerTransport(WorkerTransport):
 
         self._endpoint = endpoint
         self._spec = batch_spec
-        self._buffers = ShmOutputBufferProvider(
+        self._device = torch.device(device)
+        self._buffers = ShmTransferBufferPool(
             batch_spec,
-            slot_count=max_in_flight,
-            device=device,
+            capacity=max_in_flight,
+            device=self._device,
         )
         self._semaphore = asyncio.Semaphore(max_in_flight)
         self._executor = ThreadPoolExecutor(
@@ -215,12 +225,6 @@ class ShmWorkerTransport(WorkerTransport):
         self._active: set[asyncio.Task[object]] = set()
         self._closing = False
         self._close_task: asyncio.Task[None] | None = None
-
-    @property
-    def output_buffers(self) -> OutputBufferProvider:
-        """Return the shared-memory slot and Frontend output allocator."""
-
-        return self._buffers
 
     async def start(self) -> None:
         """Create the control channel and register this process's fixed slots."""
@@ -271,14 +275,14 @@ class ShmWorkerTransport(WorkerTransport):
             self._execute = execute_call
             self._close_session = close_call
 
-    async def submit(
+    async def execute(
         self,
         batch: WorkerBatch,
-        output: PreparedOutput,
+        output: torch.Tensor,
         *,
         monotonic_deadline: float,
     ) -> None:
-        """Fill one prepared output without serializing its Tensor payloads."""
+        """Fill a caller-owned Tensor while moving payloads through shared memory."""
 
         if self._channel is None or self._execute is None:
             raise RuntimeError("shared-memory Transport has not been started")
@@ -293,10 +297,11 @@ class ShmWorkerTransport(WorkerTransport):
             raise RuntimeError("shared-memory submission requires an asyncio Task")
         self._active.add(task)
         try:
-            await self._acquire(monotonic_deadline)
+            buffers = await self._acquire(monotonic_deadline)
             try:
-                await self._submit_acquired(batch, output, monotonic_deadline)
+                await self._execute_acquired(batch, output, buffers, monotonic_deadline)
             finally:
+                self._buffers.put(buffers)
                 self._semaphore.release()
         finally:
             self._active.discard(task)
@@ -346,14 +351,14 @@ class ShmWorkerTransport(WorkerTransport):
             if close_error is None:
                 close_error = error
         try:
-            self._buffers.request_close()
+            self._buffers.close()
         except BaseException as error:
             if close_error is None:
                 close_error = error
         if close_error is not None:
             raise close_error
 
-    async def _acquire(self, monotonic_deadline: float) -> None:
+    async def _acquire(self, monotonic_deadline: float) -> ShmTransferBuffers:
         remaining = monotonic_deadline - self._clock()
         if remaining <= 0:
             raise _deadline_error("deadline expired before shared-memory admission")
@@ -365,27 +370,27 @@ class ShmWorkerTransport(WorkerTransport):
                     await self._semaphore.acquire()
         except TimeoutError as error:
             raise _deadline_error("deadline expired before shared-memory admission") from error
+        try:
+            return self._buffers.take()
+        except BaseException:
+            self._semaphore.release()
+            raise
 
-    async def _submit_acquired(
+    async def _execute_acquired(
         self,
         batch: WorkerBatch,
-        output: PreparedOutput,
+        output: torch.Tensor,
+        buffers: ShmTransferBuffers,
         monotonic_deadline: float,
     ) -> None:
-        prepared = self._buffers.require_prepared(output)
-        if prepared.tensor.device != batch.hidden_states.device:
-            raise ValueError("shared-memory output and Worker batch must use the same device")
-        stream = (
-            torch.cuda.current_stream(prepared.tensor.device)
-            if prepared.tensor.device.type == "cuda"
-            else None
-        )
+        _validate_output(output, batch, self._spec, self._device)
+        stream = torch.cuda.current_stream(output.device) if output.device.type == "cuda" else None
         try:
             generation = await self._run_cpu(
                 _copy_request_to_slot,
                 batch,
                 self._spec,
-                prepared,
+                buffers,
                 stream,
             )
         except GrpcProtocolError as error:
@@ -394,8 +399,7 @@ class ShmWorkerTransport(WorkerTransport):
                 retryable=False,
                 diagnostic=str(error),
             ) from error
-        slot = prepared.slot
-        assert slot is not None
+        slot = buffers.slot
         remaining = monotonic_deadline - self._clock()
         if remaining <= 0:
             raise _deadline_error("deadline expired before shared-memory notification")
@@ -443,8 +447,8 @@ class ShmWorkerTransport(WorkerTransport):
             await self._run_cpu(
                 _copy_slot_to_output,
                 batch.token_count,
-                self._buffers,
-                prepared,
+                buffers,
+                output,
                 stream,
             )
         except GrpcProtocolError as error:

@@ -9,7 +9,6 @@ from collections.abc import Awaitable
 import pytest
 import torch
 from expertkit_transport.batches import WorkerBatch
-from expertkit_transport.buffers.base import OutputSpec
 from expertkit_transport.errors import TransportError, TransportErrorCode
 from expertkit_transport.transports.base import WorkerPositionSpec
 from expertkit_transport.transports.grpc import (
@@ -186,6 +185,7 @@ async def start_stack(
         f"127.0.0.1:{server.bound_port}",
         batch_spec(),
         max_in_flight=active + pending,
+        device="cpu",
     )
     await client.start()
     return server, client, execution
@@ -206,24 +206,23 @@ def test_execution_runs_backend_outside_event_loop_and_returns_output() -> None:
     async def scenario() -> None:
         backend = TestBackend()
         _server, client, execution = await start_stack(backend)
-        output = client.output_buffers.prepare(OutputSpec(4, 3, torch.float32, "cpu"))
+        output = torch.empty((2, 3), dtype=torch.float32)
         try:
             async with asyncio.timeout(2):
-                await client.submit(
+                await client.execute(
                     worker_batch(),
                     output,
                     monotonic_deadline=float("inf"),
                 )
 
             torch.testing.assert_close(
-                output.tensor[:2],
+                output,
                 torch.tensor([[3, 6, 9], [12, 15, 18]], dtype=torch.float32),
             )
             assert backend.thread_names[0].startswith("expertkit-worker-execution")
             assert execution.fixed_device_bytes == 160
             assert execution.fixed_host_staging_bytes == 0
         finally:
-            client.output_buffers.release(output)
             await close_stack(client, execution)
 
     run(scenario())
@@ -235,11 +234,11 @@ def test_execution_maps_ready_weight_failure_without_stopping_worker() -> None:
         backend.error = BackendWeightUnavailable((3,))
         metrics = RecordingMetrics()
         _server, client, execution = await start_stack(backend, metrics=metrics)
-        output = client.output_buffers.prepare(OutputSpec(4, 3, torch.float32, "cpu"))
+        output = torch.empty((2, 3), dtype=torch.float32)
         try:
             with pytest.raises(TransportError) as caught:
                 async with asyncio.timeout(2):
-                    await client.submit(
+                    await client.execute(
                         worker_batch(),
                         output,
                         monotonic_deadline=float("inf"),
@@ -253,7 +252,6 @@ def test_execution_maps_ready_weight_failure_without_stopping_worker() -> None:
             assert metrics.finished[0][0] is False
             assert metrics.finished[0][1] >= 0
         finally:
-            client.output_buffers.release(output)
             await close_stack(client, execution)
 
     run(scenario())
@@ -263,12 +261,10 @@ def test_execution_limits_active_work_to_fixed_positions() -> None:
     async def scenario() -> None:
         backend = BlockingBackend(expected_active=2)
         server, client, execution = await start_stack(backend, active=2, pending=2)
-        outputs = [
-            client.output_buffers.prepare(OutputSpec(4, 3, torch.float32, "cpu")) for _ in range(4)
-        ]
+        outputs = [torch.empty((2, 3), dtype=torch.float32) for _ in range(4)]
         submissions = [
             asyncio.create_task(
-                client.submit(
+                client.execute(
                     worker_batch(),
                     output,
                     monotonic_deadline=float("inf"),
@@ -291,8 +287,6 @@ def test_execution_limits_active_work_to_fixed_positions() -> None:
         finally:
             backend.release.set()
             await asyncio.gather(*submissions, return_exceptions=True)
-            for output in outputs:
-                client.output_buffers.release(output)
             await close_stack(client, execution)
 
     run(scenario())
@@ -302,10 +296,10 @@ def test_cancelled_response_does_not_cancel_active_computation() -> None:
     async def scenario() -> None:
         backend = BlockingBackend(expected_active=1)
         server, client, execution = await start_stack(backend)
-        first_output = client.output_buffers.prepare(OutputSpec(4, 3, torch.float32, "cpu"))
-        second_output = client.output_buffers.prepare(OutputSpec(4, 3, torch.float32, "cpu"))
+        first_output = torch.empty((2, 3), dtype=torch.float32)
+        second_output = torch.empty((2, 3), dtype=torch.float32)
         first = asyncio.create_task(
-            client.submit(
+            client.execute(
                 worker_batch(),
                 first_output,
                 monotonic_deadline=float("inf"),
@@ -320,14 +314,14 @@ def test_cancelled_response_does_not_cancel_active_computation() -> None:
             backend.release.set()
             async with asyncio.timeout(2):
                 await server.wait_all_idle(monotonic_deadline=float("inf"))
-                await client.submit(
+                await client.execute(
                     worker_batch(),
                     second_output,
                     monotonic_deadline=float("inf"),
                 )
 
             torch.testing.assert_close(
-                second_output.tensor[:2],
+                second_output,
                 torch.tensor([[3, 6, 9], [12, 15, 18]], dtype=torch.float32),
             )
             assert server.active_count == 0
@@ -335,8 +329,6 @@ def test_cancelled_response_does_not_cancel_active_computation() -> None:
         finally:
             backend.release.set()
             await asyncio.gather(first, return_exceptions=True)
-            client.output_buffers.release(first_output)
-            client.output_buffers.release(second_output)
             await close_stack(client, execution)
 
     run(scenario())
@@ -347,11 +339,11 @@ def test_fatal_backend_error_stops_execution() -> None:
         backend = TestBackend()
         backend.error = BackendFatalError(BackendFatalReason.DEVICE_OOM, "device exhausted")
         _server, client, execution = await start_stack(backend)
-        output = client.output_buffers.prepare(OutputSpec(4, 3, torch.float32, "cpu"))
+        output = torch.empty((2, 3), dtype=torch.float32)
         try:
             with pytest.raises(TransportError) as caught:
                 async with asyncio.timeout(2):
-                    await client.submit(
+                    await client.execute(
                         worker_batch(),
                         output,
                         monotonic_deadline=float("inf"),
@@ -363,7 +355,6 @@ def test_fatal_backend_error_stops_execution() -> None:
             assert caught.value.code is TransportErrorCode.UNAVAILABLE
             assert fatal.value.reason is BackendFatalReason.DEVICE_OOM
         finally:
-            client.output_buffers.release(output)
             await close_stack(client, execution)
 
     run(scenario())

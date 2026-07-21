@@ -9,7 +9,6 @@ from dataclasses import dataclass
 import torch
 
 from expertkit_transport.batches import WorkerBatch
-from expertkit_transport.buffers.base import OutputBufferProvider, PreparedOutput
 from expertkit_transport.errors import TransportError
 from expertkit_transport.tracing import TraceContext
 
@@ -17,24 +16,19 @@ from expertkit_transport.tracing import TraceContext
 class WorkerTransport(ABC):
     """Submit Worker batches to one remote Worker."""
 
-    @property
-    @abstractmethod
-    def output_buffers(self) -> OutputBufferProvider:
-        """Return hooks for preparing output buffers for this connection."""
-
     @abstractmethod
     async def start(self) -> None:
         """Create Transport resources on the current event loop."""
 
     @abstractmethod
-    async def submit(
+    async def execute(
         self,
         batch: WorkerBatch,
-        output: PreparedOutput,
+        output: torch.Tensor,
         *,
         monotonic_deadline: float,
     ) -> None:
-        """Fill one prepared output or raise a classified Transport error."""
+        """Fill a caller-owned output Tensor or raise a Transport error."""
 
     @abstractmethod
     async def close(self) -> None:

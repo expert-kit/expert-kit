@@ -10,7 +10,6 @@ import pytest
 import torch
 
 from expertkit_transport.batches import WorkerBatch
-from expertkit_transport.buffers.base import OutputSpec
 from expertkit_transport.errors import TransportError, TransportErrorCode
 from expertkit_transport.transports.grpc import (
     GrpcBatchSpec,
@@ -75,8 +74,9 @@ async def raw_server(handler: RawHandler):
         await server.stop(None)
 
 
-def prepare_output(client: GrpcWorkerTransport):
-    return client.output_buffers.prepare(OutputSpec(4, 3, torch.float16, "cpu"))
+def prepare_output(client: GrpcWorkerTransport) -> torch.Tensor:
+    del client
+    return torch.empty((2, 3), dtype=torch.float16)
 
 
 def run(coroutine: Awaitable[None]) -> None:
@@ -93,23 +93,22 @@ def test_client_compacts_request_and_fills_preallocated_output() -> None:
             return encode_success_response(batch.hidden_states * 2, batch_spec())
 
         async with raw_server(execute) as endpoint:
-            client = GrpcWorkerTransport(endpoint, batch_spec(), max_in_flight=2)
+            client = GrpcWorkerTransport(endpoint, batch_spec(), max_in_flight=2, device="cpu")
             await client.start()
             output = prepare_output(client)
-            await client.submit(
+            await client.execute(
                 worker_batch(),
                 output,
                 monotonic_deadline=float("inf"),
             )
 
             torch.testing.assert_close(
-                output.tensor[:2],
+                output,
                 torch.tensor([[14.0, 16.0, 18.0], [2.0, 4.0, 6.0]], dtype=torch.float16),
             )
             assert len(received) == 1
             assert received[0].token_indices is None
             assert received[0].expert_ids.tolist() == [[1, -1], [0, 3]]
-            client.output_buffers.release(output)
             await client.close()
 
     run(scenario())
@@ -127,12 +126,12 @@ def test_client_maps_structured_computation_error() -> None:
             return encode_error_response(busy, batch_spec())
 
         async with raw_server(execute) as endpoint:
-            client = GrpcWorkerTransport(endpoint, batch_spec(), max_in_flight=1)
+            client = GrpcWorkerTransport(endpoint, batch_spec(), max_in_flight=1, device="cpu")
             await client.start()
             output = prepare_output(client)
 
             with pytest.raises(TransportError) as caught:
-                await client.submit(
+                await client.execute(
                     worker_batch(),
                     output,
                     monotonic_deadline=float("inf"),
@@ -141,7 +140,6 @@ def test_client_maps_structured_computation_error() -> None:
             assert caught.value.code is TransportErrorCode.BUSY
             assert caught.value.retryable is True
             assert caught.value.diagnostic == "waiting area is full"
-            client.output_buffers.release(output)
             await client.close()
 
     run(scenario())
@@ -157,7 +155,7 @@ def test_client_rejects_endpoint_shape_mismatch_before_rpc() -> None:
             raise AssertionError("invalid local batch must not reach the Worker")
 
         async with raw_server(execute) as endpoint:
-            client = GrpcWorkerTransport(endpoint, batch_spec(), max_in_flight=1)
+            client = GrpcWorkerTransport(endpoint, batch_spec(), max_in_flight=1, device="cpu")
             await client.start()
             output = prepare_output(client)
             source = worker_batch()
@@ -173,7 +171,7 @@ def test_client_rejects_endpoint_shape_mismatch_before_rpc() -> None:
             )
 
             with pytest.raises(TransportError) as caught:
-                await client.submit(
+                await client.execute(
                     wrong_instance,
                     output,
                     monotonic_deadline=float("inf"),
@@ -182,7 +180,6 @@ def test_client_rejects_endpoint_shape_mismatch_before_rpc() -> None:
             assert caught.value.code is TransportErrorCode.INVALID_REQUEST
             assert caught.value.retryable is False
             assert calls == 0
-            client.output_buffers.release(output)
             await client.close()
 
     run(scenario())
@@ -208,12 +205,12 @@ def test_client_maps_native_grpc_status(
             raise AssertionError("abort must terminate the handler")
 
         async with raw_server(execute) as endpoint:
-            client = GrpcWorkerTransport(endpoint, batch_spec(), max_in_flight=1)
+            client = GrpcWorkerTransport(endpoint, batch_spec(), max_in_flight=1, device="cpu")
             await client.start()
             output = prepare_output(client)
 
             with pytest.raises(TransportError) as caught:
-                await client.submit(
+                await client.execute(
                     worker_batch(),
                     output,
                     monotonic_deadline=float("inf"),
@@ -221,7 +218,6 @@ def test_client_maps_native_grpc_status(
 
             assert caught.value.code is expected_code
             assert caught.value.retryable is retryable
-            client.output_buffers.release(output)
             await client.close()
 
     run(scenario())
@@ -243,12 +239,12 @@ def test_client_bounds_calls_before_cpu_encoding_and_rpc() -> None:
             return encode_success_response(batch.hidden_states, batch_spec())
 
         async with raw_server(execute) as endpoint:
-            client = GrpcWorkerTransport(endpoint, batch_spec(), max_in_flight=2)
+            client = GrpcWorkerTransport(endpoint, batch_spec(), max_in_flight=2, device="cpu")
             await client.start()
             outputs = [prepare_output(client) for _ in range(3)]
             submissions = [
                 asyncio.create_task(
-                    client.submit(
+                    client.execute(
                         worker_batch(),
                         output,
                         monotonic_deadline=float("inf"),
@@ -263,8 +259,6 @@ def test_client_bounds_calls_before_cpu_encoding_and_rpc() -> None:
             gate.set()
             await asyncio.gather(*submissions)
             assert calls == 3
-            for output in outputs:
-                client.output_buffers.release(output)
             await client.close()
 
     run(scenario())
@@ -280,11 +274,11 @@ def test_client_uses_remaining_deadline_for_native_rpc() -> None:
             raise AssertionError("deadline must cancel the handler")
 
         async with raw_server(execute) as endpoint:
-            client = GrpcWorkerTransport(endpoint, batch_spec(), max_in_flight=1)
+            client = GrpcWorkerTransport(endpoint, batch_spec(), max_in_flight=1, device="cpu")
             await client.start()
             output = prepare_output(client)
             submission = asyncio.create_task(
-                client.submit(
+                client.execute(
                     worker_batch(),
                     output,
                     monotonic_deadline=time.monotonic() + 0.2,
@@ -297,7 +291,6 @@ def test_client_uses_remaining_deadline_for_native_rpc() -> None:
                 await submission
             assert caught.value.code is TransportErrorCode.DEADLINE_EXCEEDED
             assert caught.value.retryable is False
-            client.output_buffers.release(output)
             await client.close()
 
     run(scenario())
@@ -319,11 +312,11 @@ def test_client_cancellation_waits_for_adapter_cleanup_and_allows_reuse() -> Non
             return encode_success_response(batch.hidden_states, batch_spec())
 
         async with raw_server(execute) as endpoint:
-            client = GrpcWorkerTransport(endpoint, batch_spec(), max_in_flight=1)
+            client = GrpcWorkerTransport(endpoint, batch_spec(), max_in_flight=1, device="cpu")
             await client.start()
             output = prepare_output(client)
             submission = asyncio.create_task(
-                client.submit(
+                client.execute(
                     worker_batch(),
                     output,
                     monotonic_deadline=float("inf"),
@@ -335,13 +328,12 @@ def test_client_cancellation_waits_for_adapter_cleanup_and_allows_reuse() -> Non
             with pytest.raises(asyncio.CancelledError):
                 await submission
             first_gate.set()
-            await client.submit(
+            await client.execute(
                 worker_batch(),
                 output,
                 monotonic_deadline=float("inf"),
             )
             assert call_count == 2
-            client.output_buffers.release(output)
             await client.close()
 
     run(scenario())
@@ -353,19 +345,18 @@ def test_client_rejects_malformed_success_response() -> None:
             return b"\xff"
 
         async with raw_server(execute) as endpoint:
-            client = GrpcWorkerTransport(endpoint, batch_spec(), max_in_flight=1)
+            client = GrpcWorkerTransport(endpoint, batch_spec(), max_in_flight=1, device="cpu")
             await client.start()
             output = prepare_output(client)
 
             with pytest.raises(TransportError) as caught:
-                await client.submit(
+                await client.execute(
                     worker_batch(),
                     output,
                     monotonic_deadline=float("inf"),
                 )
             assert caught.value.code is TransportErrorCode.PROTOCOL
             assert caught.value.retryable is False
-            client.output_buffers.release(output)
             await client.close()
 
     run(scenario())
@@ -378,20 +369,19 @@ def test_client_close_is_idempotent_and_stops_new_submissions() -> None:
             return encode_success_response(batch.hidden_states, batch_spec())
 
         async with raw_server(execute) as endpoint:
-            client = GrpcWorkerTransport(endpoint, batch_spec(), max_in_flight=1)
+            client = GrpcWorkerTransport(endpoint, batch_spec(), max_in_flight=1, device="cpu")
             await client.start()
             output = prepare_output(client)
             await client.close()
             await client.close()
 
             with pytest.raises(TransportError) as caught:
-                await client.submit(
+                await client.execute(
                     worker_batch(),
                     output,
                     monotonic_deadline=float("inf"),
                 )
             assert caught.value.code is TransportErrorCode.UNAVAILABLE
             assert caught.value.retryable is True
-            client.output_buffers.release(output)
 
     run(scenario())

@@ -9,8 +9,7 @@ import torch
 
 import expertkit_transport.routing.execute as execute_module
 from expertkit_transport.batches import RoutedLayerBatch, WorkerBatch
-from expertkit_transport.buffers import OutputPool, TorchOutputBufferProvider
-from expertkit_transport.buffers.base import OutputBufferProvider, OutputSpec, PreparedOutput
+from expertkit_transport.buffers import OutputPool
 from expertkit_transport.errors import TransportError, TransportErrorCode
 from expertkit_transport.routing import (
     RoundRobinSelector,
@@ -27,19 +26,14 @@ class ScriptedTransport(WorkerTransport):
     def __init__(self, outcomes: list[float | TransportError]) -> None:
         self.outcomes = outcomes
         self.calls: list[WorkerBatch] = []
-        self._buffers = TorchOutputBufferProvider()
-
-    @property
-    def output_buffers(self) -> OutputBufferProvider:
-        return self._buffers
 
     async def start(self) -> None:
         return None
 
-    async def submit(
+    async def execute(
         self,
         batch: WorkerBatch,
-        output: PreparedOutput,
+        output: torch.Tensor,
         *,
         monotonic_deadline: float,
     ) -> None:
@@ -47,8 +41,7 @@ class ScriptedTransport(WorkerTransport):
         outcome = self.outcomes.pop(0)
         if isinstance(outcome, TransportError):
             raise outcome
-        self._buffers.before_receive(output)
-        output.tensor[: batch.token_count].fill_(outcome)
+        output.fill_(outcome)
 
     async def close(self) -> None:
         return None
@@ -58,19 +51,14 @@ class BlockingTransport(WorkerTransport):
     def __init__(self) -> None:
         self.started = asyncio.Event()
         self.gate = asyncio.Event()
-        self._buffers = TorchOutputBufferProvider()
-
-    @property
-    def output_buffers(self) -> OutputBufferProvider:
-        return self._buffers
 
     async def start(self) -> None:
         return None
 
-    async def submit(
+    async def execute(
         self,
         batch: WorkerBatch,
-        output: PreparedOutput,
+        output: torch.Tensor,
         *,
         monotonic_deadline: float,
     ) -> None:
@@ -162,11 +150,12 @@ def pools_for(
     *,
     clock: Callable[[], float] = time.monotonic,
 ) -> dict[WorkerIdentity, OutputPool]:
-    spec = OutputSpec(8, 4, torch.float16, "cpu")
     return {
         worker.identity: OutputPool(
-            worker.transport.output_buffers,
-            spec,
+            max_batch_tokens=8,
+            hidden_dim=4,
+            dtype=torch.float16,
+            device="cpu",
             capacity=worker.max_in_flight,
             clock=clock,
         )

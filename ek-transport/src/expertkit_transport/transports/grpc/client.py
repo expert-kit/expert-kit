@@ -15,12 +15,11 @@ import grpc
 import torch
 
 from expertkit_transport.batches import WorkerBatch
-from expertkit_transport.buffers.base import OutputBufferProvider, PreparedOutput
 from expertkit_transport.errors import TransportError, TransportErrorCode
 from expertkit_transport.transports.base import WorkerTransport
 from expertkit_transport.transports.grpc.buffers import (
-    GrpcOutputBufferProvider,
-    GrpcPreparedOutput,
+    GrpcTransferBufferPool,
+    GrpcTransferBuffers,
 )
 from expertkit_transport.transports.grpc.codec import (
     GrpcProtocolError,
@@ -100,7 +99,7 @@ def _selected_hidden_states(batch: WorkerBatch) -> torch.Tensor:
 def _encode_with_staging(
     batch: WorkerBatch,
     spec: GrpcBatchSpec,
-    prepared: GrpcPreparedOutput,
+    buffers: GrpcTransferBuffers,
     stream: torch.cuda.Stream | None,
 ) -> bytes:
     _validate_batch_against_spec(batch, spec)
@@ -108,35 +107,35 @@ def _encode_with_staging(
     with torch.inference_mode():
         if stream is None:
             hidden_states = _selected_hidden_states(batch)
-            prepared.host_hidden_states[:token_count].copy_(hidden_states)
-            prepared.host_expert_ids[:token_count].copy_(batch.expert_ids)
-            prepared.host_routing_weights[:token_count].copy_(batch.routing_weights)
+            buffers.host_hidden_states[:token_count].copy_(hidden_states)
+            buffers.host_expert_ids[:token_count].copy_(batch.expert_ids)
+            buffers.host_routing_weights[:token_count].copy_(batch.routing_weights)
         else:
-            assert prepared.request_copy_event is not None
+            assert buffers.request_copy_event is not None
             with torch.cuda.stream(stream):
                 hidden_states = _selected_hidden_states(batch)
-                prepared.host_hidden_states[:token_count].copy_(
+                buffers.host_hidden_states[:token_count].copy_(
                     hidden_states,
                     non_blocking=True,
                 )
-                prepared.host_expert_ids[:token_count].copy_(
+                buffers.host_expert_ids[:token_count].copy_(
                     batch.expert_ids,
                     non_blocking=True,
                 )
-                prepared.host_routing_weights[:token_count].copy_(
+                buffers.host_routing_weights[:token_count].copy_(
                     batch.routing_weights,
                     non_blocking=True,
                 )
-                prepared.request_copy_event.record(stream)
-                prepared.request_copy_recorded = True
-            prepared.request_copy_event.synchronize()
+                buffers.request_copy_event.record(stream)
+                buffers.request_copy_recorded = True
+            buffers.request_copy_event.synchronize()
 
     return _serialize_host_request(
         batch,
         spec,
-        prepared.host_hidden_states[:token_count],
-        prepared.host_expert_ids[:token_count],
-        prepared.host_routing_weights[:token_count],
+        buffers.host_hidden_states[:token_count],
+        buffers.host_expert_ids[:token_count],
+        buffers.host_routing_weights[:token_count],
     )
 
 
@@ -144,28 +143,43 @@ def _decode_into_output(
     payload: bytes,
     token_count: int,
     spec: GrpcBatchSpec,
-    provider: GrpcOutputBufferProvider,
-    prepared: GrpcPreparedOutput,
+    buffers: GrpcTransferBuffers,
+    output: torch.Tensor,
     stream: torch.cuda.Stream | None,
 ) -> None:
     partial_output = decode_response(payload, token_count, spec)
     if stream is None:
-        provider.before_receive(prepared)
-        prepared.tensor[:token_count].copy_(partial_output)
+        output[:token_count].copy_(partial_output)
         return
 
-    assert prepared.receive_event is not None
-    if prepared.receive_recorded:
-        prepared.receive_event.synchronize()
-    prepared.host_partial_output[:token_count].copy_(partial_output)
+    assert buffers.receive_event is not None
+    assert buffers.host_partial_output is not None
+    if buffers.receive_recorded:
+        buffers.receive_event.synchronize()
+    buffers.host_partial_output[:token_count].copy_(partial_output)
     with torch.cuda.stream(stream):
-        provider.before_receive(prepared)
-        prepared.tensor[:token_count].copy_(
-            prepared.host_partial_output[:token_count],
+        output[:token_count].copy_(
+            buffers.host_partial_output[:token_count],
             non_blocking=True,
         )
-        prepared.receive_event.record(stream)
-        prepared.receive_recorded = True
+        buffers.receive_event.record(stream)
+        buffers.receive_recorded = True
+
+
+def _validate_output(
+    output: torch.Tensor,
+    batch: WorkerBatch,
+    spec: GrpcBatchSpec,
+    device: torch.device,
+) -> None:
+    if output.shape != (batch.token_count, spec.hidden_dim):
+        raise ValueError("gRPC output must have shape [token_count, hidden_dim]")
+    if output.dtype != spec.dtype:
+        raise ValueError("gRPC output dtype does not match the endpoint")
+    if output.device != device or output.device != batch.hidden_states.device:
+        raise ValueError("gRPC output and Worker batch must use the configured device")
+    if not output.is_contiguous():
+        raise ValueError("gRPC output must be contiguous")
 
 
 class GrpcWorkerTransport(WorkerTransport):
@@ -177,6 +191,7 @@ class GrpcWorkerTransport(WorkerTransport):
         batch_spec: GrpcBatchSpec,
         *,
         max_in_flight: int,
+        device: torch.device | str,
         cpu_workers: int | None = None,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
@@ -196,8 +211,13 @@ class GrpcWorkerTransport(WorkerTransport):
 
         self._endpoint = endpoint
         self._spec = batch_spec
+        self._device = torch.device(device)
         self._limits = calculate_message_limits(batch_spec)
-        self._buffers = GrpcOutputBufferProvider(batch_spec)
+        self._buffers = GrpcTransferBufferPool(
+            batch_spec,
+            device=self._device,
+            capacity=max_in_flight,
+        )
         self._semaphore = asyncio.Semaphore(max_in_flight)
         self._executor = ThreadPoolExecutor(
             max_workers=resolved_cpu_workers,
@@ -210,12 +230,6 @@ class GrpcWorkerTransport(WorkerTransport):
         self._active: set[asyncio.Task[object]] = set()
         self._closing = False
         self._close_task: asyncio.Task[None] | None = None
-
-    @property
-    def output_buffers(self) -> OutputBufferProvider:
-        """Return the gRPC output and Host-staging allocator."""
-
-        return self._buffers
 
     async def start(self) -> None:
         """Create the reusable plaintext `grpc.aio` channel."""
@@ -236,14 +250,14 @@ class GrpcWorkerTransport(WorkerTransport):
                 response_deserializer=_identity,
             )
 
-    async def submit(
+    async def execute(
         self,
         batch: WorkerBatch,
-        output: PreparedOutput,
+        output: torch.Tensor,
         *,
         monotonic_deadline: float,
     ) -> None:
-        """Fill one prepared output without running large copies on the event loop."""
+        """Fill a caller-owned Tensor without blocking the asyncio event loop."""
 
         if self._channel is None or self._execute is None:
             raise RuntimeError("gRPC Transport has not been started")
@@ -258,7 +272,7 @@ class GrpcWorkerTransport(WorkerTransport):
             raise RuntimeError("gRPC submission requires an asyncio Task")
         self._active.add(task)
         try:
-            await self._acquire(monotonic_deadline)
+            buffers = await self._acquire(monotonic_deadline)
             try:
                 if self._closing:
                     raise TransportError(
@@ -266,8 +280,9 @@ class GrpcWorkerTransport(WorkerTransport):
                         retryable=True,
                         diagnostic="gRPC Transport is closing",
                     )
-                await self._submit_acquired(batch, output, monotonic_deadline)
+                await self._execute_acquired(batch, output, buffers, monotonic_deadline)
             finally:
+                self._buffers.put(buffers)
                 self._semaphore.release()
         finally:
             self._active.discard(task)
@@ -292,8 +307,9 @@ class GrpcWorkerTransport(WorkerTransport):
             None,
             partial(self._executor.shutdown, wait=True, cancel_futures=True),
         )
+        self._buffers.close()
 
-    async def _acquire(self, monotonic_deadline: float) -> None:
+    async def _acquire(self, monotonic_deadline: float) -> GrpcTransferBuffers:
         remaining = monotonic_deadline - self._clock()
         if remaining <= 0:
             raise _deadline_error("deadline expired before gRPC admission")
@@ -305,27 +321,27 @@ class GrpcWorkerTransport(WorkerTransport):
                     await self._semaphore.acquire()
         except TimeoutError as error:
             raise _deadline_error("deadline expired before gRPC admission") from error
+        try:
+            return self._buffers.take()
+        except BaseException:
+            self._semaphore.release()
+            raise
 
-    async def _submit_acquired(
+    async def _execute_acquired(
         self,
         batch: WorkerBatch,
-        output: PreparedOutput,
+        output: torch.Tensor,
+        buffers: GrpcTransferBuffers,
         monotonic_deadline: float,
     ) -> None:
-        prepared = self._buffers.require_prepared(output)
-        if prepared.tensor.device != batch.hidden_states.device:
-            raise ValueError("gRPC output and Worker batch must use the same device")
-        stream = (
-            torch.cuda.current_stream(prepared.tensor.device)
-            if prepared.tensor.device.type == "cuda"
-            else None
-        )
+        _validate_output(output, batch, self._spec, self._device)
+        stream = torch.cuda.current_stream(output.device) if output.device.type == "cuda" else None
         try:
             request = await self._run_cpu(
                 _encode_with_staging,
                 batch,
                 self._spec,
-                prepared,
+                buffers,
                 stream,
             )
         except GrpcProtocolError as error:
@@ -359,8 +375,8 @@ class GrpcWorkerTransport(WorkerTransport):
                 response,
                 batch.token_count,
                 self._spec,
-                self._buffers,
-                prepared,
+                buffers,
+                output,
                 stream,
             )
         except GrpcProtocolError as error:

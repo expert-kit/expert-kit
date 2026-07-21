@@ -8,7 +8,6 @@ import pytest
 import torch
 
 from expertkit_transport.batches import WorkerBatch
-from expertkit_transport.buffers.base import OutputSpec
 from expertkit_transport.errors import TransportError, TransportErrorCode
 from expertkit_transport.transports.base import WorkerPositionSpec
 from expertkit_transport.transports.grpc import GrpcBatchSpec, GrpcWorkerServer
@@ -63,8 +62,9 @@ async def start_pair() -> tuple[GrpcWorkerServer, ShmWorkerTransport]:
     return server, client
 
 
-def prepare(client: ShmWorkerTransport):
-    return client.output_buffers.prepare(OutputSpec(4, 3, torch.float32, "cpu"))
+def prepare(client: ShmWorkerTransport) -> torch.Tensor:
+    del client
+    return torch.empty((2, 3), dtype=torch.float32)
 
 
 def test_shared_memory_path_compacts_and_returns_without_tensor_payloads() -> None:
@@ -73,7 +73,7 @@ def test_shared_memory_path_compacts_and_returns_without_tensor_payloads() -> No
         output = prepare(client)
         try:
             submission = asyncio.create_task(
-                client.submit(batch(), output, monotonic_deadline=time.monotonic() + 5)
+                client.execute(batch(), output, monotonic_deadline=time.monotonic() + 5)
             )
             async with asyncio.timeout(2):
                 received = await server.take()
@@ -88,13 +88,12 @@ def test_shared_memory_path_compacts_and_returns_without_tensor_payloads() -> No
             await submission
 
             torch.testing.assert_close(
-                output.tensor[:2],
+                output,
                 torch.tensor([[14, 16, 18], [2, 4, 6]], dtype=torch.float32),
             )
             assert server.pending_retained_bytes == 0
         finally:
             await client.close()
-            client.output_buffers.release(output)
             await server.close()
 
     asyncio.run(scenario())
@@ -111,7 +110,7 @@ def test_worker_revalidates_routing_values_from_shared_memory() -> None:
         )
         try:
             with pytest.raises(TransportError) as caught:
-                await client.submit(
+                await client.execute(
                     invalid,
                     output,
                     monotonic_deadline=time.monotonic() + 5,
@@ -120,7 +119,6 @@ def test_worker_revalidates_routing_values_from_shared_memory() -> None:
             assert server.pending_count == 0
         finally:
             await client.close()
-            client.output_buffers.release(output)
             await server.close()
 
     asyncio.run(scenario())
@@ -132,7 +130,7 @@ def test_cancellation_waits_for_worker_release_before_slot_reuse() -> None:
         output = prepare(client)
         try:
             submission = asyncio.create_task(
-                client.submit(batch(), output, monotonic_deadline=time.monotonic() + 5)
+                client.execute(batch(), output, monotonic_deadline=time.monotonic() + 5)
             )
             received = await server.take()
             submission.cancel()
@@ -148,7 +146,7 @@ def test_cancellation_waits_for_worker_release_before_slot_reuse() -> None:
                 await submission
 
             retry = asyncio.create_task(
-                client.submit(batch(), output, monotonic_deadline=time.monotonic() + 5)
+                client.execute(batch(), output, monotonic_deadline=time.monotonic() + 5)
             )
             retried = await server.take()
             retry_destination = retried.output_destination
@@ -159,7 +157,6 @@ def test_cancellation_waits_for_worker_release_before_slot_reuse() -> None:
             await retry
         finally:
             await client.close()
-            client.output_buffers.release(output)
             await server.close()
 
     asyncio.run(scenario())

@@ -8,7 +8,6 @@ from dataclasses import dataclass
 import torch
 from expertkit_transport.batches import RoutedLayerBatch
 from expertkit_transport.buffers import OutputPool
-from expertkit_transport.buffers.base import OutputSpec
 from expertkit_transport.routing import (
     RoundRobinSelector,
     TopologySnapshot,
@@ -147,6 +146,7 @@ async def _start_worker(
         f"127.0.0.1:{server.bound_port}",
         _batch_spec(),
         max_in_flight=2,
+        device="cpu",
     )
     await transport.start()
     return _RunningWorker(
@@ -188,13 +188,10 @@ def test_two_workers_execute_and_aggregate_one_routed_layer() -> None:
             targets = tuple(worker.target for worker in workers)
             pools = {
                 target.identity: OutputPool(
-                    target.transport.output_buffers,
-                    OutputSpec(
-                        _MAX_BATCH_TOKENS,
-                        _HIDDEN_DIM,
-                        torch.float32,
-                        "cpu",
-                    ),
+                    max_batch_tokens=_MAX_BATCH_TOKENS,
+                    hidden_dim=_HIDDEN_DIM,
+                    dtype=torch.float32,
+                    device="cpu",
                     capacity=target.max_in_flight,
                 )
                 for target in targets
