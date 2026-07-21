@@ -53,6 +53,7 @@ Important settings:
   Startup rejects a budget larger than the device or current available memory.
 - `worker.max_batch_tokens` defaults to `4096`.
 - `worker.max_active_batches_per_device` defaults to `1`.
+- `worker.ggml.cpu_threads` is required when `worker.backend` is `ggml`.
 - `transport.max_pending_batches_per_device` defaults to the active-batch count.
 - `weight_manager.max_concurrent_loads` defaults to `64`.
 - The DRAM cache limit defaults to enough bytes for the model's complete expert
@@ -113,8 +114,9 @@ admission, finishes already accepted work, flushes state, and exits within
 
 ## Logging and observability
 
-The default service output is structured JSON through `structlog`. Use
-`logging.format: console` only for interactive development.
+The default console output is human-readable and matches the Rust services'
+`<LEVEL>(timestamp) message` layout. Set `logging.format: json` when a log
+collector requires structured JSON.
 
 Prometheus and OpenTelemetry require the optional dependencies:
 

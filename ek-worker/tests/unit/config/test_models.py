@@ -44,13 +44,25 @@ def _config(cache_path: Path, *, backend: str, device: str) -> dict[str, object]
 def test_ggml_requires_cpu_threads(tmp_path: Path) -> None:
     raw = _config(tmp_path, backend="ggml", device="cpu")
 
-    with pytest.raises(ValidationError, match="ggml configuration is required"):
+    with pytest.raises(ValidationError, match=r"worker\.ggml configuration is required"):
         WorkerConfig.model_validate(raw)
 
-    raw["ggml"] = {"cpu_threads": 8}
+    worker = raw["worker"]
+    assert isinstance(worker, dict)
+    worker["ggml"] = {"cpu_threads": 8}
     config = WorkerConfig.model_validate(raw)
-    assert config.ggml is not None
-    assert config.ggml.cpu_threads == 8
+    assert config.worker.ggml is not None
+    assert config.worker.ggml.cpu_threads == 8
+
+
+def test_non_ggml_backend_rejects_ggml_settings(tmp_path: Path) -> None:
+    raw = _config(tmp_path, backend="torch", device="cuda:0")
+    worker = raw["worker"]
+    assert isinstance(worker, dict)
+    worker["ggml"] = {"cpu_threads": 8}
+
+    with pytest.raises(ValidationError, match=r"valid only when worker\.backend is ggml"):
+        WorkerConfig.model_validate(raw)
 
 
 def test_fused_rejects_fp32(tmp_path: Path) -> None:

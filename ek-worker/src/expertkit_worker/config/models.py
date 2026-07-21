@@ -119,8 +119,14 @@ class ModelConfig(_StrictModel):
         return self
 
 
+class GgmlConfig(_StrictModel):
+    """Experimental CPU-only GGML backend settings."""
+
+    cpu_threads: int = Field(gt=0)
+
+
 class WorkerProcessConfig(_StrictModel):
-    """Identity, device, admission, and shutdown settings for one Worker process."""
+    """Identity, Backend, device, admission, and shutdown settings."""
 
     id: str = Field(min_length=1, pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
     backend: BackendName = BackendName.TORCH
@@ -129,10 +135,11 @@ class WorkerProcessConfig(_StrictModel):
     max_active_batches_per_device: int = Field(default=1, gt=0)
     device_memory_limit: PositiveByteSize
     shutdown_grace_secs: float = Field(default=30.0, gt=0)
+    ggml: GgmlConfig | None = None
 
     @model_validator(mode="after")
-    def validate_device(self) -> WorkerProcessConfig:
-        """Enforce the one-process, one-device Backend support matrix."""
+    def validate_backend(self) -> WorkerProcessConfig:
+        """Enforce device support and Backend-specific configuration."""
 
         is_cuda = re.fullmatch(r"cuda:\d+", self.device) is not None
         if self.backend is BackendName.GGML and self.device != "cpu":
@@ -141,6 +148,10 @@ class WorkerProcessConfig(_StrictModel):
             raise ValueError(
                 f"the MVP {self.backend.value} backend requires worker.device: cuda:<id>"
             )
+        if self.backend is BackendName.GGML and self.ggml is None:
+            raise ValueError("worker.ggml configuration is required when worker.backend is ggml")
+        if self.backend is not BackendName.GGML and self.ggml is not None:
+            raise ValueError("worker.ggml is valid only when worker.backend is ggml")
         return self
 
 
@@ -247,16 +258,10 @@ class ObservabilityConfig(_StrictModel):
 
 
 class LoggingConfig(_StrictModel):
-    """Process-wide structured logging settings."""
+    """Process-wide logging threshold and output format."""
 
     level: LogLevel = LogLevel.INFO
-    format: LogFormat = LogFormat.JSON
-
-
-class GgmlConfig(_StrictModel):
-    """Experimental CPU-only GGML backend settings."""
-
-    cpu_threads: int = Field(gt=0)
+    format: LogFormat = LogFormat.CONSOLE
 
 
 class WorkerConfig(_StrictModel):
@@ -269,7 +274,6 @@ class WorkerConfig(_StrictModel):
     weight_manager: WeightManagerConfig
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
     observability: ObservabilityConfig = Field(default_factory=ObservabilityConfig)
-    ggml: GgmlConfig | None = None
 
     @model_validator(mode="before")
     @classmethod
@@ -294,10 +298,6 @@ class WorkerConfig(_StrictModel):
     def validate_backend_combination(self) -> WorkerConfig:
         """Reject unused or incomplete Backend-specific configuration."""
 
-        if self.worker.backend is BackendName.GGML and self.ggml is None:
-            raise ValueError("ggml configuration is required when worker.backend is ggml")
-        if self.worker.backend is not BackendName.GGML and self.ggml is not None:
-            raise ValueError("ggml configuration is valid only when worker.backend is ggml")
         if self.worker.backend is BackendName.FUSED:
             supported = {ActivationDType.FP16, ActivationDType.BF16}
             if (

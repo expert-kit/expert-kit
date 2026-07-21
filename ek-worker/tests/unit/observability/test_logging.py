@@ -2,6 +2,7 @@
 
 import json
 import logging
+import re
 from io import StringIO
 
 import structlog
@@ -12,7 +13,7 @@ from expertkit_worker.observability import configure_logging
 
 def test_structlog_renders_stable_json_fields() -> None:
     output = StringIO()
-    configure_logging(LoggingConfig(), stream=output)
+    configure_logging(LoggingConfig(format="json"), stream=output)
 
     structlog.get_logger("worker.test").info(
         "worker_started",
@@ -44,7 +45,7 @@ def test_filters_debug_events_at_default_level() -> None:
 
 def test_standard_library_logs_use_the_same_renderer() -> None:
     output = StringIO()
-    configure_logging(LoggingConfig(), stream=output)
+    configure_logging(LoggingConfig(format="json"), stream=output)
 
     logging.getLogger("external.library").warning("temporary failure")
 
@@ -52,6 +53,25 @@ def test_standard_library_logs_use_the_same_renderer() -> None:
     assert event["event"] == "temporary failure"
     assert event["level"] == "warning"
     assert event["logger"] == "external.library"
+
+
+def test_default_console_renderer_matches_rust_service_layout() -> None:
+    output = StringIO()
+    configure_logging(LoggingConfig(), stream=output)
+
+    structlog.get_logger("worker.test").info(
+        "expert_loading_progress",
+        worker_id="worker-0",
+        ready_experts=64,
+        assigned_experts=128,
+    )
+
+    rendered = output.getvalue().strip()
+    assert re.fullmatch(
+        r"<INFO>\([^)]*Z\) Expert loading progress "
+        r"worker_id=worker-0 ready_experts=64 assigned_experts=128",
+        rendered,
+    )
 
 
 def test_reconfiguration_does_not_duplicate_handlers() -> None:

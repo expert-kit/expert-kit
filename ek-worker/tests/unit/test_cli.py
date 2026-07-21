@@ -8,7 +8,7 @@ from typing import Any
 import pytest
 
 from expertkit_worker import cli
-from expertkit_worker.config.models import LoggingConfig
+from expertkit_worker.config.models import BackendName, LoggingConfig
 
 
 class FakeApplication:
@@ -31,6 +31,15 @@ class FakeApplication:
 
 class FakeConfig:
     logging = LoggingConfig()
+    worker = type(
+        "FakeWorkerConfig",
+        (),
+        {
+            "id": "worker-0",
+            "backend": BackendName.TORCH,
+            "device": "cuda:0",
+        },
+    )()
 
 
 def test_main_loads_config_runs_application_and_removes_handlers(

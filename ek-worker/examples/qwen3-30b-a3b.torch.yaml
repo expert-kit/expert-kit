@@ -45,7 +45,7 @@ weight_manager:
 
 logging:
   level: INFO
-  format: json
+  format: console
 
 observability:
   prometheus:

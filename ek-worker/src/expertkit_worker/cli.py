@@ -53,6 +53,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 2
 
     configure_logging(config.logging)
+    context = structlog.contextvars.bind_contextvars(
+        service="worker",
+        worker_id=config.worker.id,
+        backend=config.worker.backend.value,
+        device=config.worker.device,
+    )
     try:
         asyncio.run(run_config(config))
     except KeyboardInterrupt:
@@ -60,4 +66,6 @@ def main(argv: Sequence[str] | None = None) -> int:
     except BaseException:
         logger.critical("worker_process_failed", exc_info=True)
         return 1
+    finally:
+        structlog.contextvars.reset_contextvars(**context)
     return 0

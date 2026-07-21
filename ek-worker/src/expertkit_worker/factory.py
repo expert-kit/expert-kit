@@ -146,14 +146,14 @@ def _create_backend(
     if config.worker.backend is BackendName.GGML:
         from expertkit_worker.backends.ggml import GgmlBackend
 
-        if config.ggml is None:
-            raise ValueError("ggml configuration is missing after validation")
+        if config.worker.ggml is None:
+            raise ValueError("worker.ggml configuration is missing after validation")
         return GgmlBackend(
             hidden_dim=config.model.hidden_dim,
             intermediate_dim=config.model.expert_intermediate_dim,
             top_k=config.model.top_k,
             dtype=dtype,
-            cpu_threads=config.ggml.cpu_threads,
+            cpu_threads=config.worker.ggml.cpu_threads,
             acquire_many=acquire_many,
         )
     try:

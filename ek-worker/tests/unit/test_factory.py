@@ -56,7 +56,7 @@ def _config(cache_path: Path, *, backend: str = "torch") -> WorkerConfig:
         },
     }
     if backend == "ggml":
-        document["ggml"] = {"cpu_threads": 2}
+        document["worker"]["ggml"] = {"cpu_threads": 2}
     return WorkerConfig.model_validate(document)
 
 

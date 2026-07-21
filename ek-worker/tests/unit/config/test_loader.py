@@ -58,7 +58,7 @@ def test_loads_valid_config_and_resolves_defaults(tmp_path: Path) -> None:
     assert config.weight_manager.disk_cache.writeback is True
     assert config.weight_manager.dram_cache.max_bytes is None
     assert config.logging.level.value == "INFO"
-    assert config.logging.format.value == "json"
+    assert config.logging.format.value == "console"
     assert config.observability.prometheus.enabled is False
     assert config.observability.tracing.enabled is False
 
