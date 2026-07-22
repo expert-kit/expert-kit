@@ -8,17 +8,22 @@ from pathlib import Path
 
 import pytest
 import torch
+from expertkit_transport.controller import ResolvedDefaultInstance
 
 from expertkit_worker.config import WorkerConfig
 from expertkit_worker.factory import build_worker_application
 from expertkit_worker.weights import DirectIOWeightDiskCache
 
 
-def _config(cache_path: Path, *, backend: str = "torch") -> WorkerConfig:
+def _config(
+    cache_path: Path,
+    *,
+    backend: str = "torch",
+    instance_id: int | None = 7,
+) -> WorkerConfig:
     worker_device = "cpu" if backend == "ggml" else "cuda:0"
     document: dict[str, object] = {
         "model": {
-            "instance_id": 7,
             "name": "fixture/model",
             "weight_version": "test",
             "num_layers": 2,
@@ -54,9 +59,23 @@ def _config(cache_path: Path, *, backend: str = "torch") -> WorkerConfig:
             "weight_server_endpoint": "http://127.0.0.1:50053",
         },
     }
+    if instance_id is not None:
+        document["model"]["instance_id"] = instance_id
     if backend == "ggml":
         document["worker"]["ggml"] = {"cpu_threads": 2}
     return WorkerConfig.model_validate(document)
+
+
+async def _resolve_instance(
+    endpoint: str,
+    *,
+    requested_instance_id: int | None,
+    timeout_seconds: float,
+) -> ResolvedDefaultInstance:
+    assert endpoint == "127.0.0.1:50050"
+    assert requested_instance_id in (None, 7)
+    assert timeout_seconds == 10
+    return ResolvedDefaultInstance(7, "fixture/model", "default")
 
 
 def test_factory_builds_and_closes_ggml_worker(tmp_path: Path) -> None:
@@ -66,7 +85,10 @@ def test_factory_builds_and_closes_ggml_worker(tmp_path: Path) -> None:
         pytest.skip("the GGML extra is not installed")
 
     async def scenario() -> None:
-        application = await build_worker_application(_config(tmp_path, backend="ggml"))
+        application = await build_worker_application(
+            _config(tmp_path, backend="ggml"),
+            instance_resolver=_resolve_instance,
+        )
         await application.close()
 
     asyncio.run(scenario())
@@ -76,7 +98,10 @@ def test_factory_builds_and_closes_ggml_worker(tmp_path: Path) -> None:
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
 def test_factory_builds_and_closes_fused_worker(tmp_path: Path) -> None:
     async def scenario() -> None:
-        application = await build_worker_application(_config(tmp_path, backend="fused"))
+        application = await build_worker_application(
+            _config(tmp_path, backend="fused"),
+            instance_resolver=_resolve_instance,
+        )
         await application.close()
 
     asyncio.run(scenario())
@@ -102,7 +127,10 @@ def test_factory_probes_direct_io_before_returning_application(
 
     async def scenario() -> None:
         with pytest.raises(OSError, match="direct I/O probe failed"):
-            await build_worker_application(_config(tmp_path))
+            await build_worker_application(
+                _config(tmp_path),
+                instance_resolver=_resolve_instance,
+            )
 
     asyncio.run(scenario())
     assert initialized is True
@@ -112,7 +140,42 @@ def test_factory_probes_direct_io_before_returning_application(
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
 def test_factory_builds_and_closes_torch_worker(tmp_path: Path) -> None:
     async def scenario() -> None:
-        application = await build_worker_application(_config(tmp_path))
+        application = await build_worker_application(
+            _config(tmp_path),
+            instance_resolver=_resolve_instance,
+        )
         await application.close()
 
     asyncio.run(scenario())
+
+
+def test_factory_resolves_an_omitted_instance_before_device_setup(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[int | None] = []
+
+    async def fail_resolution(
+        _endpoint: str,
+        *,
+        requested_instance_id: int | None,
+        timeout_seconds: float,
+    ) -> ResolvedDefaultInstance:
+        calls.append(requested_instance_id)
+        assert timeout_seconds == 10
+        raise RuntimeError("Controller resolution failed")
+
+    monkeypatch.setattr(
+        "expertkit_worker.factory.torch_dtype",
+        lambda _dtype: pytest.fail("device setup started before instance resolution"),
+    )
+
+    async def scenario() -> None:
+        with pytest.raises(RuntimeError, match="Controller resolution failed"):
+            await build_worker_application(
+                _config(tmp_path, instance_id=None),
+                instance_resolver=fail_resolution,
+            )
+
+    asyncio.run(scenario())
+    assert calls == [None]

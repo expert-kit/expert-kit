@@ -4,10 +4,14 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 import structlog
 import torch
+from expertkit_transport.controller import (
+    ResolvedDefaultInstance,
+    resolve_default_instance,
+)
 from expertkit_transport.transports.base import (
     BatchBufferConfig,
     WorkerBatchReceiver,
@@ -49,6 +53,16 @@ from expertkit_worker.weights.factory import (
 logger = structlog.get_logger(__name__)
 
 
+class _InstanceResolver(Protocol):
+    async def __call__(
+        self,
+        controller_endpoint: str,
+        *,
+        requested_instance_id: int | None,
+        timeout_seconds: float,
+    ) -> ResolvedDefaultInstance: ...
+
+
 def _memory_info(device: torch.device) -> tuple[int, int]:
     if device.type == "cuda":
         available, total = torch.cuda.mem_get_info(device)
@@ -66,8 +80,16 @@ def _memory_info(device: torch.device) -> tuple[int, int]:
     return int(available_pages * page_size), int(total_pages * page_size)
 
 
-async def build_worker_application(config: WorkerConfig) -> WorkerApplication:
+async def build_worker_application(
+    config: WorkerConfig,
+    *,
+    instance_resolver: _InstanceResolver = resolve_default_instance,
+) -> WorkerApplication:
     """Build the selected MVP Worker without starting network listeners.
+
+    Args:
+        instance_resolver: Startup-only Controller resolver. Tests may replace
+            it to avoid opening a control channel.
 
     Raises:
         RuntimeError: A selected Backend extra is absent or memory cannot be queried.
@@ -76,6 +98,12 @@ async def build_worker_application(config: WorkerConfig) -> WorkerApplication:
 
     if not isinstance(config, WorkerConfig):
         raise TypeError("config must be a WorkerConfig")
+    resolved_instance = await instance_resolver(
+        config.controller.endpoint,
+        requested_instance_id=config.model.instance_id,
+        timeout_seconds=config.controller.heartbeat_timeout_secs,
+    )
+    instance_id = resolved_instance.instance_id
     activation_dtype = torch_dtype(config.model.activation_dtype)
     weight_dtype = torch_dtype(config.model.weight_dtype)
     device = torch.device(config.worker.device)
@@ -100,7 +128,7 @@ async def build_worker_application(config: WorkerConfig) -> WorkerApplication:
             device=device,
         )
         endpoint_config = WorkerEndpointConfig(
-            instance_id=config.model.instance_id,
+            instance_id=instance_id,
             num_layers=config.model.num_layers,
             experts_per_layer=config.model.experts_per_layer,
             max_batch_tokens=config.worker.max_batch_tokens,
@@ -160,7 +188,7 @@ async def build_worker_application(config: WorkerConfig) -> WorkerApplication:
         execution = WorkerExecutor(
             receiver,
             backend,
-            instance_id=config.model.instance_id,
+            instance_id=instance_id,
             buffer_config=buffer_config,
             slot_count=config.worker.max_active_batches_per_device,
             metrics=metrics,
@@ -212,6 +240,7 @@ async def build_worker_application(config: WorkerConfig) -> WorkerApplication:
 
         control = create_controller_supervisor(
             config,
+            instance_id=instance_id,
             activation_dtype=activation_dtype,
             receiver=receiver,
             manager=manager,

@@ -21,6 +21,7 @@ from expertkit_worker.weights.manager import WeightManager
 def create_controller_supervisor(
     config: WorkerConfig,
     *,
+    instance_id: int,
     activation_dtype: torch.dtype,
     receiver: WorkerBatchReceiver,
     manager: WeightManager[object, object],
@@ -49,7 +50,7 @@ def create_controller_supervisor(
     registration = WorkerRegistration(
         worker_id=config.worker.id,
         start_id=start_id,
-        instance_id=config.model.instance_id,
+        instance_id=instance_id,
         computation_endpoint=computation_endpoint,
         peer_weight_endpoint=str(config.weight_manager.peer.advertise),
         backend=config.worker.backend.value,

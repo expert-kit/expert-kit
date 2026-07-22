@@ -12,6 +12,7 @@ from collections.abc import Callable
 import torch
 
 from expertkit_transport.batches import RoutedLayerBatch
+from expertkit_transport.controller.instance import resolve_default_instance
 from expertkit_transport.controller.topology import ControllerTopologyWatcher
 from expertkit_transport.errors import TransportError, TransportErrorCode
 from expertkit_transport.routing import RoundRobinSelector, execute_routed_layer
@@ -31,7 +32,7 @@ class RoutedMoEClient:
         self,
         controller_endpoint: str,
         *,
-        instance_id: int,
+        instance_id: int | None = None,
         num_layers: int,
         experts_per_layer: int,
         hidden_dim: int,
@@ -41,29 +42,41 @@ class RoutedMoEClient:
         same_worker_retry_delay_seconds: float = 0.001,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
+        if not controller_endpoint:
+            raise ValueError("controller_endpoint must not be empty")
+        for name, value in (
+            ("num_layers", num_layers),
+            ("experts_per_layer", experts_per_layer),
+            ("hidden_dim", hidden_dim),
+            ("top_k", top_k),
+        ):
+            if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+                raise ValueError(f"{name} must be a positive integer")
+        if top_k > experts_per_layer:
+            raise ValueError("top_k must not exceed experts_per_layer")
+        if dtype not in (torch.float16, torch.bfloat16, torch.float32):
+            raise ValueError("dtype must be FP16, BF16, or FP32")
         if (
             not math.isfinite(same_worker_retry_delay_seconds)
             or same_worker_retry_delay_seconds <= 0
         ):
             raise ValueError("same_worker_retry_delay_seconds must be finite and positive")
-        self._instance_id = instance_id
+        if instance_id is not None and (
+            isinstance(instance_id, bool) or not isinstance(instance_id, int) or instance_id <= 0
+        ):
+            raise ValueError("instance_id must be a positive integer or None")
+        self._controller_endpoint = controller_endpoint
+        self._requested_instance_id = instance_id
+        self._instance_id: int | None = None
+        self._num_layers = num_layers
+        self._experts_per_layer = experts_per_layer
         self._hidden_dim = hidden_dim
         self._top_k = top_k
         self._dtype = dtype
         self._device = torch.device(device)
         self._same_worker_retry_delay_seconds = same_worker_retry_delay_seconds
         self._clock = clock
-        self._topology = ControllerTopologyWatcher(
-            controller_endpoint,
-            instance_id=instance_id,
-            num_layers=num_layers,
-            experts_per_layer=experts_per_layer,
-            hidden_dim=hidden_dim,
-            top_k=top_k,
-            dtype=dtype,
-            device=self._device,
-            clock=clock,
-        )
+        self._topology: ControllerTopologyWatcher | None = None
         self._selector = RoundRobinSelector()
         self._started = False
         self._closed = False
@@ -73,7 +86,38 @@ class RoutedMoEClient:
 
         if self._closed:
             raise RuntimeError("Routed-MoE client is closed")
-        await self._topology.start(monotonic_deadline=monotonic_deadline)
+        if self._started:
+            return
+        remaining = monotonic_deadline - self._clock()
+        if remaining <= 0:
+            raise TransportError(
+                TransportErrorCode.DEADLINE_EXCEEDED,
+                retryable=False,
+                diagnostic="the Transport startup deadline already expired",
+            )
+        resolved = await resolve_default_instance(
+            self._controller_endpoint,
+            requested_instance_id=self._requested_instance_id,
+            timeout_seconds=remaining,
+        )
+        topology = ControllerTopologyWatcher(
+            self._controller_endpoint,
+            instance_id=resolved.instance_id,
+            num_layers=self._num_layers,
+            experts_per_layer=self._experts_per_layer,
+            hidden_dim=self._hidden_dim,
+            top_k=self._top_k,
+            dtype=self._dtype,
+            device=self._device,
+            clock=self._clock,
+        )
+        try:
+            await topology.start(monotonic_deadline=monotonic_deadline)
+        except BaseException:
+            await topology.close()
+            raise
+        self._instance_id = resolved.instance_id
+        self._topology = topology
         self._started = True
 
     async def execute(
@@ -100,7 +144,9 @@ class RoutedMoEClient:
             using the input activation dtype.
         """
 
-        if not self._started or self._closed:
+        topology = self._topology
+        instance_id = self._instance_id
+        if not self._started or self._closed or topology is None or instance_id is None:
             raise RuntimeError("Routed-MoE client is not running")
         if hidden_states.shape[1:] != (self._hidden_dim,):
             raise ValueError("hidden_states does not match the configured hidden dimension")
@@ -111,7 +157,7 @@ class RoutedMoEClient:
         if hidden_states.device != self._device:
             raise ValueError("hidden_states does not match the configured Frontend device")
         batch = RoutedLayerBatch(
-            instance_id=self._instance_id,
+            instance_id=instance_id,
             layer_id=layer_id,
             hidden_states=hidden_states,
             expert_ids=expert_ids,
@@ -120,9 +166,9 @@ class RoutedMoEClient:
         )
         return await execute_routed_layer(
             batch,
-            self._topology,
+            topology,
             self._selector,
-            self._topology.pools,
+            topology.pools,
             monotonic_deadline=monotonic_deadline,
             same_worker_retry_delay_seconds=self._same_worker_retry_delay_seconds,
             clock=self._clock,
@@ -134,7 +180,8 @@ class RoutedMoEClient:
         if self._closed:
             return
         self._closed = True
-        await self._topology.close()
+        if self._topology is not None:
+            await self._topology.close()
 
 
 class BlockingRoutedMoEClient:
@@ -151,7 +198,7 @@ class BlockingRoutedMoEClient:
         self,
         controller_endpoint: str,
         *,
-        instance_id: int,
+        instance_id: int | None = None,
         num_layers: int,
         experts_per_layer: int,
         hidden_dim: int,

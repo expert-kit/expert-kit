@@ -98,7 +98,7 @@ PositiveByteSize = Annotated[ByteSize, Field(gt=0)]
 class ModelConfig(_StrictModel):
     """Model metadata that fixes Worker-batch validation and expert layout."""
 
-    instance_id: int = Field(gt=0)
+    instance_id: int | None = Field(default=None, gt=0)
     name: str = Field(min_length=1)
     weight_version: str = Field(min_length=1)
     num_layers: int = Field(gt=0)

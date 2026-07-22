@@ -63,6 +63,18 @@ def test_loads_valid_config_and_resolves_defaults(tmp_path: Path) -> None:
     assert config.observability.tracing.enabled is False
 
 
+def test_instance_id_is_optional(tmp_path: Path) -> None:
+    config_path = tmp_path / "worker.yaml"
+    config_path.write_text(
+        _valid_config(tmp_path / "weights").replace("  instance_id: 7\n", ""),
+        encoding="utf-8",
+    )
+
+    config = load_config(config_path)
+
+    assert config.model.instance_id is None
+
+
 def test_repository_qwen_example_remains_valid() -> None:
     example_path = Path(__file__).parents[3] / "examples" / "qwen3-30b-a3b.torch.yaml"
 
