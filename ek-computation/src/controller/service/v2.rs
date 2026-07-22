@@ -12,6 +12,7 @@ use crate::{
     controller::{
         elastic::{progressive, recovery::recover_unique_experts},
         poller::request_immediate_poll,
+        service::instance::DefaultInstanceResolver,
         v2_state::{ControllerStateError, ControllerV2State, HeartbeatResult, RegistrationResult},
     },
     proto::ek::control::v2::{
@@ -209,6 +210,7 @@ async fn delete_stale_experts(worker_id: &str) {
 pub struct WorkerLifecycleServiceImpl {
     state: ControllerV2State,
     hooks: Arc<dyn WorkerLifecycleHooks>,
+    instance_resolver: Arc<dyn DefaultInstanceResolver>,
     heartbeat_timeout: Duration,
 }
 
@@ -315,6 +317,7 @@ impl WorkerLifecycleServiceImpl {
     pub fn new(
         state: ControllerV2State,
         hooks: Arc<dyn WorkerLifecycleHooks>,
+        instance_resolver: Arc<dyn DefaultInstanceResolver>,
         heartbeat_timeout: Duration,
     ) -> Self {
         assert!(
@@ -324,6 +327,7 @@ impl WorkerLifecycleServiceImpl {
         Self {
             state,
             hooks,
+            instance_resolver,
             heartbeat_timeout,
         }
     }
@@ -419,6 +423,12 @@ impl WorkerLifecycleService for WorkerLifecycleServiceImpl {
         request: Request<RegisterWorkerRequest>,
     ) -> Result<Response<RegisterWorkerResponse>, Status> {
         let registration = request.into_inner();
+        if registration.instance_id == 0 {
+            return Err(Status::invalid_argument("instance_id must be positive"));
+        }
+        self.instance_resolver
+            .resolve(registration.instance_id)
+            .await?;
         let result = self
             .state
             .register(registration.clone())
@@ -457,11 +467,18 @@ impl WorkerLifecycleService for WorkerLifecycleServiceImpl {
 #[derive(Clone)]
 pub struct TopologyServiceImpl {
     state: ControllerV2State,
+    instance_resolver: Arc<dyn DefaultInstanceResolver>,
 }
 
 impl TopologyServiceImpl {
-    pub fn new(state: ControllerV2State) -> Self {
-        Self { state }
+    pub fn new(
+        state: ControllerV2State,
+        instance_resolver: Arc<dyn DefaultInstanceResolver>,
+    ) -> Self {
+        Self {
+            state,
+            instance_resolver,
+        }
     }
 }
 
@@ -478,6 +495,7 @@ impl TopologyService for TopologyServiceImpl {
         if request.instance_id == 0 {
             return Err(Status::invalid_argument("instance_id must be positive"));
         }
+        self.instance_resolver.resolve(request.instance_id).await?;
         let newest = self.state.topology_version(request.instance_id).await;
         if request.current_version > newest {
             return Err(Status::invalid_argument(format!(
@@ -550,6 +568,7 @@ fn internal_status(error: impl std::fmt::Display) -> Status {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::controller::service::instance::ResolvedDefaultInstance;
     use crate::proto::ek::{
         control::v2::{WorkerDevice, WorkerRunState, topology_message},
         worker::v2::ActivationDType,
@@ -558,6 +577,31 @@ mod tests {
     #[derive(Default)]
     struct FakeHooks {
         events: Mutex<Vec<String>>,
+    }
+
+    struct FakeInstanceResolver;
+
+    #[async_trait]
+    impl DefaultInstanceResolver for FakeInstanceResolver {
+        async fn resolve(
+            &self,
+            requested_instance_id: u64,
+        ) -> Result<ResolvedDefaultInstance, Status> {
+            if requested_instance_id != 0 && requested_instance_id != 7 {
+                return Err(Status::failed_precondition(
+                    "requested instance does not match Controller default",
+                ));
+            }
+            Ok(ResolvedDefaultInstance {
+                instance_id: 7,
+                model_name: "model".to_owned(),
+                instance_name: "default".to_owned(),
+            })
+        }
+    }
+
+    fn instance_resolver() -> Arc<dyn DefaultInstanceResolver> {
+        Arc::new(FakeInstanceResolver)
     }
 
     #[async_trait]
@@ -638,8 +682,12 @@ mod tests {
     async fn lifecycle_service_registers_and_closes_a_graceful_stream() {
         let state = ControllerV2State::new(8);
         let hooks = Arc::new(FakeHooks::default());
-        let service =
-            WorkerLifecycleServiceImpl::new(state, hooks.clone(), Duration::from_millis(100));
+        let service = WorkerLifecycleServiceImpl::new(
+            state,
+            hooks.clone(),
+            instance_resolver(),
+            Duration::from_millis(100),
+        );
         let response = service
             .register_worker(Request::new(registration()))
             .await
@@ -672,6 +720,7 @@ mod tests {
         let service = WorkerLifecycleServiceImpl::new(
             state.clone(),
             hooks.clone(),
+            instance_resolver(),
             Duration::from_millis(10),
         );
         state.register(registration()).await.unwrap();
@@ -685,8 +734,12 @@ mod tests {
     async fn cancelled_heartbeat_handler_still_marks_worker_unavailable() {
         let state = ControllerV2State::new(8);
         let hooks = Arc::new(FakeHooks::default());
-        let service =
-            WorkerLifecycleServiceImpl::new(state.clone(), hooks.clone(), Duration::from_secs(1));
+        let service = WorkerLifecycleServiceImpl::new(
+            state.clone(),
+            hooks.clone(),
+            instance_resolver(),
+            Duration::from_secs(1),
+        );
         state.register(registration()).await.unwrap();
         let (sender, receiver) = mpsc::channel(2);
         sender
@@ -740,6 +793,7 @@ mod tests {
         let service = WorkerLifecycleServiceImpl::new(
             state.clone(),
             hooks.clone(),
+            instance_resolver(),
             Duration::from_millis(10),
         );
         state.register(registration()).await.unwrap();
@@ -761,7 +815,7 @@ mod tests {
     #[tokio::test]
     async fn topology_service_sends_an_initial_empty_snapshot() {
         let state = ControllerV2State::new(8);
-        let service = TopologyServiceImpl::new(state);
+        let service = TopologyServiceImpl::new(state, instance_resolver());
         let response = service
             .watch_topology(Request::new(WatchTopologyRequest {
                 instance_id: 7,
@@ -781,5 +835,47 @@ mod tests {
         assert_eq!(snapshot.topology_version, 0);
         assert_eq!(snapshot.part_count, 1);
         assert!(snapshot.routes.is_empty());
+    }
+
+    #[tokio::test]
+    async fn lifecycle_rejects_a_nondefault_instance_before_state_mutation() {
+        let state = ControllerV2State::new(8);
+        let service = WorkerLifecycleServiceImpl::new(
+            state.clone(),
+            Arc::new(FakeHooks::default()),
+            instance_resolver(),
+            Duration::from_millis(100),
+        );
+        let mut request = registration();
+        request.instance_id = 8;
+
+        let error = service
+            .register_worker(Request::new(request))
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.code(), tonic::Code::FailedPrecondition);
+        assert!(matches!(
+            state.registration("worker-0", "start-0").await,
+            Err(ControllerStateError::UnknownWorker)
+        ));
+    }
+
+    #[tokio::test]
+    async fn topology_rejects_a_nondefault_instance() {
+        let service = TopologyServiceImpl::new(ControllerV2State::new(8), instance_resolver());
+
+        let error = match service
+            .watch_topology(Request::new(WatchTopologyRequest {
+                instance_id: 8,
+                current_version: 0,
+            }))
+            .await
+        {
+            Ok(_) => panic!("nondefault instance unexpectedly opened a topology stream"),
+            Err(error) => error,
+        };
+
+        assert_eq!(error.code(), tonic::Code::FailedPrecondition);
     }
 }

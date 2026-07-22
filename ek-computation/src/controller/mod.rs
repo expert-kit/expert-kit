@@ -9,6 +9,7 @@ pub mod v2_store;
 use crate::proto::ek::control::{
     v1::plan_service_server::PlanServiceServer,
     v2::{
+        instance_service_server::InstanceServiceServer,
         topology_service_server::TopologyServiceServer,
         weight_control_service_server::WeightControlServiceServer,
         worker_lifecycle_service_server::WorkerLifecycleServiceServer,
@@ -17,6 +18,7 @@ use crate::proto::ek::control::{
 use ek_base::error::EKResult;
 use service::{
     control::PlanServiceImpl,
+    instance::{DatabaseDefaultInstanceResolver, DefaultInstanceResolver, InstanceServiceImpl},
     v2::{DatabaseLifecycleHooks, TopologyServiceImpl, WorkerLifecycleServiceImpl},
     v2_weight::{DatabaseWeightControlHooks, WeightControlServiceImpl},
 };
@@ -30,16 +32,24 @@ pub async fn controller_main() -> EKResult<()> {
         v2_state::ControllerV2State::restore(256, v2_store::PostgresControllerStateStore::shared())
             .await
             .map_err(|error| ek_base::error::EKError::RuntimeError(error.to_string()))?;
+    let instance_resolver: Arc<dyn DefaultInstanceResolver> =
+        Arc::new(DatabaseDefaultInstanceResolver::new(
+            settings.inference.model_name.clone(),
+            settings.inference.instance_name.clone(),
+        ));
+    let worker_instance_service = InstanceServiceImpl::new(instance_resolver.clone());
+    let frontend_instance_service = InstanceServiceImpl::new(instance_resolver.clone());
     let lifecycle_service = WorkerLifecycleServiceImpl::new(
         v2_state.clone(),
         Arc::new(DatabaseLifecycleHooks::new()),
+        instance_resolver.clone(),
         Duration::from_secs(settings.controller.fault_detection.heartbeat_timeout_secs),
     );
     let weight_control_service = WeightControlServiceImpl::new(
         v2_state.clone(),
         Arc::new(DatabaseWeightControlHooks::new()),
     );
-    let topology_service = TopologyServiceImpl::new(v2_state);
+    let topology_service = TopologyServiceImpl::new(v2_state, instance_resolver);
 
     let worker_control_srv = tokio::task::spawn(async move {
         let intra_addr = format!(
@@ -50,6 +60,11 @@ pub async fn controller_main() -> EKResult<()> {
         .unwrap();
         log::info!("worker control server listening on {intra_addr}");
         let err = tonic::transport::Server::builder()
+            .add_service(
+                InstanceServiceServer::new(worker_instance_service)
+                    .max_decoding_message_size(1024 * 1024)
+                    .max_encoding_message_size(1024 * 1024),
+            )
             .add_service(
                 WorkerLifecycleServiceServer::new(lifecycle_service)
                     .max_decoding_message_size(1024 * 1024)
@@ -79,6 +94,11 @@ pub async fn controller_main() -> EKResult<()> {
         let plan_srv = PlanServiceImpl::new();
         let err = tonic::transport::Server::builder()
             .add_service(PlanServiceServer::new(plan_srv))
+            .add_service(
+                InstanceServiceServer::new(frontend_instance_service)
+                    .max_decoding_message_size(1024 * 1024)
+                    .max_encoding_message_size(1024 * 1024),
+            )
             .add_service(
                 TopologyServiceServer::new(topology_service)
                     .max_decoding_message_size(1024 * 1024)

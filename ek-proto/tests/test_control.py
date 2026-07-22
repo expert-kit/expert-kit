@@ -10,6 +10,9 @@ from expertkit_proto.ek.worker.v2 import common_pb2
 
 
 def test_control_service_streaming_shapes_are_stable() -> None:
+    instance = lifecycle_pb2.DESCRIPTOR.services_by_name["InstanceService"].methods_by_name[
+        "ResolveDefaultInstance"
+    ]
     lifecycle = lifecycle_pb2.DESCRIPTOR.services_by_name["WorkerLifecycleService"]
     register = lifecycle.methods_by_name["RegisterWorker"]
     heartbeat = lifecycle.methods_by_name["Heartbeat"]
@@ -20,13 +23,34 @@ def test_control_service_streaming_shapes_are_stable() -> None:
         "Sync"
     ]
 
+    assert (instance.client_streaming, instance.server_streaming) == (False, False)
     assert (register.client_streaming, register.server_streaming) == (False, False)
     assert (heartbeat.client_streaming, heartbeat.server_streaming) == (True, False)
     assert (topology.client_streaming, topology.server_streaming) == (False, True)
     assert (weight.client_streaming, weight.server_streaming) == (True, True)
+    assert hasattr(lifecycle_pb2_grpc, "InstanceServiceStub")
     assert hasattr(lifecycle_pb2_grpc, "WorkerLifecycleServiceStub")
     assert hasattr(lifecycle_pb2_grpc, "TopologyServiceStub")
     assert hasattr(weight_control_pb2_grpc, "WeightControlServiceStub")
+
+
+def test_default_instance_resolution_round_trip() -> None:
+    request = lifecycle_pb2.ResolveDefaultInstanceRequest(requested_instance_id=7)
+    response = lifecycle_pb2.ResolveDefaultInstanceResponse(
+        instance_id=7,
+        model_name="DeepSeek-V2-Lite-Chat",
+        instance_name="deepseek-v2-lite-demo",
+    )
+
+    decoded_request = lifecycle_pb2.ResolveDefaultInstanceRequest.FromString(
+        request.SerializeToString()
+    )
+    decoded_response = lifecycle_pb2.ResolveDefaultInstanceResponse.FromString(
+        response.SerializeToString()
+    )
+
+    assert decoded_request.requested_instance_id == 7
+    assert decoded_response == response
 
 
 def test_registration_round_trip_uses_one_device() -> None:

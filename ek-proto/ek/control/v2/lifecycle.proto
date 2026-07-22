@@ -4,6 +4,22 @@ package ek.control.v2;
 
 import "ek/worker/v2/common.proto";
 
+// InstanceService resolves the one model instance managed by this Controller.
+service InstanceService {
+  rpc ResolveDefaultInstance(ResolveDefaultInstanceRequest) returns (ResolveDefaultInstanceResponse);
+}
+
+message ResolveDefaultInstanceRequest {
+  // Zero selects the Controller default; a positive value must match that default.
+  uint64 requested_instance_id = 1;
+}
+
+message ResolveDefaultInstanceResponse {
+  uint64 instance_id = 1;
+  string model_name = 2;
+  string instance_name = 3;
+}
+
 // WorkerLifecycleService registers one process and receives its liveness stream.
 service WorkerLifecycleService {
   rpc RegisterWorker(RegisterWorkerRequest) returns (RegisterWorkerResponse);

@@ -25,6 +25,22 @@ WORKER_TRANSPORT_TYPE_UNSPECIFIED: WorkerTransportType
 WORKER_TRANSPORT_GRPC: WorkerTransportType
 WORKER_TRANSPORT_SHM: WorkerTransportType
 
+class ResolveDefaultInstanceRequest(_message.Message):
+    __slots__ = ("requested_instance_id",)
+    REQUESTED_INSTANCE_ID_FIELD_NUMBER: _ClassVar[int]
+    requested_instance_id: int
+    def __init__(self, requested_instance_id: _Optional[int] = ...) -> None: ...
+
+class ResolveDefaultInstanceResponse(_message.Message):
+    __slots__ = ("instance_id", "model_name", "instance_name")
+    INSTANCE_ID_FIELD_NUMBER: _ClassVar[int]
+    MODEL_NAME_FIELD_NUMBER: _ClassVar[int]
+    INSTANCE_NAME_FIELD_NUMBER: _ClassVar[int]
+    instance_id: int
+    model_name: str
+    instance_name: str
+    def __init__(self, instance_id: _Optional[int] = ..., model_name: _Optional[str] = ..., instance_name: _Optional[str] = ...) -> None: ...
+
 class RegisterWorkerRequest(_message.Message):
     __slots__ = ("worker_id", "start_id", "instance_id", "computation_endpoint", "peer_weight_endpoint", "backend", "activation_dtype", "device", "max_batch_tokens", "max_active_batches_per_device", "max_pending_batches_per_device", "transport_type")
     WORKER_ID_FIELD_NUMBER: _ClassVar[int]

@@ -14,6 +14,7 @@ use async_trait::async_trait;
 use ek_computation::{
     controller::{
         service::{
+            instance::{DefaultInstanceResolver, InstanceServiceImpl, ResolvedDefaultInstance},
             v2::{TopologyServiceImpl, WorkerLifecycleHooks, WorkerLifecycleServiceImpl},
             v2_weight::{TargetSubscription, WeightControlHooks, WeightControlServiceImpl},
         },
@@ -22,7 +23,8 @@ use ek_computation::{
     proto::ek::{
         control::v2::{
             RegisterWorkerRequest, TargetExpert, TopologyMessage, WatchTopologyRequest,
-            WorkerRoute, topology_message, topology_service_client::TopologyServiceClient,
+            WorkerRoute, instance_service_server::InstanceServiceServer, topology_message,
+            topology_service_client::TopologyServiceClient,
             topology_service_server::TopologyServiceServer,
             weight_control_service_server::WeightControlServiceServer,
             worker_lifecycle_service_server::WorkerLifecycleServiceServer,
@@ -40,6 +42,22 @@ const INSTANCE_ID: u64 = 7;
 const WORKER_A: &str = "worker-a";
 const WORKER_B: &str = "worker-b";
 const TEST_TIMEOUT: Duration = Duration::from_secs(15);
+
+struct TestInstanceResolver;
+
+#[async_trait]
+impl DefaultInstanceResolver for TestInstanceResolver {
+    async fn resolve(&self, requested_instance_id: u64) -> Result<ResolvedDefaultInstance, Status> {
+        if requested_instance_id != 0 && requested_instance_id != INSTANCE_ID {
+            return Err(Status::failed_precondition("unexpected model instance"));
+        }
+        Ok(ResolvedDefaultInstance {
+            instance_id: INSTANCE_ID,
+            model_name: "test-model".to_owned(),
+            instance_name: "default".to_owned(),
+        })
+    }
+}
 
 #[derive(Clone)]
 struct Subscriber {
@@ -288,16 +306,20 @@ impl ControllerHarness {
         let endpoint = format!("127.0.0.1:{port}");
         let state = ControllerV2State::new(32);
         let hooks = Arc::new(RecoveryHooks::default());
+        let instance_resolver: Arc<dyn DefaultInstanceResolver> = Arc::new(TestInstanceResolver);
         let lifecycle = WorkerLifecycleServiceImpl::new(
             state.clone(),
             hooks.clone(),
+            instance_resolver.clone(),
             Duration::from_millis(500),
         );
         let weights = WeightControlServiceImpl::new(state.clone(), hooks.clone());
-        let topology = TopologyServiceImpl::new(state);
+        let topology = TopologyServiceImpl::new(state, instance_resolver.clone());
+        let instance = InstanceServiceImpl::new(instance_resolver);
         let (shutdown, stopped) = oneshot::channel();
         let task = tokio::spawn(async move {
             tonic::transport::Server::builder()
+                .add_service(InstanceServiceServer::new(instance))
                 .add_service(WorkerLifecycleServiceServer::new(lifecycle))
                 .add_service(WeightControlServiceServer::new(weights))
                 .add_service(TopologyServiceServer::new(topology))
