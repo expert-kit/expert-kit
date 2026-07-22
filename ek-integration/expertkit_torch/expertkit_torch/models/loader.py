@@ -186,7 +186,7 @@ def _validate_loading_arguments(
     model_path: str | Path,
     mode: ModelMode,
     controller_endpoint: str,
-    instance_id: int,
+    instance_id: int | None,
     dtype: ModelDType,
 ) -> str:
     resolved_path = str(model_path)
@@ -199,8 +199,10 @@ def _validate_loading_arguments(
     if mode == "expertkit":
         if not controller_endpoint.strip():
             raise ValueError("controller_endpoint must not be empty")
-        if isinstance(instance_id, bool) or not isinstance(instance_id, int) or instance_id <= 0:
-            raise ValueError("instance_id must be a positive integer")
+        if instance_id is not None and (
+            isinstance(instance_id, bool) or not isinstance(instance_id, int) or instance_id <= 0
+        ):
+            raise ValueError("instance_id must be a positive integer or None")
     return resolved_path
 
 
@@ -209,7 +211,7 @@ def load_model(
     *,
     mode: ModelMode = "expertkit",
     controller_endpoint: str = "127.0.0.1:5002",
-    instance_id: int = 1,
+    instance_id: int | None = None,
     device: str | torch.device = "cuda:0",
     dtype: ModelDType = "auto",
 ) -> LoadedModel:
@@ -219,7 +221,8 @@ def load_model(
         model_path: Local Hugging Face checkpoint directory.
         mode: Whether routed experts use Expert Kit or remain local.
         controller_endpoint: Controller topology endpoint used in Expert Kit mode.
-        instance_id: Model instance registered with the Controller.
+        instance_id: Optional explicit model instance. When omitted, the
+            Controller default is resolved during Transport startup.
         device: Single Frontend device that owns attention and routing.
         dtype: Checkpoint loading dtype or ``auto`` to use checkpoint metadata.
 

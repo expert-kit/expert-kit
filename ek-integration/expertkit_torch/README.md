@@ -32,8 +32,8 @@ into the root `.venv`. It uses official PyPI by default.
 
 Start the Controller, Weight Server, and one Python Worker process per compute
 device before using `expertkit` mode. The Controller must publish every expert
-needed by the model as ready. The numeric instance ID must match the instance
-registered by those Workers.
+needed by the model as ready. Worker and Frontend startup both resolve the
+Controller's configured default instance.
 
 The Frontend sends original model layer IDs. DeepSeek therefore skips its early
 dense-only layers, while Qwen follows its configured sparse-layer positions.
@@ -51,7 +51,6 @@ with load_model(
     "/models/DeepSeek-V2-Lite-Chat",
     mode="expertkit",
     controller_endpoint="10.0.0.10:5002",
-    instance_id=1,
     device="cuda:0",
 ) as loaded:
     output = loaded.model.generate(...)
@@ -72,7 +71,6 @@ uv run --package expertkit-torch ek-torch-benchmark \
   --model-path /models/DeepSeek-V2-Lite-Chat \
   --mode expertkit \
   --controller-endpoint 10.0.0.10:5002 \
-  --instance-id 1 \
   --batch-sizes 1 32 \
   --input-length 128 \
   --output-length 20 \
@@ -142,13 +140,11 @@ configured:
 ```bash
 EK_QWEN_MODEL_PATH=/models/Qwen3-30B-A3B \
 EK_QWEN_CONTROLLER_ENDPOINT=10.0.0.10:5002 \
-EK_QWEN_INSTANCE_ID=1 \
 uv run --package expertkit-torch pytest \
   ek-integration/expertkit_torch/tests/test_deployment_benchmark.py -m qwen
 
 EK_DEEPSEEK_V2_MODEL_PATH=/models/DeepSeek-V2-Lite-Chat \
 EK_DEEPSEEK_V2_CONTROLLER_ENDPOINT=10.0.0.10:5002 \
-EK_DEEPSEEK_V2_INSTANCE_ID=1 \
 uv run --package expertkit-torch pytest \
   ek-integration/expertkit_torch/tests/test_deployment_benchmark.py -m deepseek_v2
 ```

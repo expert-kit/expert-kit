@@ -80,7 +80,7 @@ def test_cli_writes_table_and_json(monkeypatch, tmp_path, capsys) -> None:
     assert payload["configuration"] == {
         "controller_endpoint": "127.0.0.1:5002",
         "device": "cpu",
-        "instance_id": 1,
+        "instance_id": None,
         "model_path": "/models/deepseek",
         "requested_dtype": "auto",
     }

@@ -152,15 +152,8 @@ target/release/ek-cli --config /tmp/qwen-controller.yaml \
   schedule static --inventory /tmp/qwen-workers.yaml
 ```
 
-Read the numeric instance ID created by that command:
-
-```bash
-docker compose -f dev/meta-db.docker-compose.yaml exec -T pg \
-  psql -U dev -d dev -Atc "SELECT id FROM instance WHERE name = 'qwen3-demo';"
-```
-
-Use that value for `model.instance_id` in every Worker file and for the
-Frontend check.
+The scheduler creates the instance named by `inference.instance_name`. Workers
+and Frontends resolve its database-generated numeric ID automatically.
 
 ## 5. Configure and start the Python Workers
 
@@ -172,7 +165,6 @@ cp ek-worker/examples/qwen3-30b-a3b.torch.yaml /tmp/qwen-worker-0.yaml
 
 For every copy, set:
 
-- the same numeric `model.instance_id`;
 - a unique `worker.id` matching the inventory;
 - the process's `worker.device` and realistic `device_memory_limit`;
 - unique gRPC and peer listen ports;
@@ -219,7 +211,6 @@ uv run --package expertkit-torch ek-torch-benchmark \
   --model-path "$QWEN_ROOT" \
   --mode expertkit \
   --controller-endpoint 127.0.0.1:5002 \
-  --instance-id 1 \
   --batch-sizes 1 \
   --input-length 128 \
   --output-length 20 \
@@ -227,7 +218,7 @@ uv run --package expertkit-torch ek-torch-benchmark \
   --runs 5
 ```
 
-Replace `1` with the instance ID queried above. The command performs exact
+The command resolves the configured `qwen3-demo` instance, performs exact
 fixed-length prefill and decode work, then prints median prefill, decode, and
 complete output throughput. The benchmark ignores EOS so every measured run
 executes 20 output-token steps.
@@ -237,7 +228,6 @@ The same path is exposed as an environment-gated test:
 ```bash
 EK_QWEN_MODEL_PATH="$QWEN_ROOT" \
 EK_QWEN_CONTROLLER_ENDPOINT=127.0.0.1:5002 \
-EK_QWEN_INSTANCE_ID=1 \
 uv run --package expertkit-torch pytest \
   ek-integration/expertkit_torch/tests/test_deployment_benchmark.py -m qwen
 ```

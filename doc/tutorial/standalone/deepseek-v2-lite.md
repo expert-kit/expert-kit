@@ -164,25 +164,16 @@ target/release/ek-cli --config "$EK_RUN/controller.yaml" \
   schedule static --inventory "$EK_RUN/workers.yaml"
 ```
 
-Read the instance ID created by the scheduler:
-
-```bash
-docker compose -f dev/meta-db.docker-compose.yaml exec -T pg \
-  psql -U dev -d dev -Atc \
-  "SELECT id FROM instance WHERE name = 'deepseek-v2-lite-demo';"
-```
-
-The rest of this guide calls this value `<INSTANCE_ID>`.
+The scheduler creates `deepseek-v2-lite-demo`. Worker and Frontend startup
+resolve its database-generated numeric ID through the Controller.
 
 ### 5. Create the Worker configuration
 
-Create `$EK_RUN/worker.yaml`. Replace `<INSTANCE_ID>` with the value from the
-previous command:
+Create `$EK_RUN/worker.yaml`:
 
 ```bash
 cat > "$EK_RUN/worker.yaml" <<EOF
 model:
-  instance_id: <INSTANCE_ID>
   name: DeepSeek-V2-Lite-Chat
   weight_version: main
   num_layers: 27
@@ -297,8 +288,7 @@ experts are ready before starting inference.
 
 ## Test with the Transformers 5.5.3 Frontend
 
-In terminal 4, run a short benchmark. Replace `<INSTANCE_ID>` with the same
-instance ID used in the Worker configuration:
+In terminal 4, run a short benchmark:
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 \
@@ -306,7 +296,6 @@ CUDA_VISIBLE_DEVICES=0 \
   --model-path "$DEEPSEEK_ROOT" \
   --mode expertkit \
   --controller-endpoint 127.0.0.1:5002 \
-  --instance-id <INSTANCE_ID> \
   --batch-sizes 1 \
   --input-length 16 \
   --output-length 16 \
@@ -364,7 +353,6 @@ CUDA_DEVICE_ORDER=PCI_BUS_ID \
 CUDA_VISIBLE_DEVICES="$EK_FRONTEND_GPU" \
 EK_ENABLE=1 \
 EK_ADDR=127.0.0.1:5002 \
-EK_INSTANCE_ID=<INSTANCE_ID> \
 EK_CLIENT_TIMEOUT=6 \
 uv run --package expertkit-vllm python - "$DEEPSEEK_ROOT" <<'PY'
 import sys
@@ -405,9 +393,9 @@ PY
 ```
 
 `EK_ENABLE=1` enables the installed `vllm.general_plugins` entry point before
-model construction. `EK_ADDR` selects Controller port 5002,
-`EK_INSTANCE_ID` selects the same deployment as the Worker, and
-`EK_CLIENT_TIMEOUT` is the positive per-call timeout in seconds. The plugin
+model construction. `EK_ADDR` selects Controller port 5002, and
+`EK_CLIENT_TIMEOUT` is the positive per-call timeout in seconds. Transport
+resolves the same Controller default instance used by the Worker. The plugin
 does not have a gRPC/SHM setting; changing the Worker configuration and
 published topology is sufficient.
 

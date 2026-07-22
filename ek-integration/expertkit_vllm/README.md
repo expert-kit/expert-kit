@@ -33,7 +33,8 @@ uv build --package expertkit-vllm --wheel
 The plugin is disabled unless `EK_ENABLE=1` is set. When enabled, it reads:
 
 - `EK_ADDR`: Controller gRPC endpoint. The default is `localhost:5002`.
-- `EK_INSTANCE_ID`: required positive numeric model instance ID.
+- `EK_INSTANCE_ID`: optional positive numeric override. When omitted, Transport
+  resolves the Controller's configured default instance.
 - `EK_CLIENT_TIMEOUT`: positive timeout in seconds. The default is `6`.
 
 For example:
@@ -41,7 +42,6 @@ For example:
 ```bash
 export EK_ENABLE=1
 export EK_ADDR=controller.internal:5002
-export EK_INSTANCE_ID=1
 export EK_CLIENT_TIMEOUT=6
 ```
 

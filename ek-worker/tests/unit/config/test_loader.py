@@ -80,6 +80,7 @@ def test_repository_qwen_example_remains_valid() -> None:
 
     config = load_config(example_path)
 
+    assert config.model.instance_id is None
     assert config.model.name == "Qwen3-30B-A3B"
     assert config.model.num_layers == 48
     assert config.model.experts_per_layer == 128

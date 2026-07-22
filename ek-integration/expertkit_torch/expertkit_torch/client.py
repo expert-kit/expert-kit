@@ -21,7 +21,7 @@ class RoutedMoEClient:
         self,
         controller_endpoint: str,
         *,
-        instance_id: int,
+        instance_id: int | None = None,
         num_layers: int,
         experts_per_layer: int,
         hidden_dim: int,
@@ -31,7 +31,6 @@ class RoutedMoEClient:
         if not controller_endpoint:
             raise ValueError("controller_endpoint must not be empty")
         for name, value in (
-            ("instance_id", instance_id),
             ("num_layers", num_layers),
             ("experts_per_layer", experts_per_layer),
             ("hidden_dim", hidden_dim),
@@ -39,6 +38,10 @@ class RoutedMoEClient:
         ):
             if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
                 raise ValueError(f"{name} must be a positive integer")
+        if instance_id is not None and (
+            isinstance(instance_id, bool) or not isinstance(instance_id, int) or instance_id <= 0
+        ):
+            raise ValueError("instance_id must be a positive integer or None")
         if top_k > experts_per_layer:
             raise ValueError("top_k must not exceed experts_per_layer")
         if not math.isfinite(timeout_seconds) or timeout_seconds <= 0:

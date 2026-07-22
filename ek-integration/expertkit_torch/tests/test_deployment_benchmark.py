@@ -40,29 +40,29 @@ def test_model_benchmark_runs_through_expert_kit(
         pytest.skip(f"{model_path_variable} is not configured")
 
     endpoint = os.environ.get(endpoint_variable, "127.0.0.1:5002")
-    instance_id = os.environ.get(instance_variable, "1")
+    command = [
+        sys.executable,
+        "-m",
+        "expertkit_torch.benchmark.cli",
+        "--model-path",
+        str(Path(model_path).resolve()),
+        "--controller-endpoint",
+        endpoint,
+        "--batch-sizes",
+        "1",
+        "--input-length",
+        "32",
+        "--output-length",
+        "20",
+        "--warmup-runs",
+        "0",
+        "--runs",
+        "1",
+    ]
+    if instance_id := os.environ.get(instance_variable):
+        command.extend(("--instance-id", instance_id))
     completed = subprocess.run(
-        [
-            sys.executable,
-            "-m",
-            "expertkit_torch.benchmark.cli",
-            "--model-path",
-            str(Path(model_path).resolve()),
-            "--controller-endpoint",
-            endpoint,
-            "--instance-id",
-            instance_id,
-            "--batch-sizes",
-            "1",
-            "--input-length",
-            "32",
-            "--output-length",
-            "20",
-            "--warmup-runs",
-            "0",
-            "--runs",
-            "1",
-        ],
+        command,
         check=False,
         capture_output=True,
         text=True,

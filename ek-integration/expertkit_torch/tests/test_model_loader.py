@@ -91,7 +91,6 @@ def test_expertkit_load_uses_real_layer_ids_and_restores_transformers_class(
     loaded = loader.load_model(
         "/models/qwen",
         controller_endpoint="127.0.0.1:5002",
-        instance_id=9,
         device="cpu",
     )
 
@@ -108,7 +107,7 @@ def test_expertkit_load_uses_real_layer_ids_and_restores_transformers_class(
     assert loaded.model.evaluation
     client = FakeClient.instances[0]
     assert client.configuration == {
-        "instance_id": 9,
+        "instance_id": None,
         "num_layers": 4,
         "experts_per_layer": 4,
         "hidden_dim": 4,

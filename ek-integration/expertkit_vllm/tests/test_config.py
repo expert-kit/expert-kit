@@ -33,7 +33,9 @@ def test_rejects_invalid_values(monkeypatch, name: str, value: str, message: str
         collect_ek_client_config()
 
 
-def test_requires_an_instance_id(monkeypatch) -> None:
+def test_omitted_instance_uses_the_controller_default(monkeypatch) -> None:
     monkeypatch.delenv("EK_INSTANCE_ID", raising=False)
-    with pytest.raises(ValueError, match="must be set"):
-        collect_ek_client_config()
+
+    config = collect_ek_client_config()
+
+    assert config.instance_id is None

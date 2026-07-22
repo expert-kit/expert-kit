@@ -40,7 +40,8 @@ fields do not have environment-variable overrides.
 
 Important settings:
 
-- `model.instance_id` is the numeric instance stored by the Controller.
+- `model.instance_id` is optional. When omitted, startup resolves the instance
+  named by the Controller configuration. An explicit ID must match that default.
 - `model.name` must match the model name served by the Weight Server.
 - `worker.id` must match the node name assigned by the Controller.
 - `worker.device` is one explicit `cuda:<id>` for Torch. Start another process

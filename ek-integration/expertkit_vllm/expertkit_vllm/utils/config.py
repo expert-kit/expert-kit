@@ -12,7 +12,7 @@ class EkClientConfig:
     """Hold the Controller route and model instance used by this vLLM process."""
 
     controller_endpoint: str
-    instance_id: int
+    instance_id: int | None
     timeout_seconds: float
 
 
@@ -22,14 +22,16 @@ def collect_ek_client_config() -> EkClientConfig:
     endpoint = os.getenv("EK_ADDR", "localhost:5002").strip()
     if not endpoint:
         raise ValueError("EK_ADDR must not be empty")
-    try:
-        instance_id = int(os.environ["EK_INSTANCE_ID"])
-    except KeyError as error:
-        raise ValueError("EK_INSTANCE_ID must be set") from error
-    except ValueError as error:
-        raise ValueError("EK_INSTANCE_ID must be an integer") from error
-    if instance_id <= 0:
-        raise ValueError("EK_INSTANCE_ID must be positive")
+    raw_instance_id = os.getenv("EK_INSTANCE_ID")
+    if raw_instance_id is None:
+        instance_id = None
+    else:
+        try:
+            instance_id = int(raw_instance_id)
+        except ValueError as error:
+            raise ValueError("EK_INSTANCE_ID must be an integer") from error
+        if instance_id <= 0:
+            raise ValueError("EK_INSTANCE_ID must be positive")
     try:
         timeout_seconds = float(os.getenv("EK_CLIENT_TIMEOUT", "6"))
     except ValueError as error:

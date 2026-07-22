@@ -1,6 +1,5 @@
-# Replace instance_id, addresses, device, and memory budget for each Worker process.
+# Replace addresses, device, and memory budget for each Worker process.
 model:
-  instance_id: 1
   name: Qwen3-30B-A3B
   weight_version: main
   num_layers: 48

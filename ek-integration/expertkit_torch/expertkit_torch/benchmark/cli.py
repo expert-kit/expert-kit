@@ -30,7 +30,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--model-path", required=True)
     parser.add_argument("--mode", choices=("expertkit", "local"), default="expertkit")
     parser.add_argument("--controller-endpoint", default="127.0.0.1:5002")
-    parser.add_argument("--instance-id", type=_positive_int, default=1)
+    parser.add_argument("--instance-id", type=_positive_int)
     parser.add_argument("--batch-sizes", nargs="+", type=_positive_int, default=[1])
     parser.add_argument("--input-length", type=_positive_int, default=128)
     parser.add_argument("--output-length", type=_positive_int, default=20)

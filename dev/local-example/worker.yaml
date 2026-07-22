@@ -1,6 +1,5 @@
-# The example assumes the scheduled model instance has database ID 1.
+# The Worker resolves the Controller's configured model instance during startup.
 model:
-  instance_id: 1
   name: qwen3
   weight_version: main
   num_layers: 48
