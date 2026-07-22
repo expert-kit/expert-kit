@@ -143,31 +143,7 @@ target/release/ek-cli --config "$EK_RUN/controller.yaml" \
   model upsert --name DeepSeek-V2-Lite-Chat
 ```
 
-### 4. Assign the experts
-
-Create `$EK_RUN/workers.yaml`:
-
-```bash
-cat > "$EK_RUN/workers.yaml" <<'EOF'
-nodes:
-  - id: deepseek-worker-a100
-    address: http://127.0.0.1:52151
-    channel: grpc
-    device: cuda:0
-EOF
-```
-
-Create the model instance and assign all experts to the Worker:
-
-```bash
-target/release/ek-cli --config "$EK_RUN/controller.yaml" \
-  schedule static --inventory "$EK_RUN/workers.yaml"
-```
-
-The scheduler creates `deepseek-v2-lite-demo`. Worker and Frontend startup
-resolve its database-generated numeric ID through the Controller.
-
-### 5. Create the Worker configuration
+### 4. Create the Worker configuration
 
 Create `$EK_RUN/worker.yaml`:
 
@@ -243,7 +219,7 @@ enough capacity, multiple Workers with sharded assignments, or a future
 supported quantized-expert backend. Do not increase `device_memory_limit`
 beyond actual free memory.
 
-### 6. Select gRPC or same-host SHM
+### 5. Select gRPC or same-host SHM
 
 The configuration above uses gRPC. To use the experimental same-host SHM data
 path, replace only its `transport` block:
@@ -257,18 +233,16 @@ transport:
   shared_memory_dir: /dev/shm
 ```
 
-Keep the inventory's legacy `channel: grpc` field as shown; it is not the
-Frontend data-path selector. The running Worker registers the authoritative
-Transport type through the v2 lifecycle API, and both Frontends select gRPC or
-SHM from published topology. There is no Frontend Transport command-line flag
-or environment variable.
+The running Worker registers the authoritative Transport type through the v2
+lifecycle API, and both Frontends select gRPC or SHM from published topology.
+There is no Frontend Transport command-line flag or environment variable.
 
 SHM requires the Frontend and Worker to run on the same Host, in the same
 `/dev/shm` mount namespace, and under the same Unix user. It removes protobuf
 Tensor payloads and loopback Tensor copies, but CUDA data still stages through
 pinned Host memory. It is not CUDA IPC or GPU Direct.
 
-### 7. Start the Controller and Worker
+### 6. Start the Controller and Worker
 
 Start the Controller in terminal 2 and leave it running:
 
@@ -283,12 +257,34 @@ CUDA_VISIBLE_DEVICES=0 EK_CONFIG="$EK_RUN/worker.yaml" \
   uv run --package expertkit-worker target/release/ek-cli worker
 ```
 
-The Worker logs expert-loading progress. Wait until it reports that all 1,664
-experts are ready before starting inference.
+Wait for the Worker's `worker_registered` log. The Worker initially has an
+empty target list so the Controller can use its measured `max_experts` instead
+of predeclared Worker capacity.
+
+### 7. Rebalance experts onto active Workers
+
+After every intended Worker has registered, run in terminal 4:
+
+```bash
+target/release/ek-cli --config "$EK_RUN/controller.yaml" schedule rebalance
+```
+
+The Controller selects Workers with recent heartbeats for
+`deepseek-v2-lite-demo`, checks that their summed reported capacity covers all
+1,664 routed experts, and commits one complete placement. The Worker receives
+that placement immediately and starts loading weights. Wait for its
+`expert_loading_completed` log before starting inference.
+
+The command fails without modifying the current placement if no matching
+Worker is active or aggregate capacity is too small. In particular, the single
+BF16 A10 configuration described above reports only about 1,107 slots and is
+rejected here. Add enough Worker capacity, wait for registration, and rerun the
+same command. Rerunning with an unchanged active Worker set is safe and produces
+the same assignment.
 
 ## Test with the Transformers 5.5.3 Frontend
 
-In terminal 4, run a short benchmark:
+In terminal 5, run a short benchmark:
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 \

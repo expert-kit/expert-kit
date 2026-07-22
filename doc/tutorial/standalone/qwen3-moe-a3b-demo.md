@@ -120,42 +120,7 @@ target/release/ek-cli --config /tmp/qwen-controller.yaml \
   model upsert --name Qwen3-30B-A3B
 ```
 
-## 4. Assign experts
-
-Create `/tmp/qwen-workers.yaml` with one entry for every Worker process. The IDs
-must match `worker.id` in the Python Worker files:
-
-```yaml
-nodes:
-  - id: qwen-worker-0
-    address: http://127.0.0.1:51051
-    channel: grpc
-    device: cuda:0
-  - id: qwen-worker-1
-    address: http://127.0.0.1:51151
-    channel: grpc
-    device: cuda:1
-  - id: qwen-worker-2
-    address: http://127.0.0.1:51251
-    channel: grpc
-    device: cuda:2
-  - id: qwen-worker-3
-    address: http://127.0.0.1:51351
-    channel: grpc
-    device: cuda:3
-```
-
-Create the model instance and static assignments:
-
-```bash
-target/release/ek-cli --config /tmp/qwen-controller.yaml \
-  schedule static --inventory /tmp/qwen-workers.yaml
-```
-
-The scheduler creates the instance named by `inference.instance_name`. Workers
-and Frontends resolve its database-generated numeric ID automatically.
-
-## 5. Configure and start the Python Workers
+## 4. Configure and start the Python Workers
 
 Copy the Worker example once per device:
 
@@ -165,7 +130,7 @@ cp ek-worker/examples/qwen3-30b-a3b.torch.yaml /tmp/qwen-worker-0.yaml
 
 For every copy, set:
 
-- a unique `worker.id` matching the inventory;
+- a unique `worker.id`;
 - the process's `worker.device` and realistic `device_memory_limit`;
 - unique gRPC and peer listen ports;
 - advertised addresses reachable by the Frontend and other Workers;
@@ -175,8 +140,7 @@ For every copy, set:
 The sample's 20 GiB device budget is only an example. Worker startup subtracts
 fixed input/output buffers, Backend temporary memory, conversion memory, and
 allocator headroom before calculating `max_experts`. The sum of available
-Worker slots must cover all 6144 routed experts, and no Worker's static
-assignment may exceed its reported slots.
+Worker slots must cover all 6144 routed experts.
 
 Start the Controller:
 
@@ -192,15 +156,33 @@ uv run --package expertkit-worker \
   target/release/ek-cli --config /tmp/qwen-worker-0.yaml worker
 ```
 
-Each Worker registers, receives its complete target list, and loads from its
-DRAM cache, disk cache, eligible peers, or the Weight Server in that order. A
-remote fetch is written to the disk cache by default. The Controller publishes
-an expert only after the Worker reports it ready.
+Each Worker initially receives an empty target list. Wait until every process
+logs `worker_registered` so the Controller can use its measured `max_experts`
+instead of predeclared Worker capacity.
+
+## 5. Rebalance experts onto active Workers
+
+After all intended Workers have registered, run:
+
+```bash
+target/release/ek-cli --config /tmp/qwen-controller.yaml schedule rebalance
+```
+
+The Controller selects Workers with recent heartbeats for `qwen3-demo`, reads
+the `max_experts` reported by each process, and rejects the operation unless
+their summed capacity covers all 6144 routed experts. It then builds a stable
+capacity-proportional assignment, commits it as one database transaction, and
+immediately sends each running Worker its complete target list. Workers load
+from their DRAM cache, disk cache, eligible peers, or the Weight Server in that
+order. The Controller publishes an expert only after its Worker reports it
+ready.
 
 Do not start inference until every routed expert has at least one ready route.
-If a Worker rejects its assignment because `max_experts` is too small, add
-capacity and run the assignment again instead of increasing the configured
-budget past actual free device memory.
+If rebalance reports insufficient aggregate capacity, add Workers or increase a
+budget only when the device truly has that free memory, wait for registration,
+and rerun the command. Running it again with the same active Worker set produces
+the same assignment. Run it again after intentionally adding or removing a
+Worker.
 
 ## 6. Run the Qwen benchmark
 

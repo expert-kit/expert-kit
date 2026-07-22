@@ -145,6 +145,61 @@ impl StateWriter for StateWriterImpl {
 }
 
 impl StateWriterImpl {
+    /// Atomically replace assignments while retaining state for unchanged targets.
+    pub async fn replace_experts_for_instance(
+        &self,
+        instance_id: i32,
+        mut experts: Vec<NewExpert>,
+    ) -> EKResult<usize> {
+        if experts
+            .iter()
+            .any(|expert| expert.instance_id != instance_id)
+        {
+            return Err(EKError::InvalidInput(
+                "replacement contains an expert from another instance".to_owned(),
+            ));
+        }
+
+        let mut conn = POOL.get().await?;
+        conn.transaction::<_, EKError, _>(|conn| {
+            Box::pin(async move {
+                use std::collections::HashMap;
+
+                use schema::expert::dsl;
+
+                let existing_states = schema::expert::table
+                    .filter(dsl::instance_id.eq(instance_id))
+                    .select((dsl::node_id, dsl::expert_id, dsl::state))
+                    .for_update()
+                    .load::<(i32, String, serde_json::Value)>(conn)
+                    .await?
+                    .into_iter()
+                    .map(|(node_id, expert_id, state)| ((node_id, expert_id), state))
+                    .collect::<HashMap<_, _>>();
+                for expert in &mut experts {
+                    if let Some(state) =
+                        existing_states.get(&(expert.node_id, expert.expert_id.clone()))
+                    {
+                        expert.state = state.clone();
+                    }
+                }
+
+                diesel::delete(schema::expert::table.filter(dsl::instance_id.eq(instance_id)))
+                    .execute(conn)
+                    .await?;
+                if experts.is_empty() {
+                    return Ok(0);
+                }
+                let inserted = diesel::insert_into(schema::expert::table)
+                    .values(&experts)
+                    .execute(conn)
+                    .await?;
+                Ok(inserted)
+            })
+        })
+        .await
+    }
+
     pub async fn expert_del_by_instance(&self, instance: i32) -> EKResult<()> {
         let mut conn = POOL.get().await?;
         use schema::expert::dsl;

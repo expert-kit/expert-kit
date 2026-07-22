@@ -79,7 +79,9 @@ async fn execute_rebalance() -> EKResult<()> {
     log::info!("connect to controller at {controller_addr}");
     let endpoint = Endpoint::from_str(controller_addr.as_str()).unwrap();
     let mut cli = PlanServiceClient::connect(endpoint).await?;
-    cli.rebalance(RebalanceReq {}).await?;
+    cli.rebalance(RebalanceReq {})
+        .await
+        .map_err(|status| EKError::RuntimeError(status.to_string()))?;
     log::info!("rebalance done");
     Ok(())
 }

@@ -3,14 +3,14 @@ use ek_base::{
     error::{EKError, EKResult},
 };
 use ek_db::{safetensor::ExpertKey, weight_srv::client::WeightSrvClient};
-use rand::random;
 use tokio::task::JoinSet;
 
 use crate::{
+    controller::{poller::request_immediate_poll, scheduler::max_experts},
     proto::ek::control::v1::{self},
     state::{
         io::StateReaderImpl,
-        models::{NewExpert, NewInstance},
+        models::{NewExpert, NewInstance, Node},
         writer::StateWriterImpl,
     },
 };
@@ -61,13 +61,18 @@ impl v1::plan_service_server::PlanService for PlanServiceImpl {
 }
 
 async fn execute_rebalance() -> EKResult<()> {
-    // implement the static scheduling logic here
     let settings = get_ek_settings();
     let model_name = settings.inference.model_name.clone();
     let instance_name = settings.inference.instance_name.clone();
-    let ws_addr = settings.weight.server.as_ref().unwrap().addr.clone();
+    let ws_addr = settings
+        .weight
+        .server
+        .as_ref()
+        .ok_or_else(|| EKError::RuntimeError("rebalance requires a weight server".to_owned()))?
+        .addr
+        .clone();
     log::info!(
-        "Running static schedule for model: {model_name}, instance: {instance_name}, weight server: {ws_addr}"
+        "Running rebalance for model: {model_name}, instance: {instance_name}, weight server: {ws_addr}"
     );
     let cli = WeightSrvClient::new(ws_addr);
     let vital = cli.load_meta_vital(&model_name).await?;
@@ -80,19 +85,18 @@ async fn execute_rebalance() -> EKResult<()> {
         .ok_or(EKError::NotFound("model not found".to_string()))?;
 
     let writer = StateWriterImpl::new();
-    let node_ids = reader
-        .active_nodes()
-        .await?
-        .into_iter()
-        .map(|x| x.id)
-        .collect::<Vec<_>>();
-
     let instance_obj = writer
         .instance_upsert(NewInstance {
             model_id: model.id,
             name: instance_name,
         })
         .await?;
+    if instance_obj.model_id != model.id {
+        return Err(EKError::RuntimeError(format!(
+            "instance '{}' belongs to model {}, not configured model {}",
+            instance_obj.name, instance_obj.model_id, model.id
+        )));
+    }
 
     let mut experts = vec![];
     for layer in vital.moe_layers.0..vital.moe_layers.1 {
@@ -102,31 +106,104 @@ async fn execute_rebalance() -> EKResult<()> {
     }
     log::info!("total experts to schedule {}", experts.len());
 
-    writer.expert_del_by_instance(instance_obj.id).await?;
-
-    let mut js = JoinSet::new();
-    for e in experts {
-        let e = e.clone();
-        let node_ids = node_ids.clone();
-        js.spawn(async move {
-            let writer = StateWriterImpl::new();
-            let rand = random::<u16>();
-            writer
-                .expert_upsert(NewExpert {
-                    instance_id: instance_obj.id,
-                    node_id: node_ids[(rand % node_ids.len() as u16) as usize],
-                    expert_id: e.as_object_key(),
-                    replica: 1,
-                    state: serde_json::json!({}),
-                })
-                .await
-                .unwrap();
-        });
-    }
-    js.join_all().await;
-    log::info!("all experts scheduled");
+    let active_nodes = reader.active_nodes().await?;
+    let node_ids = plan_rebalance_nodes(instance_obj.id, &active_nodes, experts.len())?;
+    let assignments = experts
+        .into_iter()
+        .zip(node_ids)
+        .map(|(expert, node_id)| NewExpert {
+            instance_id: instance_obj.id,
+            node_id,
+            expert_id: expert.as_object_key(),
+            replica: 1,
+            state: serde_json::json!({"status": "pending"}),
+        })
+        .collect::<Vec<_>>();
+    let inserted = writer
+        .replace_experts_for_instance(instance_obj.id, assignments)
+        .await?;
+    request_immediate_poll();
+    log::info!("rebalance committed {inserted} expert assignments");
 
     Ok(())
+}
+
+fn plan_rebalance_nodes(
+    instance_id: i32,
+    active_nodes: &[Node],
+    required_experts: usize,
+) -> EKResult<Vec<i32>> {
+    if instance_id <= 0 {
+        return Err(EKError::RuntimeError(
+            "instance ID must be positive".to_owned(),
+        ));
+    }
+    if required_experts == 0 {
+        return Err(EKError::RuntimeError(
+            "model has no routed experts to rebalance".to_owned(),
+        ));
+    }
+    let instance_id = u64::try_from(instance_id)
+        .map_err(|_| EKError::RuntimeError("instance ID must be positive".to_owned()))?;
+    let mut workers = active_nodes
+        .iter()
+        .filter(|node| {
+            node.config.get("instance_id").and_then(|id| id.as_u64()) == Some(instance_id)
+                && max_experts(node) > 0
+        })
+        .collect::<Vec<_>>();
+    workers.sort_by(|left, right| {
+        left.hostname
+            .cmp(&right.hostname)
+            .then_with(|| left.id.cmp(&right.id))
+    });
+    if workers.is_empty() {
+        return Err(EKError::NotFound(
+            "no active Worker reports capacity for the configured instance".to_owned(),
+        ));
+    }
+
+    let capacities = workers
+        .iter()
+        .map(|node| max_experts(node))
+        .collect::<Vec<_>>();
+    let total_capacity = capacities.iter().try_fold(0_u64, |total, capacity| {
+        total
+            .checked_add(*capacity)
+            .ok_or_else(|| EKError::RuntimeError("active Worker capacity overflow".to_owned()))
+    })?;
+    let required = u64::try_from(required_experts)
+        .map_err(|_| EKError::RuntimeError("model expert count is too large".to_owned()))?;
+    if total_capacity < required {
+        return Err(EKError::RuntimeError(format!(
+            "active Worker capacity {total_capacity} cannot cover {required} routed experts"
+        )));
+    }
+
+    let mut loads = vec![0_u64; workers.len()];
+    let mut planned = Vec::with_capacity(required_experts);
+    for _ in 0..required_experts {
+        let selected = (0..workers.len())
+            .filter(|&index| loads[index] < capacities[index])
+            .min_by(|&left, &right| {
+                let left_ratio = u128::from(loads[left]) * u128::from(capacities[right]);
+                let right_ratio = u128::from(loads[right]) * u128::from(capacities[left]);
+                left_ratio.cmp(&right_ratio).then_with(|| left.cmp(&right))
+            })
+            .expect("aggregate capacity was validated before planning");
+        loads[selected] += 1;
+        planned.push(workers[selected].id);
+    }
+
+    for (worker, load) in workers.iter().zip(loads) {
+        log::info!(
+            "rebalance target worker={} assigned_experts={} max_experts={}",
+            worker.hostname,
+            load,
+            max_experts(worker)
+        );
+    }
+    Ok(planned)
 }
 
 async fn execute_duplicate_schedule(hostnames: Vec<String>) -> EKResult<()> {
@@ -367,4 +444,77 @@ async fn execute_manual_schedule(hostnames: Vec<String>, layers_str: String) -> 
         target_nodes.len()
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use super::*;
+
+    fn worker(id: i32, hostname: &str, instance_id: i32, capacity: u64) -> Node {
+        Node {
+            id,
+            hostname: hostname.to_owned(),
+            device: format!("cuda:{id}"),
+            config: serde_json::json!({
+                "instance_id": instance_id,
+                "max_experts": capacity,
+            }),
+        }
+    }
+
+    fn counts(plan: &[i32]) -> HashMap<i32, usize> {
+        let mut counts = HashMap::new();
+        for node_id in plan {
+            *counts.entry(*node_id).or_default() += 1;
+        }
+        counts
+    }
+
+    #[test]
+    fn rebalance_requires_capacity_for_the_configured_instance() {
+        let nodes = vec![worker(1, "wrong-instance", 8, 10)];
+        let error = plan_rebalance_nodes(7, &nodes, 1).unwrap_err();
+
+        assert!(matches!(error, EKError::NotFound(_)));
+        assert!(error.to_string().contains("no active Worker"));
+    }
+
+    #[test]
+    fn rebalance_rejects_an_empty_model_before_replacing_placement() {
+        let nodes = vec![worker(1, "worker-a", 7, 10)];
+        let error = plan_rebalance_nodes(7, &nodes, 0).unwrap_err();
+
+        assert!(error.to_string().contains("no routed experts"));
+    }
+
+    #[test]
+    fn rebalance_rejects_insufficient_aggregate_capacity() {
+        let nodes = vec![worker(1, "worker-a", 7, 2), worker(2, "worker-b", 7, 1)];
+        let error = plan_rebalance_nodes(7, &nodes, 4).unwrap_err();
+
+        assert!(error.to_string().contains("capacity 3 cannot cover 4"));
+    }
+
+    #[test]
+    fn rebalance_is_deterministic_and_balances_equal_workers() {
+        let nodes = vec![worker(2, "worker-b", 7, 3), worker(1, "worker-a", 7, 3)];
+
+        let first = plan_rebalance_nodes(7, &nodes, 6).unwrap();
+        let second = plan_rebalance_nodes(7, &nodes, 6).unwrap();
+
+        assert_eq!(first, vec![1, 2, 1, 2, 1, 2]);
+        assert_eq!(second, first);
+    }
+
+    #[test]
+    fn rebalance_distributes_by_reported_capacity_without_exceeding_it() {
+        let nodes = vec![worker(1, "worker-a", 7, 4), worker(2, "worker-b", 7, 2)];
+
+        let plan = plan_rebalance_nodes(7, &nodes, 6).unwrap();
+
+        assert_eq!(plan.len(), 6);
+        assert_eq!(counts(&plan), HashMap::from([(1, 4), (2, 2)]));
+    }
 }
