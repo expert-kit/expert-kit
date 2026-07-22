@@ -12,8 +12,9 @@ use tokio_stream::{Stream, StreamExt, wrappers::ReceiverStream};
 use tonic::{Request, Response, Status, Streaming};
 
 use crate::{
-    controller::v2_state::{
-        ControllerV2State, ExpertKey, MAX_CONTROL_ENTRIES_PER_PART, Placement, StateReportResult,
+    controller::runtime_state::{
+        ControllerRuntimeState, ExpertKey, MAX_CONTROL_ENTRIES_PER_PART, Placement,
+        StateReportResult,
     },
     proto::ek::control::v2::{
         ControllerWeightMessage, ExpertState, ExpertStateKind, FullExpertStatePart,
@@ -75,18 +76,18 @@ pub trait WeightControlHooks: Send + Sync + 'static {
 
 #[derive(Clone)]
 pub struct WeightControlServiceImpl {
-    state: ControllerV2State,
+    state: ControllerRuntimeState,
     hooks: Arc<dyn WeightControlHooks>,
 }
 
 impl WeightControlServiceImpl {
-    pub fn new(state: ControllerV2State, hooks: Arc<dyn WeightControlHooks>) -> Self {
+    pub fn new(state: ControllerRuntimeState, hooks: Arc<dyn WeightControlHooks>) -> Self {
         Self { state, hooks }
     }
 }
 
 struct WeightSession {
-    state: ControllerV2State,
+    state: ControllerRuntimeState,
     hooks: Arc<dyn WeightControlHooks>,
     worker_id: String,
     start_id: String,
@@ -241,7 +242,7 @@ impl WeightControlService for WeightControlServiceImpl {
 }
 
 async fn handle_worker_message(
-    state: &ControllerV2State,
+    state: &ControllerRuntimeState,
     hooks: &dyn WeightControlHooks,
     worker_id: &str,
     start_id: &str,
@@ -295,7 +296,7 @@ async fn handle_worker_message(
 }
 
 async fn apply_report(
-    state: &ControllerV2State,
+    state: &ControllerRuntimeState,
     hooks: &dyn WeightControlHooks,
     worker_id: &str,
     start_id: &str,
@@ -394,7 +395,7 @@ async fn send_placement(
 }
 
 async fn send_new_drains(
-    state: &ControllerV2State,
+    state: &ControllerRuntimeState,
     worker_id: &str,
     start_id: &str,
     responses: &mpsc::Sender<Result<ControllerWeightMessage, Status>>,
@@ -682,7 +683,7 @@ mod tests {
 
     #[tokio::test]
     async fn session_sends_targets_persists_ready_state_and_acks_report() {
-        let state = ControllerV2State::new(8);
+        let state = ControllerRuntimeState::new(8);
         state.register(registration()).await.unwrap();
         let hooks = Arc::new(FakeHooks::default());
         let (_update_sender, updates) = mpsc::channel(1);
@@ -741,7 +742,7 @@ mod tests {
 
     #[tokio::test]
     async fn session_sends_target_removal_before_drain_authorization() {
-        let state = ControllerV2State::new(8);
+        let state = ControllerRuntimeState::new(8);
         state.register(registration()).await.unwrap();
         let lease = state.open_heartbeat("worker-0", "start-0").await.unwrap();
         state

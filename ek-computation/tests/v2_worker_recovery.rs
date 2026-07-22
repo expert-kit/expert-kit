@@ -13,12 +13,12 @@ use std::{
 use async_trait::async_trait;
 use ek_computation::{
     controller::{
+        runtime_state::{ControllerRuntimeState, ExpertKey, RegistrationResult},
         service::{
             instance::{DefaultInstanceResolver, InstanceServiceImpl, ResolvedDefaultInstance},
             v2::{TopologyServiceImpl, WorkerLifecycleHooks, WorkerLifecycleServiceImpl},
             v2_weight::{TargetSubscription, WeightControlHooks, WeightControlServiceImpl},
         },
-        v2_state::{ControllerV2State, ExpertKey, RegistrationResult},
     },
     proto::ek::{
         control::v2::{
@@ -304,7 +304,7 @@ impl ControllerHarness {
         let port = unused_port();
         let address = format!("127.0.0.1:{port}").parse().unwrap();
         let endpoint = format!("127.0.0.1:{port}");
-        let state = ControllerV2State::new(32);
+        let state = ControllerRuntimeState::new(32);
         let hooks = Arc::new(RecoveryHooks::default());
         let instance_resolver: Arc<dyn DefaultInstanceResolver> = Arc::new(TestInstanceResolver);
         let lifecycle = WorkerLifecycleServiceImpl::new(

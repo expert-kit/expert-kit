@@ -1,10 +1,10 @@
 pub mod dispatcher;
 pub mod elastic;
 pub mod poller;
+pub mod runtime_state;
 pub mod scheduler;
 pub mod service;
-pub mod v2_state;
-pub mod v2_store;
+pub mod state_store;
 
 use crate::proto::ek::control::{
     v1::plan_service_server::PlanServiceServer,
@@ -28,10 +28,12 @@ use super::controller::poller::start_poll;
 
 pub async fn controller_main() -> EKResult<()> {
     let settings = ek_base::config::get_ek_settings();
-    let v2_state =
-        v2_state::ControllerV2State::restore(256, v2_store::PostgresControllerStateStore::shared())
-            .await
-            .map_err(|error| ek_base::error::EKError::RuntimeError(error.to_string()))?;
+    let runtime_state = runtime_state::ControllerRuntimeState::restore(
+        256,
+        state_store::PostgresControllerStateStore::shared(),
+    )
+    .await
+    .map_err(|error| ek_base::error::EKError::RuntimeError(error.to_string()))?;
     let instance_resolver: Arc<dyn DefaultInstanceResolver> =
         Arc::new(DatabaseDefaultInstanceResolver::new(
             settings.inference.model_name.clone(),
@@ -40,16 +42,16 @@ pub async fn controller_main() -> EKResult<()> {
     let worker_instance_service = InstanceServiceImpl::new(instance_resolver.clone());
     let frontend_instance_service = InstanceServiceImpl::new(instance_resolver.clone());
     let lifecycle_service = WorkerLifecycleServiceImpl::new(
-        v2_state.clone(),
+        runtime_state.clone(),
         Arc::new(DatabaseLifecycleHooks::new()),
         instance_resolver.clone(),
         Duration::from_secs(settings.controller.fault_detection.heartbeat_timeout_secs),
     );
     let weight_control_service = WeightControlServiceImpl::new(
-        v2_state.clone(),
+        runtime_state.clone(),
         Arc::new(DatabaseWeightControlHooks::new()),
     );
-    let topology_service = TopologyServiceImpl::new(v2_state, instance_resolver);
+    let topology_service = TopologyServiceImpl::new(runtime_state, instance_resolver);
 
     let worker_control_srv = tokio::task::spawn(async move {
         let intra_addr = format!(

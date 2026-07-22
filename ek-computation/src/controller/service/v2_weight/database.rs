@@ -8,7 +8,7 @@ use tokio::sync::mpsc;
 use tonic::Status;
 
 use crate::{
-    controller::{dispatcher::DISPATCHER, v2_state::ExpertKey},
+    controller::{dispatcher::DISPATCHER, runtime_state::ExpertKey},
     proto::ek::control::v2::{RegisterWorkerRequest, TargetExpert},
     state::{
         io::{StateReader, StateReaderImpl},

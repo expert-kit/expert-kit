@@ -1,4 +1,4 @@
-//! Durable placement generations and topology-version allocation for v2.
+//! Durable Controller placement generations and topology-version allocation.
 
 use std::{collections::BTreeMap, fmt, sync::Arc};
 

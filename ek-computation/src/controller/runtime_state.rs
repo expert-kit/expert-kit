@@ -1,4 +1,4 @@
-//! State shared by the v2 Controller services.
+//! Runtime state shared by Controller services.
 //!
 //! Worker starts, leases, and observed readiness are process-local. Placement
 //! generations, target lists, and topology versions use the injected durable store.
@@ -11,7 +11,7 @@ use std::{
 
 use tokio::sync::{RwLock, watch};
 
-use super::v2_store::{
+use super::state_store::{
     ControllerStateStore, ControllerStoreSnapshot, PersistedPlacement,
     TransientControllerStateStore,
 };
@@ -148,7 +148,7 @@ impl fmt::Display for ControllerStateError {
 impl std::error::Error for ControllerStateError {}
 
 #[derive(Clone)]
-pub struct ControllerV2State {
+pub struct ControllerRuntimeState {
     inner: Arc<RwLock<Inner>>,
     changed: watch::Sender<u64>,
     store: Arc<dyn ControllerStateStore>,
@@ -211,7 +211,7 @@ struct TopologyRevision {
     changes: Vec<RouteChange>,
 }
 
-impl ControllerV2State {
+impl ControllerRuntimeState {
     pub fn new(history_limit: usize) -> Self {
         Self::from_snapshot(
             history_limit,
@@ -1415,7 +1415,9 @@ mod tests {
 
     use async_trait::async_trait;
 
-    use crate::{controller::v2_store::ControllerStoreError, proto::ek::control::v2::WorkerDevice};
+    use crate::{
+        controller::state_store::ControllerStoreError, proto::ek::control::v2::WorkerDevice,
+    };
 
     #[derive(Default)]
     struct FailingTopologyStore {
@@ -1499,12 +1501,12 @@ mod tests {
         }
     }
 
-    async fn register_live_worker(state: &ControllerV2State) -> u64 {
+    async fn register_live_worker(state: &ControllerRuntimeState) -> u64 {
         register_live_named(state, "worker-0", "start-0").await
     }
 
     async fn register_live_named(
-        state: &ControllerV2State,
+        state: &ControllerRuntimeState,
         worker_id: &str,
         start_id: &str,
     ) -> u64 {
@@ -1528,7 +1530,7 @@ mod tests {
 
     #[tokio::test]
     async fn registration_is_idempotent_but_a_new_start_replaces_routes() {
-        let state = ControllerV2State::new(8);
+        let state = ControllerRuntimeState::new(8);
         register_live_worker(&state).await;
         let placement = state
             .set_targets("worker-0", "start-0", vec![target(1, 2)])
@@ -1569,7 +1571,7 @@ mod tests {
 
     #[tokio::test]
     async fn registration_rejects_an_unspecified_transport() {
-        let state = ControllerV2State::new(8);
+        let state = ControllerRuntimeState::new(8);
         let mut request = registration("worker-0", "start-0");
         request.transport_type = WorkerTransportType::Unspecified as i32;
 
@@ -1584,7 +1586,9 @@ mod tests {
     #[tokio::test]
     async fn restart_keeps_placement_but_requires_a_new_full_ready_report() {
         let store = TransientControllerStateStore::shared();
-        let state = ControllerV2State::restore(8, store.clone()).await.unwrap();
+        let state = ControllerRuntimeState::restore(8, store.clone())
+            .await
+            .unwrap();
         register_live_worker(&state).await;
         let placement = state
             .set_targets("worker-0", "start-0", vec![target(1, 2)])
@@ -1604,7 +1608,7 @@ mod tests {
         assert_eq!(state.topology_version(7).await, 1);
         drop(state);
 
-        let restarted = ControllerV2State::restore(8, store).await.unwrap();
+        let restarted = ControllerRuntimeState::restore(8, store).await.unwrap();
         assert_eq!(restarted.topology_version(7).await, 2);
         let messages = restarted.topology_messages(7, 1).await.unwrap();
         let topology_message::Message::Snapshot(snapshot) = messages[0].message.as_ref().unwrap()
@@ -1659,7 +1663,9 @@ mod tests {
     #[tokio::test]
     async fn topology_persistence_failure_does_not_expose_ready_state() {
         let store = Arc::new(FailingTopologyStore::default());
-        let state = ControllerV2State::restore(8, store.clone()).await.unwrap();
+        let state = ControllerRuntimeState::restore(8, store.clone())
+            .await
+            .unwrap();
         register_live_worker(&state).await;
         let placement = state
             .set_targets("worker-0", "start-0", vec![target(1, 2)])
@@ -1705,7 +1711,7 @@ mod tests {
 
     #[tokio::test]
     async fn heartbeat_sequence_and_stream_lease_are_monotonic() {
-        let state = ControllerV2State::new(8);
+        let state = ControllerRuntimeState::new(8);
         state
             .register(registration("worker-0", "start-0"))
             .await
@@ -1768,7 +1774,7 @@ mod tests {
 
     #[tokio::test]
     async fn ready_routes_require_target_and_live_worker() {
-        let state = ControllerV2State::new(8);
+        let state = ControllerRuntimeState::new(8);
         let lease = register_live_worker(&state).await;
         let placement = state
             .set_targets("worker-0", "start-0", vec![target(1, 2)])
@@ -1817,7 +1823,7 @@ mod tests {
 
     #[tokio::test]
     async fn state_reports_reject_generation_and_sequence_regressions() {
-        let state = ControllerV2State::new(8);
+        let state = ControllerRuntimeState::new(8);
         register_live_worker(&state).await;
         let placement = state
             .set_targets("worker-0", "start-0", vec![target(1, 2)])
@@ -1866,7 +1872,7 @@ mod tests {
 
     #[tokio::test]
     async fn failed_state_requires_structured_bounded_failure_data() {
-        let state = ControllerV2State::new(8);
+        let state = ControllerRuntimeState::new(8);
         register_live_worker(&state).await;
         let placement = state
             .set_targets("worker-0", "start-0", vec![target(1, 2)])
@@ -1895,7 +1901,7 @@ mod tests {
 
     #[tokio::test]
     async fn topology_replays_history_or_falls_back_to_snapshot() {
-        let state = ControllerV2State::new(1);
+        let state = ControllerRuntimeState::new(1);
         let lease = register_live_worker(&state).await;
         let placement = state
             .set_targets("worker-0", "start-0", vec![target(1, 2)])
@@ -1937,7 +1943,7 @@ mod tests {
 
     #[tokio::test]
     async fn topology_and_target_parts_are_bounded() {
-        let state = ControllerV2State::new(8);
+        let state = ControllerRuntimeState::new(8);
         register_live_worker(&state).await;
         let targets: Vec<TargetExpert> = (0..129).map(|expert_id| target(1, expert_id)).collect();
         let placement = state
@@ -1965,7 +1971,7 @@ mod tests {
 
     #[tokio::test]
     async fn target_removal_is_authorized_after_the_route_update() {
-        let state = ControllerV2State::new(8);
+        let state = ControllerRuntimeState::new(8);
         register_live_worker(&state).await;
         let placement = state
             .set_targets("worker-0", "start-0", vec![target(1, 2), target(1, 3)])
@@ -2012,7 +2018,7 @@ mod tests {
 
     #[tokio::test]
     async fn newer_placement_supersedes_and_reissues_incomplete_expert_drains() {
-        let state = ControllerV2State::new(8);
+        let state = ControllerRuntimeState::new(8);
         register_live_worker(&state).await;
         let first = state
             .set_targets("worker-0", "start-0", vec![target(1, 2), target(1, 3)])
@@ -2071,7 +2077,7 @@ mod tests {
 
     #[tokio::test]
     async fn whole_worker_drain_waits_for_ready_replacements() {
-        let state = ControllerV2State::new(8);
+        let state = ControllerRuntimeState::new(8);
         let first_lease = register_live_named(&state, "worker-0", "start-0").await;
         let first_placement = state
             .set_targets("worker-0", "start-0", vec![target(1, 2)])

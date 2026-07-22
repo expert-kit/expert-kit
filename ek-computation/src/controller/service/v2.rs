@@ -12,8 +12,10 @@ use crate::{
     controller::{
         elastic::{progressive, recovery::recover_unique_experts},
         poller::request_immediate_poll,
+        runtime_state::{
+            ControllerRuntimeState, ControllerStateError, HeartbeatResult, RegistrationResult,
+        },
         service::instance::DefaultInstanceResolver,
-        v2_state::{ControllerStateError, ControllerV2State, HeartbeatResult, RegistrationResult},
     },
     proto::ek::control::v2::{
         HeartbeatRequest, HeartbeatSummary, RegisterWorkerRequest, RegisterWorkerResponse,
@@ -208,14 +210,14 @@ async fn delete_stale_experts(worker_id: &str) {
 
 #[derive(Clone)]
 pub struct WorkerLifecycleServiceImpl {
-    state: ControllerV2State,
+    state: ControllerRuntimeState,
     hooks: Arc<dyn WorkerLifecycleHooks>,
     instance_resolver: Arc<dyn DefaultInstanceResolver>,
     heartbeat_timeout: Duration,
 }
 
 struct HeartbeatLeaseGuard {
-    state: ControllerV2State,
+    state: ControllerRuntimeState,
     hooks: Arc<dyn WorkerLifecycleHooks>,
     worker_id: String,
     start_id: String,
@@ -227,7 +229,7 @@ struct HeartbeatLeaseGuard {
 
 impl HeartbeatLeaseGuard {
     fn new(
-        state: ControllerV2State,
+        state: ControllerRuntimeState,
         hooks: Arc<dyn WorkerLifecycleHooks>,
         worker_id: String,
         start_id: String,
@@ -315,7 +317,7 @@ impl Drop for HeartbeatLeaseGuard {
 
 impl WorkerLifecycleServiceImpl {
     pub fn new(
-        state: ControllerV2State,
+        state: ControllerRuntimeState,
         hooks: Arc<dyn WorkerLifecycleHooks>,
         instance_resolver: Arc<dyn DefaultInstanceResolver>,
         heartbeat_timeout: Duration,
@@ -466,13 +468,13 @@ impl WorkerLifecycleService for WorkerLifecycleServiceImpl {
 
 #[derive(Clone)]
 pub struct TopologyServiceImpl {
-    state: ControllerV2State,
+    state: ControllerRuntimeState,
     instance_resolver: Arc<dyn DefaultInstanceResolver>,
 }
 
 impl TopologyServiceImpl {
     pub fn new(
-        state: ControllerV2State,
+        state: ControllerRuntimeState,
         instance_resolver: Arc<dyn DefaultInstanceResolver>,
     ) -> Self {
         Self {
@@ -680,7 +682,7 @@ mod tests {
 
     #[tokio::test]
     async fn lifecycle_service_registers_and_closes_a_graceful_stream() {
-        let state = ControllerV2State::new(8);
+        let state = ControllerRuntimeState::new(8);
         let hooks = Arc::new(FakeHooks::default());
         let service = WorkerLifecycleServiceImpl::new(
             state,
@@ -715,7 +717,7 @@ mod tests {
 
     #[tokio::test]
     async fn lifecycle_service_times_out_and_marks_worker_unavailable() {
-        let state = ControllerV2State::new(8);
+        let state = ControllerRuntimeState::new(8);
         let hooks = Arc::new(FakeHooks::default());
         let service = WorkerLifecycleServiceImpl::new(
             state.clone(),
@@ -732,7 +734,7 @@ mod tests {
 
     #[tokio::test]
     async fn cancelled_heartbeat_handler_still_marks_worker_unavailable() {
-        let state = ControllerV2State::new(8);
+        let state = ControllerRuntimeState::new(8);
         let hooks = Arc::new(FakeHooks::default());
         let service = WorkerLifecycleServiceImpl::new(
             state.clone(),
@@ -788,7 +790,7 @@ mod tests {
 
     #[tokio::test]
     async fn lifecycle_service_closes_a_live_worker_after_heartbeat_timeout() {
-        let state = ControllerV2State::new(8);
+        let state = ControllerRuntimeState::new(8);
         let hooks = Arc::new(FakeHooks::default());
         let service = WorkerLifecycleServiceImpl::new(
             state.clone(),
@@ -814,7 +816,7 @@ mod tests {
 
     #[tokio::test]
     async fn topology_service_sends_an_initial_empty_snapshot() {
-        let state = ControllerV2State::new(8);
+        let state = ControllerRuntimeState::new(8);
         let service = TopologyServiceImpl::new(state, instance_resolver());
         let response = service
             .watch_topology(Request::new(WatchTopologyRequest {
@@ -839,7 +841,7 @@ mod tests {
 
     #[tokio::test]
     async fn lifecycle_rejects_a_nondefault_instance_before_state_mutation() {
-        let state = ControllerV2State::new(8);
+        let state = ControllerRuntimeState::new(8);
         let service = WorkerLifecycleServiceImpl::new(
             state.clone(),
             Arc::new(FakeHooks::default()),
@@ -863,7 +865,7 @@ mod tests {
 
     #[tokio::test]
     async fn topology_rejects_a_nondefault_instance() {
-        let service = TopologyServiceImpl::new(ControllerV2State::new(8), instance_resolver());
+        let service = TopologyServiceImpl::new(ControllerRuntimeState::new(8), instance_resolver());
 
         let error = match service
             .watch_topology(Request::new(WatchTopologyRequest {
