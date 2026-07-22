@@ -22,6 +22,8 @@ class RunMetrics:
     output_length: int
     prefill_seconds: float
     decode_seconds: float
+    generated_token_ids: tuple[tuple[int, ...], ...] = ()
+    generated_text: tuple[str, ...] = ()
 
     @property
     def total_seconds(self) -> float:
@@ -59,7 +61,7 @@ class RunMetrics:
 
         return self.batch_size * self.output_length / self.total_seconds
 
-    def as_dict(self) -> dict[str, int | float | None]:
+    def as_dict(self) -> dict[str, object]:
         """Return JSON-compatible raw and derived metrics."""
 
         return {
@@ -166,6 +168,7 @@ def _synchronize(device: torch.device) -> None:
 
 def _measure_generation(
     model: Any,
+    tokenizer: Any,
     input_ids: torch.Tensor,
     *,
     output_length: int,
@@ -184,6 +187,7 @@ def _measure_generation(
         return_dict=True,
     )
     next_token = output.logits[:, -1, :].argmax(dim=-1, keepdim=True)
+    generated_tokens = [next_token]
     synchronize(device)
     prefill_seconds = clock() - prefill_start
     if prefill_seconds <= 0:
@@ -216,17 +220,29 @@ def _measure_generation(
             )
             past_key_values = output.past_key_values
             next_token = output.logits[:, -1, :].argmax(dim=-1, keepdim=True)
+            generated_tokens.append(next_token)
         synchronize(device)
         decode_seconds = clock() - decode_start
         if decode_seconds <= 0:
             raise RuntimeError("decode timer did not advance")
 
+    generated_token_ids = tuple(
+        tuple(row) for row in torch.cat(generated_tokens, dim=1).detach().cpu().tolist()
+    )
+    generated_text = tuple(
+        tokenizer.batch_decode(
+            generated_token_ids,
+            skip_special_tokens=False,
+        )
+    )
     return RunMetrics(
         batch_size=input_ids.shape[0],
         input_length=input_ids.shape[1],
         output_length=output_length,
         prefill_seconds=prefill_seconds,
         decode_seconds=decode_seconds,
+        generated_token_ids=generated_token_ids,
+        generated_text=generated_text,
     )
 
 
@@ -289,6 +305,7 @@ def run_benchmark(
             for _ in range(warmup_runs):
                 _measure_generation(
                     model,
+                    tokenizer,
                     input_ids,
                     output_length=output_length,
                     clock=clock,
@@ -297,6 +314,7 @@ def run_benchmark(
             runs = tuple(
                 _measure_generation(
                     model,
+                    tokenizer,
                     input_ids,
                     output_length=output_length,
                     clock=clock,

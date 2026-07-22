@@ -2,6 +2,7 @@
 
 import ast
 import sys
+import tomllib
 import types
 from pathlib import Path
 
@@ -110,6 +111,12 @@ def test_remote_factory_matches_the_vllm_0251_parameter_surface() -> None:
     ]
 
 
-def test_setup_pins_the_reviewed_vllm_version() -> None:
-    setup = (Path(__file__).parents[1] / "setup.py").read_text(encoding="utf-8")
-    assert '"vllm==0.25.1"' in setup
+def test_pyproject_pins_vllm_and_registers_the_plugin() -> None:
+    path = Path(__file__).parents[1] / "pyproject.toml"
+    with path.open("rb") as source:
+        pyproject = tomllib.load(source)
+
+    assert "vllm==0.25.1" in pyproject["project"]["dependencies"]
+    entry_points = pyproject["project"]["entry-points"]["vllm.general_plugins"]
+    assert entry_points == {"register_expertkit": "expertkit_vllm.plugin:register"}
+    assert pyproject["build-system"]["build-backend"] == "hatchling.build"

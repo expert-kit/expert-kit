@@ -7,9 +7,9 @@ from pathlib import Path
 
 
 def test_remote_moe_validates_router_output_before_getting_client() -> None:
-    source = (
-        Path(__file__).parents[1] / "expertkit_vllm" / "experts" / "remote_moe.py"
-    ).read_text(encoding="utf-8")
+    source = (Path(__file__).parents[1] / "expertkit_vllm" / "experts" / "remote_moe.py").read_text(
+        encoding="utf-8"
+    )
     tree = ast.parse(source)
     runner = next(
         node

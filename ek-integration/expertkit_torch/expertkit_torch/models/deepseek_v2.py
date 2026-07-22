@@ -16,13 +16,14 @@ def create_routed_moe_class(
 ) -> type[nn.Module]:
     """Create a DeepSeek-V2 MoE class bound to one model and client."""
 
-    class RoutedDeepseekV2MoE(nn.Module):
+    class RoutedDeepseekV2Moe(modeling_deepseek_v2.DeepseekV2Moe):
         """Keep the native router and shared expert while routing other experts."""
 
         def __init__(self, config) -> None:
-            super().__init__()
+            nn.Module.__init__(self)
             self.layer_id = layer_ids.take()
-            self.gate = modeling_deepseek_v2.DeepseekV2MoEGate(config)
+            self.config = config
+            self.gate = nn.Linear(config.hidden_size, config.n_routed_experts, bias=False)
             shared_expert_count = config.n_shared_experts
             if shared_expert_count is None:
                 self.shared_experts = None
@@ -31,13 +32,23 @@ def create_routed_moe_class(
                     config=config,
                     intermediate_size=config.moe_intermediate_size * shared_expert_count,
                 )
+            self.routed_scaling_factor = config.routed_scaling_factor
+            self.topk_method = config.topk_method
+            self.num_group = config.n_group
+            self.num_experts = config.n_routed_experts
+            self.top_k = config.num_experts_per_tok
+            self.topk_group = config.topk_group
 
         def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
             """Execute routed experts remotely and the shared expert locally."""
 
             residual = hidden_states
             original_shape = hidden_states.shape
-            expert_ids, routing_weights = self.gate(hidden_states)
+            router_logits = nn.functional.linear(
+                hidden_states.type(torch.float32),
+                self.gate.weight.type(torch.float32),
+            )
+            expert_ids, routing_weights = self.route_tokens_to_experts(router_logits)
             flattened = hidden_states.reshape(-1, hidden_states.shape[-1])
             routed = client.forward_layer(
                 layer_id=self.layer_id,
@@ -49,4 +60,4 @@ def create_routed_moe_class(
                 routed = routed + self.shared_experts(residual)
             return routed
 
-    return RoutedDeepseekV2MoE
+    return RoutedDeepseekV2Moe

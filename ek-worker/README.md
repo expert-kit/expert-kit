@@ -10,26 +10,22 @@ made ready, and returns one weighted partial output per batch.
 Create the default locked Torch environment from the repository root:
 
 ```bash
-uv sync --project ek-worker --locked
+uv sync --locked
 ```
 
-Activate `ek-worker/.venv` before using the unified CLI so `ek-cli worker` can
-find the `ek-worker` executable:
-
-```bash
-source ek-worker/.venv/bin/activate
-```
+This creates the repository root `.venv` and installs Proto, Transport, Worker,
+and the Torch integration. Run all commands below from the repository root.
 
 The optional CPU-only GGML environment is installed with:
 
 ```bash
-uv sync --project ek-worker --locked --extra ggml
+uv sync --locked --extra ggml
 ```
 
 The experimental NVIDIA fused environment is installed with:
 
 ```bash
-uv sync --project ek-worker --locked --extra fused
+uv sync --locked --extra fused
 ```
 
 GGML remains experimental and CPU-only. The fused Backend supports the current
@@ -109,26 +105,29 @@ weight is usable on the configured device.
 Run the Worker directly:
 
 ```bash
-ek-worker --config /absolute/path/to/worker.yaml
+uv run --package expertkit-worker ek-worker --config /absolute/path/to/worker.yaml
 ```
 
 The configuration path may instead be selected with `EK_CONFIG`. An explicit
 `--config` takes precedence:
 
 ```bash
-EK_CONFIG=/absolute/path/to/worker.yaml ek-worker
+EK_CONFIG=/absolute/path/to/worker.yaml \
+  uv run --package expertkit-worker ek-worker
 ```
 
 Or use the unified launcher, which replaces itself with the same Python process:
 
 ```bash
-target/release/ek-cli --config /absolute/path/to/worker.yaml worker
+uv run --package expertkit-worker \
+  target/release/ek-cli --config /absolute/path/to/worker.yaml worker
 ```
 
 The unified launcher accepts the same environment-based selection:
 
 ```bash
-EK_CONFIG=/absolute/path/to/worker.yaml target/release/ek-cli worker
+EK_CONFIG=/absolute/path/to/worker.yaml \
+  uv run --package expertkit-worker target/release/ek-cli worker
 ```
 
 Sending `SIGTERM` starts the Controller-coordinated shutdown. The Worker keeps
@@ -145,7 +144,7 @@ collector requires structured JSON.
 Prometheus and OpenTelemetry require the optional dependencies:
 
 ```bash
-uv sync --project ek-worker --locked --extra observability
+uv sync --locked --extra observability
 ```
 
 Both are disabled by default. Enable them in the Worker YAML:
@@ -197,9 +196,9 @@ trusted isolated network protected by network-level rules.
 ## Tests
 
 ```bash
-uv run --project ek-worker ruff check ek-worker/src ek-worker/tests
-uv run --project ek-worker ruff format --check ek-worker/src ek-worker/tests
-uv run --project ek-worker pytest ek-worker/tests
+uv run --package expertkit-worker ruff check ek-worker/src ek-worker/tests
+uv run --package expertkit-worker ruff format --check ek-worker/src ek-worker/tests
+uv run --package expertkit-worker pytest ek-worker/tests
 ```
 
 CUDA, direct-I/O, and real multi-process checks require the matching hardware or

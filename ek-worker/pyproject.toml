@@ -9,10 +9,10 @@ description = "Expert Kit Python Worker"
 requires-python = ">=3.12"
 dependencies = [
     "aiohttp>=3.11,<4",
-    "expertkit-proto",
-    "expertkit-transport",
+    "expertkit-proto==0.1.0",
+    "expertkit-transport==0.1.0",
     "grpcio==1.71.0",
-    "pydantic>=2.11,<3",
+    "pydantic>=2.12,<3",
     "PyYAML>=6,<7",
     "structlog>=25.4,<26",
     "torch==2.11.0",
@@ -36,26 +36,11 @@ observability = [
 ]
 
 [tool.uv.sources]
-expertkit-proto = { path = "../ek-proto", editable = true }
-expertkit-transport = { path = "../ek-transport", editable = true }
+expertkit-proto = { workspace = true }
+expertkit-transport = { workspace = true }
 
 [dependency-groups]
-dev = [
-    "pytest>=8.3,<9",
-    "ruff>=0.11,<1",
-    "safetensors>=0.5.3,<1",
-]
-
-[tool.pytest.ini_options]
-testpaths = ["tests"]
-markers = [
-    "cuda: requires an available CUDA device",
-    "direct_io: requires a Linux filesystem supporting strict O_DIRECT reads and writes",
-]
+dev = ["safetensors>=0.5.3,<1"]
 
 [tool.ruff]
-line-length = 100
-target-version = "py312"
-
-[tool.ruff.lint]
-select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
+extend = "../pyproject.toml"

@@ -1,58 +1,71 @@
 [project]
 name = "expert-kit"
 version = "0.1.0"
-description = "Add your description here"
+description = "Distributed Mixture-of-Experts inference"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "accelerate>=1.6.0",
-    "ansible>=11.5.0",
-    "ansible-lint>=25.4.0",
-    "duckdb>=1.2.1",
-    "grpcio>=1.71.0",
-    "grpcio-tools>=1.71.0",
-    "ipykernel>=6.29.5",
-    "line-profiler>=5.0.0",
-    "matplotlib>=3.10.1",
-    "opendal>=0.45.16",
-    "polar>=0.0.127",
-    "psycopg[pool]>=3.2.7",
-    "pydantic>=2.11.4",
-    "pyyaml>=6.0.2",
-    "ruff>=0.9.10",
-    "safetensors>=0.5.3",
-    "sympy>=1.14.0",
-    "torch==2.7.0",
-    "transformers[cu128]>=4.54.0",
-    "uvloop>=0.21.0",
+    "expertkit-proto==0.1.0",
+    "expertkit-torch==0.1.0",
+    "expertkit-transport==0.1.0",
+    "expertkit-worker==0.1.0",
 ]
 
 [project.optional-dependencies]
-cpu = ["torch==2.7.0"]
-cu128 = ["torch==2.7.0"]
-
+fused = ["expertkit-worker[fused]==0.1.0"]
+ggml = ["expertkit-worker[ggml]==0.1.0"]
+observability = ["expertkit-worker[observability]==0.1.0"]
+vllm = ["expertkit-vllm==0.1.0"]
 
 [dependency-groups]
-dev = ["ruff>=0.9.10"]
+dev = [
+    "grpcio-tools==1.71.0",
+    "pytest>=8.3,<9",
+    "ruff>=0.11,<1",
+    "safetensors>=0.5.3,<1",
+]
+ops = [
+    "ansible>=11.5,<12",
+    "ansible-lint>=25.4,<26",
+]
 
 [tool.uv.sources]
-torch = [
-    { index = "pytorch-cpu", marker = "sys_platform == 'darwin'", extra = "cpu" },
-    { index = "pytorch-cu128", marker = "sys_platform != 'darwin'", extra = "cu128" },
+expertkit-proto = { workspace = true }
+expertkit-torch = { workspace = true }
+expertkit-transport = { workspace = true }
+expertkit-vllm = { workspace = true }
+expertkit-worker = { workspace = true }
+
+[tool.uv.workspace]
+members = [
+    "ek-proto",
+    "ek-transport",
+    "ek-worker",
+    "ek-integration/expertkit_torch",
+    "ek-integration/expertkit_vllm",
 ]
-[[tool.uv.index]]
-name = "tuna"
-url = "https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple"
 
-[[tool.uv.index]]
-name = "pytorch-cpu"
-url = "https://download.pytorch.org/whl/cpu"
-explicit = true
+[tool.pytest.ini_options]
+addopts = ["--import-mode=importlib"]
+testpaths = [
+    "ek-proto/tests",
+    "ek-transport/tests",
+    "ek-worker/tests",
+    "ek-integration/expertkit_torch/tests",
+    "ek-integration/expertkit_vllm/tests",
+]
+pythonpath = ["ek-integration/expertkit_vllm"]
+markers = [
+    "cuda: requires an available CUDA device",
+    "deepseek_v2: requires DeepSeek-V2 weights and a running Expert Kit deployment",
+    "direct_io: requires a Linux filesystem supporting strict O_DIRECT reads and writes",
+    "qwen: requires a supported Qwen model and a running Expert Kit deployment",
+]
 
-[[tool.uv.index]]
-name = "pytorch-cu128"
-url = "https://download.pytorch.org/whl/cu128"
-explicit = true
+[tool.ruff]
+exclude = ["ek-proto/src/expertkit_proto"]
+line-length = 100
+target-version = "py312"
 
-[tool.uv]
-conflicts = [[{ extra = "cpu" }, { extra = "cu128" }]]
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]

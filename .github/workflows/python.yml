@@ -1,4 +1,4 @@
-name: Python Worker checks
+name: Python workspace checks
 
 on:
   workflow_dispatch:
@@ -7,21 +7,8 @@ on:
     types: [opened, synchronize, reopened]
 
 jobs:
-  python-check:
+  workspace-lock-check:
     runs-on: ubuntu-24.04
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - project: ek-transport
-            source: ek-transport/src
-            tests: ek-transport/tests
-          - project: ek-worker
-            source: ek-worker/src
-            tests: ek-worker/tests
-          - project: ek-integration/expertkit_torch
-            source: ek-integration/expertkit_torch/expertkit_torch
-            tests: ek-integration/expertkit_torch/tests
 
     steps:
       - name: Check out source
@@ -30,19 +17,99 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@v6
         with:
-          version: "0.6.9"
+          version: "0.11.30"
           enable-cache: true
 
-      - name: Install the locked environment
-        run: uv sync --project "${{ matrix.project }}" --locked
-
-      - name: Run Ruff
+      - name: Check the unified lockfile
         run: |
-          uv run --project "${{ matrix.project }}" ruff check "${{ matrix.source }}" "${{ matrix.tests }}"
-          uv run --project "${{ matrix.project }}" ruff format --check "${{ matrix.source }}" "${{ matrix.tests }}"
+          uv lock --check
+          test "$(git ls-files '*uv.lock')" = "uv.lock"
+          test ! -e ek-integration/expertkit_vllm/setup.py
 
-      - name: Run CPU tests
-        run: uv run --project "${{ matrix.project }}" pytest "${{ matrix.tests }}"
+  python-check:
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.11.30"
+          enable-cache: true
+
+      - name: Install the locked default workspace
+        run: uv sync --locked
+
+      - name: Verify default workspace imports
+        run: |
+          uv run --no-sync python -c \
+            "import expertkit_proto, expertkit_transport, expertkit_worker, expertkit_torch"
+
+      - name: Regenerate and test Proto
+        run: |
+          uv run --no-sync python ek-proto/scripts/generate_python.py
+          git diff --exit-code -- ek-proto/src
+          uv run --no-sync --package expertkit-proto ruff check \
+            ek-proto/scripts ek-proto/tests
+          uv run --no-sync --package expertkit-proto ruff format --check \
+            ek-proto/scripts ek-proto/tests
+          uv run --no-sync --package expertkit-proto pytest ek-proto/tests
+
+      - name: Check Transport
+        run: |
+          uv run --no-sync --package expertkit-transport ruff check \
+            ek-transport/src ek-transport/tests
+          uv run --no-sync --package expertkit-transport ruff format --check \
+            ek-transport/src ek-transport/tests
+          uv run --no-sync --package expertkit-transport pytest ek-transport/tests
+
+      - name: Check Worker
+        run: |
+          uv run --no-sync --package expertkit-worker ruff check \
+            ek-worker/src ek-worker/tests
+          uv run --no-sync --package expertkit-worker ruff format --check \
+            ek-worker/src ek-worker/tests
+          uv run --no-sync --package expertkit-worker pytest ek-worker/tests
+
+      - name: Check Torch integration
+        run: |
+          uv run --no-sync --package expertkit-torch ruff check \
+            ek-integration/expertkit_torch/expertkit_torch \
+            ek-integration/expertkit_torch/tests
+          uv run --no-sync --package expertkit-torch ruff format --check \
+            ek-integration/expertkit_torch/expertkit_torch \
+            ek-integration/expertkit_torch/tests
+          uv run --no-sync --package expertkit-torch pytest \
+            ek-integration/expertkit_torch/tests
+
+      - name: Check and build vLLM integration without its runtime
+        env:
+          PYTHONPATH: ek-integration/expertkit_vllm
+        run: |
+          uv run --no-sync ruff check \
+            ek-integration/expertkit_vllm/expertkit_vllm \
+            ek-integration/expertkit_vllm/tests
+          uv run --no-sync ruff format --check \
+            ek-integration/expertkit_vllm/expertkit_vllm \
+            ek-integration/expertkit_vllm/tests
+          uv run --no-sync pytest ek-integration/expertkit_vllm/tests
+          uv run --no-sync python -c "from expertkit_vllm import plugin; assert callable(plugin.register)"
+          uv build --package expertkit-vllm --wheel --out-dir /tmp/expertkit-vllm-wheel
+          uv run --no-sync python - <<'PY'
+          from pathlib import Path
+          from zipfile import ZipFile
+
+          wheel = next(Path("/tmp/expertkit-vllm-wheel").glob("*.whl"))
+          with ZipFile(wheel) as archive:
+              entry_points = next(
+                  name for name in archive.namelist() if name.endswith("entry_points.txt")
+              )
+              contents = archive.read(entry_points).decode()
+          assert "[vllm.general_plugins]" in contents
+          assert "register_expertkit = expertkit_vllm.plugin:register" in contents
+          PY
 
   worker-optional-check:
     runs-on: ubuntu-24.04
@@ -67,48 +134,17 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@v6
         with:
-          version: "0.6.9"
+          version: "0.11.30"
           enable-cache: true
 
       - name: Install the locked optional environment
-        run: uv sync --project ek-worker --locked --extra "${{ matrix.extra }}"
+        run: uv sync --locked --extra "${{ matrix.extra }}"
 
       - name: Verify the optional dependency is installed
-        run: uv run --project ek-worker python -c "${{ matrix.import_check }}"
+        run: uv run --no-sync python -c "${{ matrix.import_check }}"
 
       - name: Run optional-profile tests
-        run: uv run --project ek-worker pytest ${{ matrix.tests }}
-
-  vllm-lightweight-check:
-    runs-on: ubuntu-24.04
-
-    steps:
-      - name: Check out source
-        uses: actions/checkout@v4
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@v6
-        with:
-          version: "0.6.9"
-          enable-cache: true
-
-      - name: Install the locked lightweight environment
-        run: uv sync --project ek-worker --locked
-
-      - name: Run Ruff without installing vLLM
-        run: |
-          uv run --project ek-worker ruff check \
-            ek-integration/expertkit_vllm/expertkit_vllm \
-            ek-integration/expertkit_vllm/tests
-          uv run --project ek-worker ruff format --check \
-            ek-integration/expertkit_vllm/expertkit_vllm \
-            ek-integration/expertkit_vllm/tests
-
-      - name: Run lightweight vLLM tests without installing vLLM
-        working-directory: ek-integration/expertkit_vllm
-        env:
-          PYTHONPATH: .
-        run: uv run --project ../../ek-worker pytest tests
+        run: uv run --no-sync pytest ${{ matrix.tests }}
 
   local-compose-check:
     runs-on: ubuntu-24.04
@@ -117,10 +153,9 @@ jobs:
       - name: Check out source
         uses: actions/checkout@v4
 
-      - name: Validate the CUDA Worker image target
+      - name: Build the CUDA Worker image target
         run: |
           docker build \
-            --check \
             --target ek-worker-cuda-runtime \
             --file container/Dockerfile.cpu \
             .

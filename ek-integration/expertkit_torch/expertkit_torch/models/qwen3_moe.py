@@ -22,8 +22,8 @@
 from __future__ import annotations
 
 import torch
-import torch.nn.functional as F
 from torch import nn
+from transformers.models.qwen3_moe import modeling_qwen3_moe
 
 from expertkit_torch.client import RoutedMoEClient
 from expertkit_torch.models._common import RoutedLayerIds
@@ -41,31 +41,20 @@ def create_routed_moe_class(
         def __init__(self, config) -> None:
             super().__init__()
             self.layer_id = layer_ids.take()
-            self.num_experts = config.num_experts
-            self.top_k = config.num_experts_per_tok
-            self.norm_topk_prob = config.norm_topk_prob
-            self.gate = nn.Linear(config.hidden_size, config.num_experts, bias=False)
+            self.gate = modeling_qwen3_moe.Qwen3MoeTopKRouter(config)
 
-        def forward(self, hidden_states: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
             """Route final top-k assignments through Expert Kit."""
 
             batch_size, sequence_length, hidden_dim = hidden_states.shape
             flattened = hidden_states.reshape(-1, hidden_dim)
-            router_logits = self.gate(flattened)
-            routing_weights = F.softmax(router_logits, dim=1, dtype=torch.float32)
-            routing_weights, expert_ids = torch.topk(
-                routing_weights,
-                self.top_k,
-                dim=-1,
-            )
-            if self.norm_topk_prob:
-                routing_weights /= routing_weights.sum(dim=-1, keepdim=True)
+            _, routing_weights, expert_ids = self.gate(flattened)
             routed = client.forward_layer(
                 layer_id=self.layer_id,
                 hidden_states=flattened,
                 expert_ids=expert_ids,
                 routing_weights=routing_weights,
             )
-            return routed.reshape(batch_size, sequence_length, hidden_dim), router_logits
+            return routed.reshape(batch_size, sequence_length, hidden_dim)
 
     return RoutedQwen3MoeSparseMoeBlock

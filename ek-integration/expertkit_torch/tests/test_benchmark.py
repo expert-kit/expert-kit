@@ -24,6 +24,15 @@ class FakeTokenizer:
         assert not add_special_tokens
         return [4, 5, 6]
 
+    def batch_decode(
+        self,
+        token_ids: tuple[tuple[int, ...], ...],
+        *,
+        skip_special_tokens: bool,
+    ) -> list[str]:
+        assert not skip_special_tokens
+        return [" ".join(str(token_id) for token_id in row) for row in token_ids]
+
 
 class FakeModel:
     def __init__(self) -> None:
@@ -86,6 +95,8 @@ def test_benchmark_runs_prefill_and_cached_decode_for_each_batch() -> None:
     assert first.decode_tps == 3
     assert first.decode_step_ms == pytest.approx(1000 / 3)
     assert first.output_tps == 2
+    assert first.generated_token_ids == ((0, 0, 0, 0),)
+    assert first.generated_text == ("0 0 0 0",)
 
 
 def test_output_length_one_has_no_decode_phase() -> None:

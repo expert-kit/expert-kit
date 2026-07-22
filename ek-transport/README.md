@@ -21,10 +21,10 @@ Compute backends do not import these concrete implementations.
 ## Install and test
 
 ```bash
-uv sync --project ek-transport --locked
-uv run --project ek-transport ruff check ek-transport/src ek-transport/tests
-uv run --project ek-transport ruff format --check ek-transport/src ek-transport/tests
-uv run --project ek-transport pytest ek-transport/tests
+uv sync --locked
+uv run --package expertkit-transport ruff check ek-transport/src ek-transport/tests
+uv run --package expertkit-transport ruff format --check ek-transport/src ek-transport/tests
+uv run --package expertkit-transport pytest ek-transport/tests
 ```
 
 Most users install this package through `expertkit-worker`,
@@ -49,7 +49,7 @@ A Transport must implement both sides of one data path:
 5. Run the common behavior tests with:
 
    ```bash
-   uv run --project ek-transport pytest ek-transport/tests/conformance
+   uv run --package expertkit-transport pytest ek-transport/tests/conformance
    ```
 
 Do not edit the internals of the existing gRPC or SHM implementations to add a

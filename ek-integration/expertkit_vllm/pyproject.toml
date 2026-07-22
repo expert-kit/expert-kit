@@ -3,19 +3,18 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "expertkit-torch"
+name = "expertkit-vllm"
 version = "0.1.0"
-description = "Expert Kit routed-MoE integration for Hugging Face Transformers"
+description = "Expert Kit routed-MoE integration for vLLM"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "expertkit-transport==0.1.0",
-    "torch==2.11.0",
-    "transformers==5.5.3",
+    "vllm==0.25.1",
 ]
 
-[project.scripts]
-ek-torch-benchmark = "expertkit_torch.benchmark.cli:main"
+[project.entry-points."vllm.general_plugins"]
+register_expertkit = "expertkit_vllm.plugin:register"
 
 [tool.uv.sources]
 expertkit-transport = { workspace = true }

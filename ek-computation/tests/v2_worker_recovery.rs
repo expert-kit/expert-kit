@@ -439,11 +439,11 @@ impl WorkerProcess {
             .parent()
             .unwrap()
             .to_path_buf();
-        let python = repository.join("ek-worker/.venv/bin/python");
+        let python = repository.join(".venv/bin/python");
         let fixture = repository.join("ek-worker/tests/fixtures/cpu_worker_process.py");
         assert!(
             python.is_file(),
-            "run `uv sync --project ek-worker --locked` first"
+            "run `uv sync --locked --package expertkit-worker` first"
         );
         let mut command = Command::new(python);
         command

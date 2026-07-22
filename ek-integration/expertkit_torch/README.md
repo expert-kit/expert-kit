@@ -6,7 +6,7 @@ process. Each routed MoE layer sends its final expert assignments and FP32
 routing weights through `expertkit-transport`, then receives the weighted result
 aggregated across Workers.
 
-The integration targets Transformers 4.57.3 and supports:
+The integration targets Transformers 5.5.3 and supports:
 
 - Qwen3-MoE
 - DeepSeek-V2
@@ -19,16 +19,14 @@ must run on a trusted and isolated cluster network.
 
 ## Install
 
-Create the locked environment from this directory:
+Create the shared locked environment from the repository root:
 
 ```bash
 uv sync --locked
-source .venv/bin/activate
 ```
 
-The local uv configuration installs `expertkit-transport` from
-`../../ek-transport`. A packaged deployment must make the same
-`expertkit-transport==0.1.0` release available.
+The root workspace installs Proto, Transport, Worker, and this Torch integration
+into the root `.venv`. It uses official PyPI by default.
 
 ## Required deployment
 
@@ -70,7 +68,7 @@ the attention key/value cache. EOS does not stop the measured run, so every
 configuration executes the same number of token steps.
 
 ```bash
-ek-torch-benchmark \
+uv run --package expertkit-torch ek-torch-benchmark \
   --model-path /models/DeepSeek-V2-Lite-Chat \
   --mode expertkit \
   --controller-endpoint 10.0.0.10:5002 \
@@ -107,10 +105,15 @@ boundaries. The timings include the complete Frontend, Transport, and Worker
 path in Expert Kit mode. Use the existing tracing configuration when a
 Frontend, Transport, and Worker breakdown is needed.
 
+When `--json-output` is set, every raw run also records its generated token IDs
+and decoded text. Token transfer and decoding happen after timing, so they do
+not inflate the latency values. Compare those fields between otherwise
+identical local and Expert Kit runs when qualifying a dependency upgrade.
+
 Run the same workload locally by changing only the mode:
 
 ```bash
-ek-torch-benchmark \
+uv run --package expertkit-torch ek-torch-benchmark \
   --model-path /models/DeepSeek-V2-Lite-Chat \
   --mode local \
   --batch-sizes 1 \
@@ -124,7 +127,13 @@ CPU tests cover model routing semantics, real layer IDs, bounded Transformers
 class replacement, benchmark token counts, metrics, and command output:
 
 ```bash
-uv run pytest tests
+uv run --package expertkit-torch ruff check \
+  ek-integration/expertkit_torch/expertkit_torch \
+  ek-integration/expertkit_torch/tests
+uv run --package expertkit-torch ruff format --check \
+  ek-integration/expertkit_torch/expertkit_torch \
+  ek-integration/expertkit_torch/tests
+uv run --package expertkit-torch pytest ek-integration/expertkit_torch/tests
 ```
 
 Real Qwen3 and DeepSeek-V2 checks are enabled only when their model paths are
@@ -134,17 +143,19 @@ configured:
 EK_QWEN_MODEL_PATH=/models/Qwen3-30B-A3B \
 EK_QWEN_CONTROLLER_ENDPOINT=10.0.0.10:5002 \
 EK_QWEN_INSTANCE_ID=1 \
-uv run pytest tests/test_deployment_benchmark.py -m qwen
+uv run --package expertkit-torch pytest \
+  ek-integration/expertkit_torch/tests/test_deployment_benchmark.py -m qwen
 
 EK_DEEPSEEK_V2_MODEL_PATH=/models/DeepSeek-V2-Lite-Chat \
 EK_DEEPSEEK_V2_CONTROLLER_ENDPOINT=10.0.0.10:5002 \
 EK_DEEPSEEK_V2_INSTANCE_ID=1 \
-uv run pytest tests/test_deployment_benchmark.py -m deepseek_v2
+uv run --package expertkit-torch pytest \
+  ek-integration/expertkit_torch/tests/test_deployment_benchmark.py -m deepseek_v2
 ```
 
 ## Current limits
 
-- The adapters match the model classes shipped in Transformers 4.57.3.
+- The adapters match the model classes shipped in Transformers 5.5.3.
 - DeepSeek-V3 works only with weight dtypes supported by the current Worker:
   FP16, BF16, or FP32. FP8 and W8A8 DeepSeek-R1 checkpoints are not supported.
 - Full Mixtral and DeepSeek-V3 deployment tests require more device memory than

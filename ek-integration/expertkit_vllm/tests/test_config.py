@@ -1,6 +1,7 @@
 """Tests for vLLM process configuration."""
 
 import pytest
+
 from expertkit_vllm.utils.config import collect_ek_client_config
 
 
@@ -25,9 +26,7 @@ def test_collects_numeric_instance_and_timeout(monkeypatch) -> None:
         ("EK_CLIENT_TIMEOUT", "0", "positive"),
     ],
 )
-def test_rejects_invalid_values(
-    monkeypatch, name: str, value: str, message: str
-) -> None:
+def test_rejects_invalid_values(monkeypatch, name: str, value: str, message: str) -> None:
     monkeypatch.setenv("EK_INSTANCE_ID", "7")
     monkeypatch.setenv(name, value)
     with pytest.raises(ValueError, match=message):

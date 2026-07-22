@@ -7,9 +7,10 @@ from typing import Any
 
 import pytest
 import torch
+import torch.nn.functional as F
 from torch import nn
 from transformers.models.deepseek_v2.configuration_deepseek_v2 import DeepseekV2Config
-from transformers.models.deepseek_v2.modeling_deepseek_v2 import DeepseekV2MoE
+from transformers.models.deepseek_v2.modeling_deepseek_v2 import DeepseekV2Moe
 from transformers.models.deepseek_v3.configuration_deepseek_v3 import DeepseekV3Config
 from transformers.models.deepseek_v3.modeling_deepseek_v3 import DeepseekV3MoE
 from transformers.models.mixtral.configuration_mixtral import MixtralConfig
@@ -26,9 +27,9 @@ from expertkit_torch.models.qwen3_moe import create_routed_moe_class as qwen3_cl
 
 
 class LocalExpertClient:
-    """Evaluate reference expert modules behind the routed client interface."""
+    """Evaluate packed reference expert weights behind the client interface."""
 
-    def __init__(self, experts: nn.ModuleList) -> None:
+    def __init__(self, experts: nn.Module) -> None:
         self.experts = experts
         self.calls: list[dict[str, Any]] = []
 
@@ -41,8 +42,15 @@ class LocalExpertClient:
         for token_index in range(hidden_states.shape[0]):
             for assignment_index in range(expert_ids.shape[1]):
                 expert_id = int(expert_ids[token_index, assignment_index])
-                expert_output = self.experts[expert_id](
-                    hidden_states[token_index : token_index + 1]
+                token = hidden_states[token_index : token_index + 1]
+                gate, up = F.linear(token, self.experts.gate_up_proj[expert_id]).chunk(
+                    2,
+                    dim=-1,
+                )
+                activated = self.experts.act_fn(gate) * up
+                expert_output = F.linear(
+                    activated,
+                    self.experts.down_proj[expert_id],
                 )[0]
                 result[token_index] += (
                     expert_output.float() * routing_weights[token_index, assignment_index]
@@ -66,6 +74,8 @@ CASES = (
             intermediate_size=8,
             moe_intermediate_size=6,
             num_hidden_layers=1,
+            num_attention_heads=2,
+            num_key_value_heads=1,
             num_experts=4,
             num_experts_per_tok=2,
             norm_topk_prob=True,
@@ -80,6 +90,8 @@ CASES = (
             intermediate_size=8,
             moe_intermediate_size=6,
             num_hidden_layers=2,
+            num_attention_heads=2,
+            num_key_value_heads=2,
             first_k_dense_replace=1,
             n_routed_experts=4,
             n_shared_experts=1,
@@ -87,7 +99,7 @@ CASES = (
             n_group=1,
             topk_group=1,
         ),
-        DeepseekV2MoE,
+        DeepseekV2Moe,
         deepseek_v2_class,
     ),
     AdapterCase(
@@ -97,6 +109,8 @@ CASES = (
             intermediate_size=8,
             moe_intermediate_size=6,
             num_hidden_layers=2,
+            num_attention_heads=2,
+            num_key_value_heads=2,
             first_k_dense_replace=1,
             n_routed_experts=4,
             n_shared_experts=1,
@@ -131,7 +145,10 @@ def test_routed_adapter_matches_native_moe_and_sends_final_routing(
     dtype: torch.dtype,
 ) -> None:
     torch.manual_seed(11)
-    native = case.native_class(case.config).to(dtype).eval()
+    native = case.native_class(case.config)
+    for parameter in native.parameters():
+        nn.init.normal_(parameter, mean=0.0, std=0.1)
+    native = native.to(dtype).eval()
     client = LocalExpertClient(native.experts)
     routed_type = case.routed_class(client, RoutedLayerIds((7,)))
     routed = routed_type(case.config).to(dtype).eval()
@@ -147,17 +164,12 @@ def test_routed_adapter_matches_native_moe_and_sends_final_routing(
         expected = native(hidden_states.clone())
         actual = routed(hidden_states.clone())
 
-    if isinstance(expected, tuple):
-        expected_hidden, expected_router_logits = expected
-        actual_hidden, actual_router_logits = actual
-        torch.testing.assert_close(actual_router_logits, expected_router_logits)
-    else:
-        expected_hidden = expected
-        actual_hidden = actual
+    assert isinstance(expected, torch.Tensor)
+    assert isinstance(actual, torch.Tensor)
     tolerance = 0.02 if dtype is torch.bfloat16 else 1e-6
     torch.testing.assert_close(
-        actual_hidden,
-        expected_hidden,
+        actual,
+        expected,
         atol=tolerance,
         rtol=tolerance,
     )
@@ -167,6 +179,19 @@ def test_routed_adapter_matches_native_moe_and_sends_final_routing(
     assert call["hidden_states"].shape == (6, case.config.hidden_size)
     assert call["expert_ids"].shape == (6, case.config.num_experts_per_tok)
     assert call["routing_weights"].dtype is torch.float32
+    flattened = hidden_states.reshape(-1, case.config.hidden_size)
+    if case.name in ("qwen3_moe", "mixtral"):
+        _, expected_weights, expected_ids = native.gate(flattened)
+    elif case.name == "deepseek_v2":
+        router_logits = F.linear(
+            hidden_states.float(),
+            native.gate.weight.float(),
+        )
+        expected_ids, expected_weights = native.route_tokens_to_experts(router_logits)
+    else:
+        expected_ids, expected_weights = native.route_tokens_to_experts(native.gate(hidden_states))
+    torch.testing.assert_close(call["expert_ids"], expected_ids)
+    torch.testing.assert_close(call["routing_weights"], expected_weights)
 
 
 def test_layer_id_mapping_preserves_sparse_and_dense_model_layers() -> None:

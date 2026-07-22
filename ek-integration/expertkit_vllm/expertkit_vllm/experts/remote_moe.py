@@ -11,7 +11,6 @@ from typing import TYPE_CHECKING, Any
 
 import torch
 from expertkit_transport import BlockingRoutedMoEClient, validate_and_convert_routing
-from expertkit_vllm.utils.config import collect_ek_client_config
 from torch import nn
 from vllm.config import CUDAGraphMode, get_current_vllm_config
 from vllm.forward_context import get_forward_context
@@ -22,11 +21,16 @@ from vllm.model_executor.layers.fused_moe.router.router_factory import (
     create_fused_moe_router,
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.models.utils import PPMissingLayer
 from vllm.utils.torch_utils import (
     LayerName,
     LayerNameType,
+    _encode_layer_name,
+    _resolve_layer_name,
     direct_register_custom_op,
 )
+
+from expertkit_vllm.utils.config import collect_ek_client_config
 
 logger = logging.getLogger(__name__)
 
@@ -43,14 +47,6 @@ else:
     _LayerNameType = LayerNameType
 
 
-def _encode_layer_name(layer_name: str) -> _LayerNameType:
-    return LayerName(layer_name) if _LayerNameType is LayerName else layer_name
-
-
-def _resolve_layer_name(layer_name: _LayerNameType) -> str:
-    return layer_name.value if isinstance(layer_name, LayerName) else layer_name
-
-
 def _remote_moe_impl(
     hidden_states: torch.Tensor,
     router_logits: torch.Tensor,
@@ -60,9 +56,7 @@ def _remote_moe_impl(
     context = get_forward_context()
     layer = context.no_compile_layers[_resolve_layer_name(layer_name)]
     if not isinstance(layer, RemoteMoERunner):
-        raise RuntimeError(
-            "the vLLM forward context contains the wrong Expert Kit layer"
-        )
+        raise RuntimeError("the vLLM forward context contains the wrong Expert Kit layer")
     result = layer._forward_impl(hidden_states, router_logits, input_ids)
     hidden_states.copy_(result)
     return hidden_states
@@ -89,9 +83,7 @@ direct_register_custom_op(
 def _layer_id(prefix: str) -> int:
     match = _LAYER_PATTERN.search(prefix)
     if match is None:
-        raise ValueError(
-            f"cannot determine a model layer number from prefix {prefix!r}"
-        )
+        raise ValueError(f"cannot determine a model layer number from prefix {prefix!r}")
     return int(match.group(1))
 
 
@@ -99,8 +91,8 @@ def _unwrap_tensor(value: torch.Tensor | tuple[torch.Tensor, object]) -> torch.T
     return value[0] if isinstance(value, tuple) else value
 
 
-def _num_layers() -> int:
-    model_config = get_current_vllm_config().model_config
+def _num_layers(vllm_config: Any) -> int:
+    model_config = vllm_config.model_config
     if model_config is None:
         raise ValueError("vLLM model configuration is unavailable")
     text_config = model_config.hf_text_config
@@ -110,14 +102,13 @@ def _num_layers() -> int:
     return value
 
 
-def _client_for(
-    layer: RemoteMoERunner, hidden_states: torch.Tensor
-) -> BlockingRoutedMoEClient:
+def _client_for(layer: RemoteMoERunner, hidden_states: torch.Tensor) -> BlockingRoutedMoEClient:
     config = layer.client_config
     key = (
         config.controller_endpoint,
         config.instance_id,
         layer.num_experts,
+        layer.num_layers,
         layer.top_k,
         layer.hidden_size,
         hidden_states.dtype,
@@ -130,7 +121,7 @@ def _client_for(
         client = BlockingRoutedMoEClient(
             config.controller_endpoint,
             instance_id=config.instance_id,
-            num_layers=_num_layers(),
+            num_layers=layer.num_layers,
             experts_per_layer=layer.num_experts,
             hidden_dim=layer.hidden_size,
             top_k=layer.top_k,
@@ -176,19 +167,25 @@ class RemoteMoERunner(nn.Module):
         routed_scaling_factor: float,
     ) -> None:
         super().__init__()
+        vllm_config = get_current_vllm_config()
         self.num_experts = num_experts
+        self.num_layers = _num_layers(vllm_config)
         self.top_k = top_k
         self.hidden_size = hidden_size
         self.layer_name = prefix
         self.layer_id = _layer_id(prefix)
         self.router = router
+        # DeepSeek maps per-expert checkpoint keys to this packed subpath before
+        # parameter lookup. Mark only routed weights missing so the local gate
+        # and shared expert remain loadable.
+        self.routed_experts = PPMissingLayer()
         self.gate = gate
         self.shared_experts = shared_experts
         self.apply_routed_scale_to_output = apply_routed_scale_to_output
         self.routed_scaling_factor = routed_scaling_factor
         self.client_config = collect_ek_client_config()
 
-        compilation = get_current_vllm_config().compilation_config
+        compilation = vllm_config.compilation_config
         if prefix in compilation.static_forward_context:
             raise ValueError(f"duplicate Expert Kit MoE layer prefix {prefix!r}")
         compilation.static_forward_context[prefix] = self
@@ -328,8 +325,7 @@ def remote_fused_moe(
         "quant_config": quant_config is not None,
         "tensor_parallel": config.parallel_config.tensor_parallel_size != 1
         or tp_size not in (None, 1),
-        "prefill_context_parallel": config.parallel_config.prefill_context_parallel_size
-        != 1
+        "prefill_context_parallel": config.parallel_config.prefill_context_parallel_size != 1
         or pcp_size not in (None, 1),
         "expert_parallel": config.parallel_config.enable_expert_parallel,
         "sequence_parallel": is_sequence_parallel,
@@ -346,14 +342,11 @@ def remote_fused_moe(
         "zero_expert": zero_expert_type is not None,
         "hash_routing": hash_indices_table is not None,
         "custom_runner": runner_cls is not None or runner_args is not None,
-        "custom_experts": routed_experts_cls is not None
-        or routed_experts_args is not None,
+        "custom_experts": routed_experts_cls is not None or routed_experts_args is not None,
     }
     enabled = sorted(name for name, value in unsupported.items() if value)
     if enabled:
-        raise ValueError(
-            f"Expert Kit remote MoE does not support: {', '.join(enabled)}"
-        )
+        raise ValueError(f"Expert Kit remote MoE does not support: {', '.join(enabled)}")
     if not reduce_results:
         raise ValueError("Expert Kit remote MoE requires reduce_results=True")
     if activation != "silu":
@@ -368,9 +361,7 @@ def remote_fused_moe(
             num_expert_group=num_expert_group,
             topk_group=topk_group,
             scoring_func=scoring_func,
-            routed_scaling_factor=(
-                1.0 if apply_routed_scale_to_output else routed_scaling_factor
-            ),
+            routed_scaling_factor=(1.0 if apply_routed_scale_to_output else routed_scaling_factor),
             e_score_correction_bias=e_score_correction_bias,
             custom_routing_function=custom_routing_function,
         )

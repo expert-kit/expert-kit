@@ -21,7 +21,10 @@ ModelDType = Literal["auto", "float16", "bfloat16", "float32"]
 
 _MODEL_LOAD_LOCK = threading.Lock()
 _MISSING = object()
-_ROUTED_EXPERT_WEIGHT_PATTERN = r"layers\.\d+\.(?:mlp|block_sparse_moe)\.experts\.\d+\."
+_ROUTED_EXPERT_WEIGHT_PATTERN = (
+    r"layers\.\d+\.(?:mlp|block_sparse_moe)\.experts\."
+    r"(?:\d+\.|(?:gate_up_proj|down_proj)(?:\.|$))"
+)
 _DTYPES: dict[ModelDType, str | torch.dtype] = {
     "auto": "auto",
     "float16": torch.float16,
@@ -110,7 +113,7 @@ def _adapter_spec(model_type: str) -> _AdapterSpec:
 
         return _AdapterSpec(
             modeling_deepseek_v2,
-            "DeepseekV2MoE",
+            "DeepseekV2Moe",
             _deepseek_layer_ids,
             lambda config: config.n_routed_experts,
             create_routed_moe_class,

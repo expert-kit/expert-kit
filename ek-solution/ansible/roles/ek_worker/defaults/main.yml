@@ -1,4 +1,4 @@
-ek_worker_executable: /opt/expert-kit/ek-worker/.venv/bin/ek-worker
+ek_worker_executable: /opt/expert-kit/.venv/bin/ek-worker
 ek_worker_config_dir: /etc/expert-kit
 ek_worker_config_path: "{{ ek_worker_config_dir }}/worker.yaml"
 ek_worker_cache_dir: "/var/cache/expert-kit/{{ inventory_hostname }}"

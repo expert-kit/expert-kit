@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any, ClassVar
 
 import pytest
@@ -255,11 +256,40 @@ def test_transformers_constructs_replacement_blocks_at_real_layer_ids(
 
     assert getattr(spec.module, spec.class_name) is original
     layer_ids.require_complete()
-    if config.model_type == "mixtral":
-        blocks = [layer.block_sparse_moe for layer in model.model.layers]
-    else:
-        blocks = [layer.mlp for layer in model.model.layers if hasattr(layer.mlp, "layer_id")]
+    blocks = [layer.mlp for layer in model.model.layers if hasattr(layer.mlp, "layer_id")]
     assert [block.layer_id for block in blocks] == expected_layer_ids
+
+
+@pytest.mark.parametrize(
+    "checkpoint_key",
+    [
+        "model.layers.2.mlp.experts.7.gate_proj.weight",
+        "model.layers.2.mlp.experts.7.up_proj.weight",
+        "model.layers.2.mlp.experts.7.down_proj.weight",
+        "model.layers.2.mlp.experts.gate_up_proj",
+        "model.layers.2.mlp.experts.gate_up_proj.weight",
+        "model.layers.2.mlp.experts.down_proj",
+        "model.layers.2.block_sparse_moe.experts.gate_up_proj",
+    ],
+)
+def test_routed_expert_weight_pattern_covers_old_and_packed_keys(
+    checkpoint_key: str,
+) -> None:
+    assert re.search(loader._ROUTED_EXPERT_WEIGHT_PATTERN, checkpoint_key)
+
+
+@pytest.mark.parametrize(
+    "checkpoint_key",
+    [
+        "model.layers.2.mlp.gate.weight",
+        "model.layers.2.mlp.shared_experts.gate_proj.weight",
+        "model.layers.2.self_attn.q_proj.weight",
+    ],
+)
+def test_routed_expert_weight_pattern_keeps_frontend_keys(
+    checkpoint_key: str,
+) -> None:
+    assert re.search(loader._ROUTED_EXPERT_WEIGHT_PATTERN, checkpoint_key) is None
 
 
 @pytest.mark.parametrize(

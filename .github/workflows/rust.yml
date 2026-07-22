@@ -26,6 +26,15 @@ jobs:
         with:
           components: rustfmt, clippy
 
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.11.30"
+          enable-cache: true
+
+      - name: Install the locked Python Worker
+        run: uv sync --locked --package expertkit-worker
+
       - name: Cache Cargo artifacts
         uses: Swatinem/rust-cache@v2
         with:
@@ -37,6 +46,9 @@ jobs:
 
       - name: Run tests
         run: cargo test --workspace --locked
+
+      - name: Run Python Worker recovery tests
+        run: cargo test -p ek-computation --test v2_worker_recovery --locked -- --ignored
 
       - name: Run clippy
         run: cargo clippy --workspace --all-targets --locked -- -D warnings

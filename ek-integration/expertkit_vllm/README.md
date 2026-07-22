@@ -4,19 +4,28 @@ This package replaces vLLM's routed MoE factory with an implementation that
 keeps vLLM's router and shared experts local while sending one complete routed
 layer to Expert Kit Transport. It targets vLLM `0.25.1` exactly.
 
-Runtime qualification is deferred during the Python Worker migration. The
-current code is version-pinned, and its configuration and registration have
-unit tests. The supported Qwen text-generation smoke test uses the Torch
-integration.
+The version-pinned integration is runtime-qualified with the official
+DeepSeek-V2-Lite-Chat BF16 checkpoint. Ordinary CI keeps the full model run
+disabled because it requires a Controller, Weight Server, CUDA Frontend, and a
+Worker with enough memory for every routed expert.
 
 ## Install
 
-Install `expertkit-transport` from this repository first, then install this
-package:
+Install the vLLM workspace extra from the repository root:
 
 ```bash
-pip install -e ../../ek-transport
-pip install -e .
+uv sync --locked --extra vllm
+```
+
+This installs `expertkit-vllm`, its workspace Transport dependency, and vLLM
+0.25.1 in the root `.venv`. Ordinary workspace development omits this extra.
+
+Lightweight checks do not need to install vLLM:
+
+```bash
+PYTHONPATH=ek-integration/expertkit_vllm \
+  uv run pytest ek-integration/expertkit_vllm/tests
+uv build --package expertkit-vllm --wheel
 ```
 
 ## Configure

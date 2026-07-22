@@ -35,8 +35,7 @@ Run from the repository root:
 
 ```bash
 cargo build --release --bin ek-cli
-uv sync --project ek-worker --locked
-uv sync --project ek-integration/expertkit_torch --locked
+uv sync --locked
 ```
 
 Download the official BF16 checkpoint and set its absolute path:
@@ -173,12 +172,12 @@ Start the Controller:
 target/release/ek-cli --config /tmp/qwen-controller.yaml controller
 ```
 
-Activate the Worker environment, then start one process per config in separate
-terminals:
+Start one process per config in separate terminals. `uv run` exposes the root
+environment to the Rust launcher, so it can find `ek-worker`:
 
 ```bash
-source ek-worker/.venv/bin/activate
-target/release/ek-cli --config /tmp/qwen-worker-0.yaml worker
+uv run --package expertkit-worker \
+  target/release/ek-cli --config /tmp/qwen-worker-0.yaml worker
 ```
 
 Each Worker registers, receives its complete target list, and loads from its
@@ -193,11 +192,10 @@ budget past actual free device memory.
 
 ## 6. Run the Qwen benchmark
 
-In the Torch Frontend environment, use Controller port 5002:
+Use Controller port 5002:
 
 ```bash
-source ek-integration/expertkit_torch/.venv/bin/activate
-ek-torch-benchmark \
+uv run --package expertkit-torch ek-torch-benchmark \
   --model-path "$QWEN_ROOT" \
   --mode expertkit \
   --controller-endpoint 127.0.0.1:5002 \
@@ -217,17 +215,19 @@ executes 20 output-token steps.
 The same path is exposed as an environment-gated test:
 
 ```bash
-cd ek-integration/expertkit_torch
 EK_QWEN_MODEL_PATH="$QWEN_ROOT" \
 EK_QWEN_CONTROLLER_ENDPOINT=127.0.0.1:5002 \
 EK_QWEN_INSTANCE_ID=1 \
-uv run pytest tests/test_deployment_benchmark.py -m qwen
+uv run --package expertkit-torch pytest \
+  ek-integration/expertkit_torch/tests/test_deployment_benchmark.py -m qwen
 ```
 
 ## Current limits
 
-- Computation Transport is gRPC-only and copies Tensor bytes through Host
-  memory. There is no current SHM, RDMA, NCCL, or NVSHMEM path.
+- Cross-host computation uses gRPC and copies Tensor bytes through Host memory.
+  The experimental same-host SHM path removes protobuf Tensor payloads but
+  still stages CUDA transfers through pinned Host memory. RDMA, NCCL, and
+  NVSHMEM are not available.
 - Torch is the only Backend targeted for full migration qualification.
 - GGML is experimental and CPU-only. The fused Backend is experimental and
   requires a compatible CUDA and Triton environment.

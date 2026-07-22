@@ -33,6 +33,7 @@ from expertkit_worker.observability import create_observability
 
 pytest.importorskip("prometheus_client")
 pytest.importorskip("opentelemetry.sdk")
+pytest.importorskip("opentelemetry.instrumentation.grpc")
 
 from opentelemetry.proto.collector.trace.v1 import (
     trace_service_pb2,

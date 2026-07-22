@@ -83,18 +83,33 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     python3.12-venv \
     && rm -rf /var/lib/apt/lists/*
 
-COPY --from=ghcr.io/astral-sh/uv:0.6.9 /uv /uvx /usr/local/bin/
+COPY --from=ghcr.io/astral-sh/uv:0.11.30 /uv /uvx /usr/local/bin/
 COPY --from=ek-rust-build /tmp/ek-cli /usr/local/bin/
-COPY ek-transport/ /opt/expert-kit/ek-transport/
-COPY ek-worker/ /opt/expert-kit/ek-worker/
 
-ARG UV_HTTP_TIMEOUT=300
+WORKDIR /opt/expert-kit
+COPY pyproject.toml uv.lock ./
+COPY ek-proto/pyproject.toml ./ek-proto/pyproject.toml
+COPY ek-transport/pyproject.toml ./ek-transport/pyproject.toml
+COPY ek-worker/pyproject.toml ./ek-worker/pyproject.toml
+COPY ek-integration/expertkit_torch/pyproject.toml \
+    ./ek-integration/expertkit_torch/pyproject.toml
+COPY ek-integration/expertkit_vllm/pyproject.toml \
+    ./ek-integration/expertkit_vllm/pyproject.toml
+
+ARG UV_HTTP_TIMEOUT=1800
 RUN --mount=type=cache,target=/root/.cache/uv \
     UV_HTTP_TIMEOUT=${UV_HTTP_TIMEOUT} \
     UV_LINK_MODE=copy \
-    uv sync --project /opt/expert-kit/ek-worker --locked --no-dev
+    uv sync --locked --package expertkit-worker --no-dev --no-install-workspace
 
-ENV PATH="/opt/expert-kit/ek-worker/.venv/bin:${PATH}"
+COPY ek-proto/ ./ek-proto/
+COPY ek-transport/ ./ek-transport/
+COPY ek-worker/ ./ek-worker/
+RUN --mount=type=cache,target=/root/.cache/uv \
+    UV_HTTP_TIMEOUT=${UV_HTTP_TIMEOUT} \
+    UV_LINK_MODE=copy \
+    uv sync --locked --package expertkit-worker --no-dev
+
+ENV PATH="/opt/expert-kit/.venv/bin:${PATH}"
 ENV NVIDIA_DRIVER_CAPABILITIES=compute,utility
-WORKDIR /opt/expert-kit
 ENTRYPOINT [""]
