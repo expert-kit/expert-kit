@@ -1,4 +1,4 @@
-//! v2 placement, expert-state, and drain synchronization service.
+//! Synchronize Worker placement, expert state, and drain authorization.
 
 use std::{
     collections::{BTreeMap, BTreeSet, HashSet},
@@ -24,7 +24,7 @@ use crate::{
     },
 };
 
-use super::v2::state_status;
+use super::status::state_status;
 
 mod database;
 

@@ -19,8 +19,9 @@ use ek_base::error::EKResult;
 use service::{
     control::PlanServiceImpl,
     instance::{DatabaseDefaultInstanceResolver, DefaultInstanceResolver, InstanceServiceImpl},
-    v2::{DatabaseLifecycleHooks, TopologyServiceImpl, WorkerLifecycleServiceImpl},
-    v2_weight::{DatabaseWeightControlHooks, WeightControlServiceImpl},
+    topology::TopologyServiceImpl,
+    weight_control::{DatabaseWeightControlHooks, WeightControlServiceImpl},
+    worker_lifecycle::{DatabaseLifecycleHooks, WorkerLifecycleServiceImpl},
 };
 use std::{sync::Arc, time::Duration};
 

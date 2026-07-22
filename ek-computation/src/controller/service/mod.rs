@@ -1,4 +1,6 @@
 pub mod control;
 pub mod instance;
-pub mod v2;
-pub mod v2_weight;
+mod status;
+pub mod topology;
+pub mod weight_control;
+pub mod worker_lifecycle;

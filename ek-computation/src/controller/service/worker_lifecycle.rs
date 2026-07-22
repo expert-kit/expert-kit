@@ -1,25 +1,22 @@
-//! v2 Worker lifecycle and Frontend topology gRPC services.
+//! Worker registration, heartbeat, and availability lifecycle service.
 
-use std::{collections::HashMap, pin::Pin, sync::Arc, time::Duration};
+use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 
-use tokio::sync::{Mutex, mpsc, watch};
-use tokio_stream::{Stream, StreamExt, wrappers::ReceiverStream};
+use tokio::sync::{Mutex, watch};
+use tokio_stream::{Stream, StreamExt};
 use tonic::{Request, Response, Status, Streaming};
 
 use crate::{
     controller::{
         elastic::{progressive, recovery::recover_unique_experts},
         poller::request_immediate_poll,
-        runtime_state::{
-            ControllerRuntimeState, ControllerStateError, HeartbeatResult, RegistrationResult,
-        },
+        runtime_state::{ControllerRuntimeState, HeartbeatResult, RegistrationResult},
         service::instance::DefaultInstanceResolver,
     },
     proto::ek::control::v2::{
         HeartbeatRequest, HeartbeatSummary, RegisterWorkerRequest, RegisterWorkerResponse,
-        TopologyMessage, WatchTopologyRequest, topology_service_server::TopologyService,
         worker_lifecycle_service_server::WorkerLifecycleService,
     },
     state::{
@@ -29,7 +26,7 @@ use crate::{
     },
 };
 
-const TOPOLOGY_STREAM_BUFFER: usize = 16;
+use super::status::state_status;
 
 #[async_trait]
 pub trait WorkerLifecycleHooks: Send + Sync + 'static {
@@ -466,113 +463,21 @@ impl WorkerLifecycleService for WorkerLifecycleServiceImpl {
     }
 }
 
-#[derive(Clone)]
-pub struct TopologyServiceImpl {
-    state: ControllerRuntimeState,
-    instance_resolver: Arc<dyn DefaultInstanceResolver>,
-}
-
-impl TopologyServiceImpl {
-    pub fn new(
-        state: ControllerRuntimeState,
-        instance_resolver: Arc<dyn DefaultInstanceResolver>,
-    ) -> Self {
-        Self {
-            state,
-            instance_resolver,
-        }
-    }
-}
-
-#[tonic::async_trait]
-impl TopologyService for TopologyServiceImpl {
-    type WatchTopologyStream =
-        Pin<Box<dyn Stream<Item = Result<TopologyMessage, Status>> + Send + 'static>>;
-
-    async fn watch_topology(
-        &self,
-        request: Request<WatchTopologyRequest>,
-    ) -> Result<Response<Self::WatchTopologyStream>, Status> {
-        let request = request.into_inner();
-        if request.instance_id == 0 {
-            return Err(Status::invalid_argument("instance_id must be positive"));
-        }
-        self.instance_resolver.resolve(request.instance_id).await?;
-        let newest = self.state.topology_version(request.instance_id).await;
-        if request.current_version > newest {
-            return Err(Status::invalid_argument(format!(
-                "requested topology version {} is newer than current version {newest}",
-                request.current_version
-            )));
-        }
-        let state = self.state.clone();
-        let mut changed = state.subscribe();
-        let (sender, receiver) = mpsc::channel(TOPOLOGY_STREAM_BUFFER);
-        tokio::spawn(async move {
-            let mut installed_version = request.current_version;
-            let mut sent_initial = false;
-            loop {
-                let newest = state.topology_version(request.instance_id).await;
-                if !sent_initial || installed_version < newest {
-                    let messages = match state
-                        .topology_messages(request.instance_id, installed_version)
-                        .await
-                    {
-                        Ok(messages) => messages,
-                        Err(error) => {
-                            let _ = sender.send(Err(state_status(error))).await;
-                            return;
-                        }
-                    };
-                    for message in messages {
-                        if sender.send(Ok(message)).await.is_err() {
-                            return;
-                        }
-                    }
-                    installed_version = newest;
-                    sent_initial = true;
-                    continue;
-                }
-                if changed.changed().await.is_err() {
-                    return;
-                }
-            }
-        });
-        Ok(Response::new(Box::pin(ReceiverStream::new(receiver))))
-    }
-}
-
-pub(super) fn state_status(error: ControllerStateError) -> Status {
-    match error {
-        ControllerStateError::InvalidRegistration(_)
-        | ControllerStateError::InvalidHeartbeatState
-        | ControllerStateError::InvalidExpertState
-        | ControllerStateError::FutureTopologyVersion { .. } => {
-            Status::invalid_argument(error.to_string())
-        }
-        ControllerStateError::UnknownWorker
-        | ControllerStateError::ReplacedWorker
-        | ControllerStateError::StaleHeartbeatStream
-        | ControllerStateError::HeartbeatSequenceRollback { .. }
-        | ControllerStateError::PlacementTooLarge { .. }
-        | ControllerStateError::PlacementGenerationMismatch { .. }
-        | ControllerStateError::ReportSequenceRollback { .. }
-        | ControllerStateError::ConflictingReportSequence(_)
-        | ControllerStateError::UnknownDrain(_) => Status::failed_precondition(error.to_string()),
-        ControllerStateError::Persistence(_) => Status::internal(error.to_string()),
-    }
-}
-
 fn internal_status(error: impl std::fmt::Display) -> Status {
     Status::internal(error.to_string())
 }
 
 #[cfg(test)]
 mod tests {
+    use tokio::sync::mpsc;
+    use tokio_stream::wrappers::ReceiverStream;
+
     use super::*;
-    use crate::controller::service::instance::ResolvedDefaultInstance;
+    use crate::controller::{
+        runtime_state::ControllerStateError, service::instance::ResolvedDefaultInstance,
+    };
     use crate::proto::ek::{
-        control::v2::{WorkerDevice, WorkerRunState, topology_message},
+        control::v2::{WorkerDevice, WorkerRunState},
         worker::v2::ActivationDType,
     };
 
@@ -815,31 +720,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn topology_service_sends_an_initial_empty_snapshot() {
-        let state = ControllerRuntimeState::new(8);
-        let service = TopologyServiceImpl::new(state, instance_resolver());
-        let response = service
-            .watch_topology(Request::new(WatchTopologyRequest {
-                instance_id: 7,
-                current_version: 0,
-            }))
-            .await
-            .unwrap();
-        let mut stream = response.into_inner();
-        let message = tokio::time::timeout(Duration::from_millis(100), stream.next())
-            .await
-            .unwrap()
-            .unwrap()
-            .unwrap();
-        let Some(topology_message::Message::Snapshot(snapshot)) = message.message else {
-            panic!("expected a snapshot");
-        };
-        assert_eq!(snapshot.topology_version, 0);
-        assert_eq!(snapshot.part_count, 1);
-        assert!(snapshot.routes.is_empty());
-    }
-
-    #[tokio::test]
     async fn lifecycle_rejects_a_nondefault_instance_before_state_mutation() {
         let state = ControllerRuntimeState::new(8);
         let service = WorkerLifecycleServiceImpl::new(
@@ -861,23 +741,5 @@ mod tests {
             state.registration("worker-0", "start-0").await,
             Err(ControllerStateError::UnknownWorker)
         ));
-    }
-
-    #[tokio::test]
-    async fn topology_rejects_a_nondefault_instance() {
-        let service = TopologyServiceImpl::new(ControllerRuntimeState::new(8), instance_resolver());
-
-        let error = match service
-            .watch_topology(Request::new(WatchTopologyRequest {
-                instance_id: 8,
-                current_version: 0,
-            }))
-            .await
-        {
-            Ok(_) => panic!("nondefault instance unexpectedly opened a topology stream"),
-            Err(error) => error,
-        };
-
-        assert_eq!(error.code(), tonic::Code::FailedPrecondition);
     }
 }

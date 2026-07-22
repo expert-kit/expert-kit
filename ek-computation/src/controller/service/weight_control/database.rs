@@ -1,4 +1,4 @@
-//! Database and Dispatcher adapter for the v2 weight-control service.
+//! Database and Dispatcher adapter for the weight-control service.
 
 use std::collections::{BTreeSet, HashMap};
 

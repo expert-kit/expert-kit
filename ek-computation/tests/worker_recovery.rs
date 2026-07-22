@@ -16,8 +16,9 @@ use ek_computation::{
         runtime_state::{ControllerRuntimeState, ExpertKey, RegistrationResult},
         service::{
             instance::{DefaultInstanceResolver, InstanceServiceImpl, ResolvedDefaultInstance},
-            v2::{TopologyServiceImpl, WorkerLifecycleHooks, WorkerLifecycleServiceImpl},
-            v2_weight::{TargetSubscription, WeightControlHooks, WeightControlServiceImpl},
+            topology::TopologyServiceImpl,
+            weight_control::{TargetSubscription, WeightControlHooks, WeightControlServiceImpl},
+            worker_lifecycle::{WorkerLifecycleHooks, WorkerLifecycleServiceImpl},
         },
     },
     proto::ek::{
