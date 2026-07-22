@@ -118,6 +118,6 @@ If you have any questions, please join our discussion at https://expert-kit.zuli
 
   - Licenses and copyright notices for third-party components are located alongside the component code directory.
   - The following components are included:
-    - **Qwen3-MoE**: Located in `ek-integration/expertkit-torch/expertkit-torch/models/`. This code is licensed under [Apache License Version 2.0](http://www.apache.org/licenses/LICENSE-2.0).
+    - **Qwen3-MoE**: Located in `ek-integration/expertkit_torch/expertkit_torch/models/`. This code is licensed under [Apache License Version 2.0](http://www.apache.org/licenses/LICENSE-2.0).
 
 - **Compliance**: All third-party components are used in compliance with their original license terms.

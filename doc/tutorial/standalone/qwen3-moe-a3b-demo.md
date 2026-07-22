@@ -1,6 +1,6 @@
 # Run Qwen3-30B-A3B with the Python Worker
 
-This guide exercises the current Expert Kit path with the BF16
+This guide exercises the Expert Kit Transformers 5.5.3 path with the BF16
 `Qwen/Qwen3-30B-A3B` checkpoint. The model configuration has 48 routed layers,
 128 experts per layer, hidden size 2048, expert intermediate size 768, and top-k
 8. Those values come from the model's
@@ -13,8 +13,8 @@ small Torch Frontend check used by the Worker migration.
 
 You need:
 
-- Linux hosts with Python 3.12, uv, Rust, Docker, and enough local storage for
-  the checkpoint and Worker disk caches.
+- Linux hosts with Python 3.12, uv 0.11.30, Rust, Docker, and enough local
+  storage for the checkpoint and Worker disk caches.
 - One Frontend GPU for attention, routing, and non-expert model weights.
 - Enough Worker GPUs to hold every routed expert. The three BF16 FFN matrices
   contain 54 GiB of expert data before allocator and runtime overhead. Each
@@ -37,6 +37,26 @@ Run from the repository root:
 cargo build --release --bin ek-cli
 uv sync --locked
 ```
+
+The command consumes the only committed `uv.lock` and creates the repository
+root `.venv`. The committed workspace uses official PyPI. Configure a regional
+mirror only in developer-local uv configuration; do not change the committed
+`pyproject.toml` or lockfile for a mirror.
+
+The default profile already installs Proto, Transport, Worker, and the
+Transformers Frontend used by this guide. Optional root profiles are:
+
+```bash
+uv sync --locked --extra fused
+uv sync --locked --extra ggml
+uv sync --locked --extra observability
+uv sync --locked --extra vllm
+```
+
+`fused` and `ggml` add dependencies for experimental Worker backends,
+`observability` adds Prometheus and OpenTelemetry dependencies, and `vllm`
+installs the opt-in vLLM 0.25.1 Frontend. None is required for the default
+Torch path below.
 
 Download the official BF16 checkpoint and set its absolute path:
 
@@ -234,6 +254,10 @@ uv run --package expertkit-torch pytest \
 - The Controller does not relay computation as a fallback during topology
   changes. Frontend requests can receive retryable failures until a replacement
   topology is installed.
-- vLLM runtime qualification is deferred. This guide uses the Torch Frontend.
+- This guide uses the Transformers Frontend; a full Qwen-vLLM deployment has
+  not been qualified. Separately, vLLM 0.25.1 has completed a real
+  DeepSeek-V2-Lite 16-input/16-output-token run over gRPC. vLLM uses the shared
+  `expertkit-transport` client, and SHM has Transport conformance coverage, but
+  a real vLLM DeepSeek model has not yet completed an SHM end-to-end run.
 - All internal traffic is plaintext and unauthenticated. Public or untrusted
   network deployment is unsupported.
