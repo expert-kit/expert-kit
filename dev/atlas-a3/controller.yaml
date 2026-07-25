@@ -1,0 +1,27 @@
+inference:
+  hidden_dim: 2048
+  intermediate_dim: 1408
+  instance_name: deepseek-v2-lite-demo
+  model_name: DeepSeek-V2-Lite-Chat
+
+db:
+  db_dsn: postgres://dev:dev@postgres:5432/dev  # service name in docker compose 
+  max_conn_size: 32
+
+weight:
+  server:
+    addr: http://weight-server:6543  # service name in docker compose 
+  cache:
+    Fs:
+      path: /var/cache/expert-kit/weight-cache
+
+controller:
+  listen: 0.0.0.0
+  broadcast: controller  # service name in docker compose 
+  ports:
+    intra: 5001
+    inter: 5002
+  fault_detection:
+    heartbeat_timeout_secs: 10
+    node_active_threshold_secs: 60
+    poller_interval_secs: 5

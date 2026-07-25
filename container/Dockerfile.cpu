@@ -1,11 +1,16 @@
-ARG RUST_IMAGE=rust:1.88.0
+ARG RUST_IMAGE="rust:1.88.0-bookworm"
+ARG RUNTIME_IMAGE="debian:bookworm-slim"
+ARG UV_IMAGE="ghcr.io/astral-sh/uv:0.11.30"
+
 FROM ${RUST_IMAGE} AS rust-base
 
-ARG PROXY
-ENV HTTP_PROXY=${PROXY}
-ENV HTTPS_PROXY=${PROXY}
-ENV NO_PROXY=localhost,127.0.0.1
 ENV CARGO_HOME=/root/.cargo
+
+# Replace official Debian APT sources with TUNA mirrors.
+RUN sed -i \
+        -e 's@//deb.debian.org@//mirrors.tuna.tsinghua.edu.cn@g' \
+        -e 's@//security.debian.org@//mirrors.tuna.tsinghua.edu.cn@g' \
+        /etc/apt/sources.list.d/debian.sources
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
@@ -13,6 +18,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libpq-dev \
     pkg-config \
     && rm -rf /var/lib/apt/lists/*
+
+# Overwrites cargo crate.io source, accelarating cargo build & cargo install
+COPY container/cargo-config.cn.toml /root/.cargo/config.toml
 
 FROM rust-base AS ek-rust-build
 
@@ -32,10 +40,17 @@ RUN --mount=type=cache,target=/root/.cargo/registry \
 
 FROM rust-base AS ek-diesel-build
 
-RUN cargo install diesel_cli --version 2.2.12 --locked \
+RUN --mount=type=cache,target=/root/.cargo/registry \
+    cargo install diesel_cli --version 2.2.12 --locked \
     --no-default-features --features postgres
 
-FROM ubuntu:24.04 AS ek-runtime
+FROM ${RUNTIME_IMAGE} AS ek-runtime
+
+# Replace official Debian APT sources with TUNA mirrors.
+RUN sed -i \
+        -e 's@//deb.debian.org@//mirrors.tuna.tsinghua.edu.cn@g' \
+        -e 's@//security.debian.org@//mirrors.tuna.tsinghua.edu.cn@g' \
+        /etc/apt/sources.list.d/debian.sources
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
@@ -46,35 +61,19 @@ WORKDIR /ek
 COPY --from=ek-diesel-build /root/.cargo/bin/diesel /usr/local/bin/
 COPY --from=ek-rust-build /tmp/ek-cli /usr/local/bin/
 
-RUN mkdir -p /etc/expert-kit && cat > /etc/expert-kit/config.yaml <<'EOF'
-inference:
-  instance_name: qwen3_moe_30b_local_test
-  model_name: qwen3
-  hidden_dim: 2048
-  intermediate_dim: 768
-
-db:
-  db_dsn: postgres://dev:dev@localhost:5432/dev
-  max_conn_size: 32
-
-weight:
-  server:
-    addr: http://localhost:6543
-  cache:
-    Fs:
-      path: /ek/weight_cache
-
-controller:
-  listen: 0.0.0.0
-  broadcast: localhost
-  ports:
-    intra: 5001
-    inter: 5002
-EOF
+RUN mkdir -p /etc/expert-kit
 
 ENTRYPOINT [""]
 
-FROM ubuntu:24.04 AS ek-worker-cuda-runtime
+FROM ${UV_IMAGE} AS uv-bin
+
+FROM ${RUNTIME_IMAGE} AS ek-worker-cuda-runtime
+
+# Replace official Debian APT sources with TUNA mirrors.
+RUN sed -i \
+        -e 's@//deb.debian.org@//mirrors.tuna.tsinghua.edu.cn@g' \
+        -e 's@//security.debian.org@//mirrors.tuna.tsinghua.edu.cn@g' \
+        /etc/apt/sources.list.d/debian.sources
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
@@ -83,7 +82,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     python3.12-venv \
     && rm -rf /var/lib/apt/lists/*
 
-COPY --from=ghcr.io/astral-sh/uv:0.11.30 /uv /uvx /usr/local/bin/
+COPY --from=uv-bin /uv /uvx /usr/local/bin/
 COPY --from=ek-rust-build /tmp/ek-cli /usr/local/bin/
 
 WORKDIR /opt/expert-kit
