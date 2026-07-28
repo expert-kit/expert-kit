@@ -6,6 +6,7 @@ import torch
 from expertkit_transport.batches import ACTIVATION_DTYPES
 
 from expertkit_worker.backends.torch.weights import TorchExpertWeights
+from expertkit_worker.device import WorkerDeviceRuntime
 from expertkit_worker.weights.adapter import (
     WeightAdapter,
     WeightPlacementFatalError,
@@ -34,7 +35,7 @@ class TorchWeightAdapter(WeightAdapter[TorchExpertWeights, TorchExpertWeights]):
         intermediate_dim: int,
         source_dtype: torch.dtype,
         compute_dtype: torch.dtype,
-        device: torch.device | str,
+        runtime: WorkerDeviceRuntime,
     ) -> None:
         for name, value in (
             ("hidden_dim", hidden_dim),
@@ -46,17 +47,12 @@ class TorchWeightAdapter(WeightAdapter[TorchExpertWeights, TorchExpertWeights]):
             raise ValueError("Torch source weight dtype must be FP16, BF16, or FP32")
         if compute_dtype not in ACTIVATION_DTYPES:
             raise ValueError("Torch compute weight dtype must be FP16, BF16, or FP32")
-        resolved_device = torch.device(device)
-        if resolved_device.type not in {"cpu", "cuda"}:
-            raise ValueError("Torch weight device must be CPU or CUDA")
-        if resolved_device.type == "cuda" and resolved_device.index is None:
-            raise ValueError("Torch weight CUDA device must include an index")
 
         self._hidden_dim = hidden_dim
         self._intermediate_dim = intermediate_dim
         self._source_dtype = source_dtype
         self._compute_dtype = compute_dtype
-        self._device = resolved_device
+        self._runtime = runtime
 
     @property
     def backend_name(self) -> str:
@@ -90,26 +86,16 @@ class TorchWeightAdapter(WeightAdapter[TorchExpertWeights, TorchExpertWeights]):
             raise ValueError("Torch cached weight must be on CPU")
         if cpu_weight.dtype != self._source_dtype:
             raise ValueError("Torch cached weight dtype does not match the configured source")
+
+        runtime = self._runtime
+        device = runtime.device
         try:
-            ready = TorchExpertWeights(
-                gate_proj=cpu_weight.gate_proj.to(
-                    device=self._device,
-                    dtype=self._compute_dtype,
-                    copy=self._device.type != "cpu" or self._compute_dtype != self._source_dtype,
-                ),
-                up_proj=cpu_weight.up_proj.to(
-                    device=self._device,
-                    dtype=self._compute_dtype,
-                    copy=self._device.type != "cpu" or self._compute_dtype != self._source_dtype,
-                ),
-                down_proj=cpu_weight.down_proj.to(
-                    device=self._device,
-                    dtype=self._compute_dtype,
-                    copy=self._device.type != "cpu" or self._compute_dtype != self._source_dtype,
-                ),
-            )
-            if self._device.type == "cuda":
-                torch.cuda.current_stream(self._device).synchronize()
+            # H2D with copy, or get a view if device is CPU
+            copy = device.type != "cpu" or self._compute_dtype != self._source_dtype
+            ready = cpu_weight.to(device=device, dtype=self._compute_dtype, copy=copy)
+
+            runtime.capture_current_work().wait_host()
+
             return ready
         except torch.OutOfMemoryError as error:
             raise WeightPlacementFatalError(
@@ -117,7 +103,7 @@ class TorchWeightAdapter(WeightAdapter[TorchExpertWeights, TorchExpertWeights]):
                 str(error),
             ) from error
         except RuntimeError as error:
-            if self._device.type == "cuda":
+            if device.type != "cpu":
                 raise WeightPlacementFatalError(
                     WeightPlacementFatalReason.DEVICE_FAILURE,
                     str(error),

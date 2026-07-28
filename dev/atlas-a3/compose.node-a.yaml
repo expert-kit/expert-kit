@@ -1,6 +1,6 @@
 # Extension fields
 x-control-image: &control-image
-  image: ek-runtime:atlas-a3-dev
+  image: ek-runtime:a3
   build:
     context: ../..
     dockerfile: container/Dockerfile.cpu
@@ -58,7 +58,7 @@ services:
         condition: service_completed_successfully
     restart: unless-stopped 
     ports:
-      - "${EK_HOST_IP?set EK_HOST_IP}:${EK_WEIGHT_SERVER_PORT:-16543}:6543"
+      - "${EK_NODE_A_IP?set EK_NODE_A_IP}:${EK_WEIGHT_SERVER_PORT:-16543}:6543"
     volumes:
       - *model-mount
       - ./controller.yaml:/etc/expert-kit/config.yaml:ro
@@ -102,8 +102,8 @@ services:
         condition: service_completed_successfully
     restart: unless-stopped 
     ports:
-      - "${EK_HOST_IP?set EK_HOST_IP}:${EK_CONTROLLER_INTRA_PORT:-15001}:5001"
-      - "${EK_HOST_IP?set EK_HOST_IP}:${EK_CONTROLLER_INTER_PORT:-15002}:5002"
+      - "${EK_NODE_A_IP?set EK_NODE_A_IP}:${EK_CONTROLLER_INTRA_PORT:-15001}:5001"
+      - "${EK_NODE_A_IP?set EK_NODE_A_IP}:${EK_CONTROLLER_INTER_PORT:-15002}:5002"
     volumes:
       - ./controller.yaml:/etc/expert-kit/config.yaml:ro
     environment:
@@ -126,13 +126,13 @@ services:
 
   attention-smoke:
     profiles: ["smoke"]
-    image: ek-npu-probe:atlas-a3-dev
+    image: ek-vllm-ascend-runtime:a3
     build:
       context: ../..
       dockerfile: container/Dockerfile.npu
-      target: ek-npu-probe
+      target: ek-vllm-ascend-runtime
       args:
-        ASCEND_IMAGE: quay.nju.edu.cn/ascend/vllm-ascend:v0.23.0rc1-a3
+        VLLM_ASCEND_IMAGE: quay.nju.edu.cn/ascend/vllm-ascend:v0.23.0rc1-a3
         UV_IMAGE: ghcr.nju.edu.cn/astral-sh/uv:0.11.30
     privileged: true
     ipc: host

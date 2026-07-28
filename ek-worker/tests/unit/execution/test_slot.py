@@ -5,6 +5,7 @@ from __future__ import annotations
 import math
 from collections.abc import Iterable, Iterator, Mapping
 from contextlib import contextmanager
+from typing import ClassVar
 
 import pytest
 import torch
@@ -23,7 +24,8 @@ from expertkit_worker.backends import (
     BackendResourceEstimate,
     ComputeBackend,
 )
-from expertkit_worker.execution import ExecutionSlot
+from expertkit_worker.device import CpuWorkerRuntime, CudaWorkerRuntime
+from expertkit_worker.execution import AsyncExecutionSlot, CpuExecutionSlot, ExecutionSlot
 
 
 class FakeReceivedBatch(ReceivedBatch):
@@ -190,19 +192,27 @@ def make_slot(
     device: str,
     dtype: torch.dtype = torch.float32,
     *,
-    enable_cuda_timing: bool = False,
+    enable_device_timing: bool = False,
 ) -> ExecutionSlot:
     spec = BatchBufferConfig(
         max_batch_tokens=4,
         hidden_dim=3,
         top_k=2,
         dtype=dtype,
-        device=device,
+        device=torch.device(device),
     )
-    return ExecutionSlot(
+    buffers = GrpcWorkerBatchBuffers(spec)
+    if spec.device.type == "cpu":
+        return CpuExecutionSlot(
+            spec,
+            buffers,
+            runtime=CpuWorkerRuntime(spec.device),
+        )
+    return AsyncExecutionSlot(
         spec,
-        GrpcWorkerBatchBuffers(spec),
-        enable_cuda_timing=enable_cuda_timing,
+        buffers,
+        enable_device_timing=enable_device_timing,
+        runtime=CudaWorkerRuntime(spec.device),
     )
 
 
@@ -298,7 +308,7 @@ def test_slot_maps_unclassified_backend_exception_to_fatal() -> None:
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
 def test_cuda_slot_uses_one_stream_and_reuses_pinned_output() -> None:
-    slot = make_slot("cuda:0", torch.float16, enable_cuda_timing=True)
+    slot = make_slot("cuda:0", torch.float16, enable_device_timing=True)
     backend = DoublingBackend()
     tracer = RecordingTracer()
     batch_span = RecordingSpan()
@@ -332,18 +342,164 @@ def test_cuda_slot_uses_one_stream_and_reuses_pinned_output() -> None:
     assert backend.streams[0] == backend.streams[1]
     assert backend.streams[0] is not None
     for name in (
-        "expertkit.cuda.input_stage_ms",
-        "expertkit.cuda.backend_stage_ms",
-        "expertkit.cuda.output_stage_ms",
-        "expertkit.cuda.total_stage_ms",
+        "expertkit.device.input_stage_ms",
+        "expertkit.device.backend_stage_ms",
+        "expertkit.device.output_stage_ms",
+        "expertkit.device.total_stage_ms",
     ):
         value = batch_span.attributes[name]
         assert isinstance(value, float)
         assert math.isfinite(value)
         assert value >= 0
     assert "worker.device.wait" in tracer.names
-    assert not any(name.startswith("expertkit.cuda.") for name in unsampled_span.attributes)
+    assert not any(name.startswith("expertkit.device.") for name in unsampled_span.attributes)
     second.release()
     assert slot.device_bytes == 112
     assert slot.host_staging_bytes == 112
     slot.close()
+
+
+class _FakeStream:
+    pass
+
+
+class _FakeEvent:
+    def __init__(self, *, enable_timing: bool) -> None:
+        self.enable_timing = enable_timing
+        self.sequence = 0
+        self.synchronized = False
+
+
+class _CompletedWork:
+    def wait_host(self) -> None:
+        pass
+
+
+class _FakeAsyncRuntime:
+    def __init__(self, *, fail_stream_creation: bool = False) -> None:
+        self.device = torch.device("cpu")
+        self.fail_stream_creation = fail_stream_creation
+        self.current_device_set = False
+        self.stream_synchronized = False
+        self._sequence = 0
+
+    @contextmanager
+    def device_context(self) -> Iterator[None]:
+        yield
+
+    def memory_info(self) -> tuple[int, int]:
+        return 1, 1
+
+    def capture_current_work(self) -> _CompletedWork:
+        return _CompletedWork()
+
+    def create_stream(self, *, priority: int = 0) -> _FakeStream:
+        assert priority == 0
+        if self.fail_stream_creation:
+            raise RuntimeError("stream creation failed")
+        return _FakeStream()
+
+    def current_stream(self) -> _FakeStream:
+        return _FakeStream()
+
+    def synchronize_stream(self, stream: _FakeStream) -> None:
+        assert isinstance(stream, _FakeStream)
+        self.stream_synchronized = True
+
+    @contextmanager
+    def stream_context(self, stream: _FakeStream) -> Iterator[None]:
+        assert isinstance(stream, _FakeStream)
+        yield
+
+    def create_event(self, *, enable_timing: bool = False) -> _FakeEvent:
+        return _FakeEvent(enable_timing=enable_timing)
+
+    def record_event(self, event: _FakeEvent, stream: _FakeStream) -> None:
+        assert isinstance(stream, _FakeStream)
+        self._sequence += 1
+        event.sequence = self._sequence
+
+    def wait_event(self, stream: _FakeStream, event: _FakeEvent) -> None:
+        assert isinstance(stream, _FakeStream)
+        assert isinstance(event, _FakeEvent)
+
+    def synchronize_event(self, event: _FakeEvent) -> None:
+        event.synchronized = True
+
+    def event_done(self, event: _FakeEvent) -> bool:
+        return event.synchronized
+
+    def set_current_device(self) -> None:
+        self.current_device_set = True
+
+    def synchronize_device(self) -> None:
+        pass
+
+    def elapsed_time_ms(self, start: _FakeEvent, end: _FakeEvent) -> float:
+        return float(end.sequence - start.sequence)
+
+
+def _cpu_spec() -> BatchBufferConfig:
+    return BatchBufferConfig(
+        max_batch_tokens=4,
+        hidden_dim=3,
+        top_k=2,
+        dtype=torch.float32,
+        device=torch.device("cpu"),
+    )
+
+
+def test_async_slot_uses_injected_stream_events_and_device_timings() -> None:
+    spec = _cpu_spec()
+    runtime = _FakeAsyncRuntime()
+    slot = AsyncExecutionSlot(
+        spec,
+        GrpcWorkerBatchBuffers(spec),
+        enable_device_timing=True,
+        runtime=runtime,
+    )
+    span = RecordingSpan()
+
+    result = slot.execute(
+        FakeReceivedBatch(worker_batch()),
+        DoublingBackend(),
+        batch_span=span,
+    )
+
+    assert runtime.stream_synchronized is True
+    assert result.output is not None
+    torch.testing.assert_close(result.output, worker_batch().hidden_states * 2)
+    assert span.attributes == {
+        "expertkit.device.input_stage_ms": 1.0,
+        "expertkit.device.backend_stage_ms": 1.0,
+        "expertkit.device.output_stage_ms": 1.0,
+        "expertkit.device.total_stage_ms": 3.0,
+    }
+    result.release()
+    slot.close()
+
+
+class _InspectableAsyncSlot(AsyncExecutionSlot[_FakeStream, _FakeEvent]):
+    latest: ClassVar[_InspectableAsyncSlot | None] = None
+
+    def __new__(cls, *_args: object, **_kwargs: object) -> _InspectableAsyncSlot:
+        instance = super().__new__(cls)
+        cls.latest = instance
+        return instance
+
+
+def test_async_slot_releases_base_resources_when_stream_creation_fails() -> None:
+    spec = _cpu_spec()
+    runtime = _FakeAsyncRuntime(fail_stream_creation=True)
+
+    with pytest.raises(RuntimeError, match="stream creation failed"):
+        _InspectableAsyncSlot(
+            spec,
+            GrpcWorkerBatchBuffers(spec),
+            enable_device_timing=False,
+            runtime=runtime,
+        )
+
+    slot = _InspectableAsyncSlot.latest
+    assert slot is not None
+    assert slot._tensors is None

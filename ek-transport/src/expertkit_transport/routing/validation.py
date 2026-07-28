@@ -14,7 +14,7 @@ def validate_and_convert_routing(
     """Return validated routing Tensors and their sorted distinct expert IDs.
 
     The fixed-size validation summary is copied to the Host once. This may
-    synchronize a CUDA device. Call the function once on final router output,
+    synchronize an accelerator. Call the function once on final router output,
     before an integer narrowing conversion could change an invalid expert ID
     into a valid one.
     """

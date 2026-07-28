@@ -34,6 +34,9 @@ observability = [
     "opentelemetry-sdk==1.39.1",
     "prometheus-client==0.25.0",
 ]
+npu = [
+  "torch-npu==2.11.0rc1",
+]
 
 [tool.uv.sources]
 expertkit-proto = { workspace = true }

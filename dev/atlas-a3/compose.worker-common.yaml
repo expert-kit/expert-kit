@@ -1,0 +1,33 @@
+services:
+  worker-base:
+    image: ek-worker-runtime:a3
+    build:
+      context: ../..
+      dockerfile: container/Dockerfile.npu
+      target: ek-worker-ascend-runtime
+      args:
+        CANN_IMAGE: "m.daocloud.io/quay.io/ascend/cann:9.0.1-a3-ubuntu22.04-py3.12"
+        UV_IMAGE: ghcr.nju.edu.cn/astral-sh/uv:0.11.30
+    entrypoint:
+      - uv
+      - run
+      - --no-sync
+      - --package
+      - expertkit-worker
+      - ek-worker
+    command: ["--config", "/etc/expert-kit/worker.yaml"]
+    privileged: true
+    ipc: host
+    restart: unless-stopped
+    stop_grace_period: 60s
+    volumes:
+      - worker-cache:/ek/worker_cache
+      - /usr/local/Ascend/driver:/usr/local/Ascend/driver:ro
+      - /usr/local/Ascend/firmware:/usr/local/Ascend/firmware:ro
+      - /etc/ascend_install.info:/etc/ascend_install.info:ro
+      - /usr/local/bin/npu-smi:/usr/local/bin/npu-smi:ro
+      - /usr/local/dcmi:/usr/local/dcmi:ro
+      - /dev/devmm_svm:/dev/devmm_svm
+    networks:
+      - expert-kit-network
+

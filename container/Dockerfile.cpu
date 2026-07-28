@@ -1,5 +1,6 @@
 ARG RUST_IMAGE="rust:1.88.0-bookworm"
 ARG RUNTIME_IMAGE="debian:bookworm-slim"
+ARG PYTHON_RUNTIME_IMAGE="python:3.12-slim-bookworm"
 ARG UV_IMAGE="ghcr.io/astral-sh/uv:0.11.30"
 
 FROM ${RUST_IMAGE} AS rust-base
@@ -67,7 +68,7 @@ ENTRYPOINT [""]
 
 FROM ${UV_IMAGE} AS uv-bin
 
-FROM ${RUNTIME_IMAGE} AS ek-worker-cuda-runtime
+FROM ${PYTHON_RUNTIME_IMAGE} AS ek-worker-cuda-runtime
 
 # Replace official Debian APT sources with TUNA mirrors.
 RUN sed -i \
@@ -78,12 +79,14 @@ RUN sed -i \
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     libpq5 \
-    python3.12 \
-    python3.12-venv \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=uv-bin /uv /uvx /usr/local/bin/
 COPY --from=ek-rust-build /tmp/ek-cli /usr/local/bin/
+
+ENV UV_PYTHON_DOWNLOADS=0
+
+RUN python3 --version
 
 WORKDIR /opt/expert-kit
 COPY pyproject.toml uv.lock ./

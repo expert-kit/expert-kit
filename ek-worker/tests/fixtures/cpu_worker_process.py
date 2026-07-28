@@ -33,6 +33,7 @@ from expertkit_worker.control import (
     new_start_id,
 )
 from expertkit_worker.execution import WorkerExecutor
+from expertkit_worker.factory import _create_device_wiring
 from expertkit_worker.observability import configure_logging, create_observability
 from expertkit_worker.weights import (
     CachedCpuWeight,
@@ -140,12 +141,14 @@ async def _run(args: argparse.Namespace) -> None:
     args.active_marker.unlink(missing_ok=True)
     args.pending_marker.unlink(missing_ok=True)
 
+    device_wiring = _create_device_wiring("cpu")
+    runtime = device_wiring.runtime
     adapter = TorchWeightAdapter(
         hidden_dim=_HIDDEN_DIM,
         intermediate_dim=_INTERMEDIATE_DIM,
         source_dtype=torch.float32,
         compute_dtype=torch.float32,
-        device="cpu",
+        runtime=runtime,
     )
     batch_spec = WorkerEndpointConfig(
         instance_id=_INSTANCE_ID,
@@ -183,7 +186,7 @@ async def _run(args: argparse.Namespace) -> None:
         intermediate_dim=_INTERMEDIATE_DIM,
         top_k=1,
         dtype=torch.float32,
-        device="cpu",
+        runtime=runtime,
         acquire_many=acquire_many,
     )
     backend = _GateBackend(
@@ -194,13 +197,14 @@ async def _run(args: argparse.Namespace) -> None:
     execution = WorkerExecutor(
         receiver,
         backend,
+        create_slot=device_wiring.create_slot,
         instance_id=_INSTANCE_ID,
         buffer_config=BatchBufferConfig(
             max_batch_tokens=_MAX_BATCH_TOKENS,
             hidden_dim=_HIDDEN_DIM,
             top_k=1,
             dtype=torch.float32,
-            device="cpu",
+            device=torch.device("cpu"),
         ),
         slot_count=1,
     )

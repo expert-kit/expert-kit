@@ -11,6 +11,7 @@ from collections.abc import Callable
 
 import torch
 
+from expertkit_transport._accelerator import TorchAccelerator, accelerator_for
 from expertkit_transport.batches import RoutedLayerBatch
 from expertkit_transport.controller.instance import resolve_default_instance
 from expertkit_transport.controller.topology import ControllerTopologyWatcher
@@ -190,8 +191,8 @@ class BlockingRoutedMoEClient:
     Framework model hooks are commonly synchronous. This wrapper preserves one
     process-lifetime asyncio loop and channel set rather than creating an event
     loop for every layer. Several calling threads may submit work concurrently.
-    CUDA events order caller-stream inputs and outputs without a device-wide or
-    Host-side CUDA synchronization.
+    Device events order caller-stream inputs and outputs without a device-wide
+    or Host-side accelerator synchronization.
     """
 
     def __init__(
@@ -218,6 +219,7 @@ class BlockingRoutedMoEClient:
             "device": device,
             "same_worker_retry_delay_seconds": same_worker_retry_delay_seconds,
         }
+        self._accelerator = accelerator_for(device)
         self._loop: asyncio.AbstractEventLoop | None = None
         self._client: RoutedMoEClient | None = None
         self._thread_error: BaseException | None = None
@@ -276,10 +278,10 @@ class BlockingRoutedMoEClient:
             self._active.add(completion)
         loop, client = self._require_loop()
         deadline = time.monotonic() + timeout_seconds
-        input_ready: torch.cuda.Event | None = None
-        if hidden_states.device.type == "cuda":
-            input_ready = torch.cuda.Event(enable_timing=False, blocking=False)
-            input_ready.record(torch.cuda.current_stream(hidden_states.device))
+        input_ready: torch.Event | None = None
+        if self._accelerator is not None:
+            input_ready = self._accelerator.create_event()
+            input_ready.record(self._accelerator.current_stream())
         future = asyncio.run_coroutine_threadsafe(
             self._execute(
                 client,
@@ -290,6 +292,7 @@ class BlockingRoutedMoEClient:
                 distinct_expert_ids=distinct_expert_ids,
                 monotonic_deadline=deadline,
                 input_ready=input_ready,
+                accelerator=self._accelerator,
                 completion=completion,
             ),
             loop,
@@ -308,7 +311,8 @@ class BlockingRoutedMoEClient:
             with self._lock:
                 self._active.discard(completion)
         if output_ready is not None:
-            torch.cuda.current_stream(result.device).wait_event(output_ready)
+            assert self._accelerator is not None
+            self._accelerator.current_stream().wait_event(output_ready)
         return result
 
     def close(self) -> None:
@@ -365,12 +369,14 @@ class BlockingRoutedMoEClient:
         routing_weights: torch.Tensor,
         distinct_expert_ids: tuple[int, ...],
         monotonic_deadline: float,
-        input_ready: torch.cuda.Event | None,
+        input_ready: torch.Event | None,
+        accelerator: TorchAccelerator | None,
         completion: threading.Event,
-    ) -> tuple[torch.Tensor, torch.cuda.Event | None]:
+    ) -> tuple[torch.Tensor, torch.Event | None]:
         try:
             if input_ready is not None:
-                torch.cuda.current_stream(hidden_states.device).wait_event(input_ready)
+                assert accelerator is not None
+                accelerator.current_stream().wait_event(input_ready)
             result = await client.execute(
                 layer_id=layer_id,
                 hidden_states=hidden_states,
@@ -379,10 +385,10 @@ class BlockingRoutedMoEClient:
                 distinct_expert_ids=distinct_expert_ids,
                 monotonic_deadline=monotonic_deadline,
             )
-            output_ready: torch.cuda.Event | None = None
-            if result.device.type == "cuda":
-                output_ready = torch.cuda.Event(enable_timing=False, blocking=False)
-                output_ready.record(torch.cuda.current_stream(result.device))
+            output_ready: torch.Event | None = None
+            if accelerator is not None:
+                output_ready = accelerator.create_event()
+                output_ready.record(accelerator.current_stream())
             return result, output_ready
         finally:
             completion.set()

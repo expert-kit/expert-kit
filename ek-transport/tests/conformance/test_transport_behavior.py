@@ -100,7 +100,7 @@ class RunningPair:
 
 async def start_pair(kind: TransportKind) -> RunningPair:
     config = endpoint_config()
-    buffer_config = BatchBufferConfig(4, 3, 2, torch.float32, "cpu")
+    buffer_config = BatchBufferConfig(4, 3, 2, torch.float32, torch.device("cpu"))
     endpoint: str | None = None
     if kind == "grpc":
         receiver = GrpcWorkerBatchReceiver(

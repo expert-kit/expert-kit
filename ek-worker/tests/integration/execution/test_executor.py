@@ -29,6 +29,7 @@ from expertkit_worker.backends import (
     ComputeBackend,
 )
 from expertkit_worker.execution import WorkerExecutor
+from expertkit_worker.factory import _create_device_wiring
 from expertkit_worker.observability.api import WorkerMetrics
 
 
@@ -137,7 +138,7 @@ def buffer_config() -> BatchBufferConfig:
         hidden_dim=3,
         top_k=2,
         dtype=torch.float32,
-        device="cpu",
+        device=torch.device("cpu"),
     )
 
 
@@ -165,6 +166,7 @@ async def start_stack(
     pending: int = 1,
     metrics: WorkerMetrics | None = None,
 ) -> tuple[GrpcWorkerBatchReceiver, GrpcWorkerTransport, WorkerExecutor]:
+    device_wiring = _create_device_wiring("cpu")
     server = GrpcWorkerBatchReceiver(
         "127.0.0.1:0",
         batch_spec(),
@@ -174,6 +176,7 @@ async def start_stack(
     execution = WorkerExecutor(
         server,
         backend,
+        create_slot=device_wiring.create_slot,
         instance_id=7,
         buffer_config=buffer_config(),
         slot_count=active,

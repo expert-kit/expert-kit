@@ -14,6 +14,7 @@ from pydantic import (
     ByteSize,
     ConfigDict,
     Field,
+    PlainSerializer,
     model_validator,
 )
 
@@ -92,7 +93,15 @@ def _validate_absolute_path(value: Path) -> Path:
 
 
 AbsolutePath = Annotated[Path, AfterValidator(_validate_absolute_path)]
-PositiveByteSize = Annotated[ByteSize, Field(gt=0)]
+PositiveByteSize = Annotated[
+    ByteSize,
+    Field(gt=0),
+    PlainSerializer(
+        lambda size: size.human_readable(decimal=False),
+        return_type=str,
+        when_used="json",
+    ),
+]
 
 
 class ModelConfig(_StrictModel):
@@ -141,13 +150,22 @@ class WorkerProcessConfig(_StrictModel):
     def validate_backend(self) -> WorkerProcessConfig:
         """Enforce device support and Backend-specific configuration."""
 
+        is_cpu = self.device == "cpu"
         is_cuda = re.fullmatch(r"cuda:\d+", self.device) is not None
+        is_npu = re.fullmatch(r"npu:\d+", self.device) is not None
+
         if self.backend is BackendName.GGML and self.device != "cpu":
             raise ValueError("the MVP GGML backend requires worker.device: cpu")
-        if self.backend in {BackendName.TORCH, BackendName.FUSED} and not is_cuda:
+
+        # TODO: NPU support on fused backend, and then merge these two if below
+        if self.backend is BackendName.TORCH and not (is_cpu or is_cuda or is_npu):
             raise ValueError(
-                f"the MVP {self.backend.value} backend requires worker.device: cuda:<id>"
+                f"the MVP {self.backend.value} backend requires cpu, cuda:<id> or npu:<id>"
             )
+        # NOTE: Currently only CUDA is supported in fused backend
+        if self.backend is BackendName.FUSED and not is_cuda:
+            raise ValueError(f"the MVP {self.backend.value} backend requires cuda:<id>")
+
         if self.backend is BackendName.GGML and self.ggml is None:
             raise ValueError("worker.ggml configuration is required when worker.backend is ggml")
         if self.backend is not BackendName.GGML and self.ggml is not None:
@@ -308,6 +326,9 @@ class WorkerConfig(_StrictModel):
     @model_validator(mode="after")
     def validate_backend_combination(self) -> WorkerConfig:
         """Reject unused or incomplete Backend-specific configuration."""
+        # TODO: NPU support on SHM?
+        if self.worker.device.startswith("npu:") and isinstance(self.transport, ShmTransportConfig):
+            raise ValueError("NPU workers currently require the gRPC transport")
 
         if self.worker.backend is BackendName.FUSED:
             supported = {ActivationDType.FP16, ActivationDType.BF16}

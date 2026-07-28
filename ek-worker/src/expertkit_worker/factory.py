@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import os
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -12,6 +12,7 @@ from expertkit_transport.controller import (
     ResolvedDefaultInstance,
     resolve_default_instance,
 )
+from expertkit_transport.transports import WorkerBatchBuffers
 from expertkit_transport.transports.base import (
     BatchBufferConfig,
     WorkerBatchReceiver,
@@ -37,7 +38,19 @@ from expertkit_worker.control import (
     ExpertStateReporter,
 )
 from expertkit_worker.control.factory import create_controller_supervisor
-from expertkit_worker.execution import WorkerExecutor
+from expertkit_worker.device import (
+    AsyncWorkerDeviceRuntime,
+    CpuWorkerRuntime,
+    CudaWorkerRuntime,
+    WorkerDeviceRuntime,
+)
+from expertkit_worker.execution import (
+    AsyncExecutionSlot,
+    CpuExecutionSlot,
+    ExecutionSlot,
+    ExecutionSlotFactory,
+    WorkerExecutor,
+)
 from expertkit_worker.observability import create_observability
 from expertkit_worker.weights import (
     DirectIOWeightDiskCache,
@@ -63,21 +76,62 @@ class _InstanceResolver(Protocol):
     ) -> ResolvedDefaultInstance: ...
 
 
-def _memory_info(device: torch.device) -> tuple[int, int]:
-    if device.type == "cuda":
-        available, total = torch.cuda.mem_get_info(device)
-        return int(available), int(total)
-    if device.type != "cpu":
-        raise ValueError("Worker device must be CPU or CUDA")
-    try:
-        page_size = os.sysconf("SC_PAGE_SIZE")
-        available_pages = os.sysconf("SC_AVPHYS_PAGES")
-        total_pages = os.sysconf("SC_PHYS_PAGES")
-    except (OSError, ValueError) as error:
-        raise RuntimeError("cannot query available CPU memory") from error
-    if min(page_size, available_pages, total_pages) <= 0:
-        raise RuntimeError("the operating system returned invalid CPU memory information")
-    return int(available_pages * page_size), int(total_pages * page_size)
+# NOTE: This composition is needed because we might want to create
+# ExecutionSlot with AsyncWorkerDeviceRuntime, but for others
+# only the WorkerDeviceRuntime is used
+@dataclass(frozen=True, slots=True)
+class _DeviceWiring:
+    runtime: WorkerDeviceRuntime
+    create_slot: ExecutionSlotFactory
+
+
+def _create_device_wiring(device_name: str) -> _DeviceWiring:
+    if device_name == "cpu":
+        return _cpu_wiring(CpuWorkerRuntime(torch.device(device_name)))
+
+    if device_name.startswith("cuda:"):
+        return _async_wiring(CudaWorkerRuntime(torch.device(device_name)))
+
+    if device_name.startswith("npu:"):
+        # Lazy import AscendWorkerRuntime which includes torch_npu
+        from expertkit_worker.device.ascend import AscendWorkerRuntime
+
+        return _async_wiring(AscendWorkerRuntime(torch.device(device_name)))
+
+    raise NotImplementedError(f"{device_name} is not supported.")
+
+
+# Two wirings for cpu or async execution slot
+def _cpu_wiring(runtime: WorkerDeviceRuntime) -> _DeviceWiring:
+    def create_slot(
+        spec: BatchBufferConfig,
+        transport_buffers: WorkerBatchBuffers,
+        *,
+        enable_device_timing: bool = False,
+    ) -> ExecutionSlot:
+        return CpuExecutionSlot(spec, transport_buffers, runtime=runtime)
+
+    return _DeviceWiring(runtime=runtime, create_slot=create_slot)
+
+
+def _async_wiring[StreamT, EventT](
+    runtime: AsyncWorkerDeviceRuntime[StreamT, EventT],
+) -> _DeviceWiring:
+    def create_slot(
+        spec: BatchBufferConfig,
+        transport_buffers: WorkerBatchBuffers,
+        *,
+        enable_device_timing: bool = False,
+    ) -> ExecutionSlot:
+        return AsyncExecutionSlot(
+            spec,
+            transport_buffers,
+            enable_device_timing=enable_device_timing,
+            runtime=runtime,
+        )
+
+    runtime.set_current_device()
+    return _DeviceWiring(runtime=runtime, create_slot=create_slot)
 
 
 async def build_worker_application(
@@ -106,9 +160,11 @@ async def build_worker_application(
     instance_id = resolved_instance.instance_id
     activation_dtype = torch_dtype(config.model.activation_dtype)
     weight_dtype = torch_dtype(config.model.weight_dtype)
-    device = torch.device(config.worker.device)
-    if device.type == "cuda":
-        torch.cuda.set_device(device)
+
+    device_wiring = _create_device_wiring(config.worker.device)
+    runtime = device_wiring.runtime
+    create_slot = device_wiring.create_slot
+    device = runtime.device
 
     observability = create_observability(
         config.observability,
@@ -125,7 +181,7 @@ async def build_worker_application(
             config,
             source_dtype=weight_dtype,
             compute_dtype=activation_dtype,
-            device=device,
+            runtime=runtime,
         )
         endpoint_config = WorkerEndpointConfig(
             instance_id=instance_id,
@@ -175,7 +231,7 @@ async def build_worker_application(
         backend = create_compute_backend(
             config,
             dtype=activation_dtype,
-            device=device,
+            runtime=runtime,
             acquire_many=acquire_many,
         )
         buffer_config = BatchBufferConfig(
@@ -188,6 +244,7 @@ async def build_worker_application(
         execution = WorkerExecutor(
             receiver,
             backend,
+            create_slot=create_slot,
             instance_id=instance_id,
             buffer_config=buffer_config,
             slot_count=config.worker.max_active_batches_per_device,
@@ -201,7 +258,7 @@ async def build_worker_application(
             active_batches=config.worker.max_active_batches_per_device,
             conversion_temporary_bytes=adapter.conversion_temporary_bytes(),
         )
-        available_bytes, total_bytes = _memory_info(device)
+        available_bytes, total_bytes = runtime.memory_info()
         if int(config.worker.device_memory_limit) > total_bytes:
             raise ValueError("worker.device_memory_limit exceeds total device memory")
         validate_available_device_memory(

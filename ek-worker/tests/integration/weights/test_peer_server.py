@@ -11,6 +11,7 @@ import torch
 from safetensors.torch import save as official_save
 
 from expertkit_worker.backends.torch import TorchWeightAdapter
+from expertkit_worker.device import CpuWorkerRuntime
 from expertkit_worker.weights.direct_io import AlignedWeightBuffer
 from expertkit_worker.weights.disk_cache import WeightDiskCache
 from expertkit_worker.weights.dram_cache import DramCache, WeightKey
@@ -121,7 +122,7 @@ def make_loader(
         intermediate_dim=_INTERMEDIATE_DIM,
         source_dtype=torch.float32,
         compute_dtype=torch.float32,
-        device="cpu",
+        runtime=CpuWorkerRuntime(torch.device("cpu")),
     )
     cache: DramCache[CachedCpuWeight[object]] = DramCache(
         8 + 16 * 1024 * 1024 + adapter.source_tensor_bytes()

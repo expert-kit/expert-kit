@@ -15,11 +15,15 @@ dependencies = [
 fused = ["expertkit-worker[fused]==0.1.0"]
 ggml = ["expertkit-worker[ggml]==0.1.0"]
 observability = ["expertkit-worker[observability]==0.1.0"]
+npu = [
+    "expertkit-worker[npu]==0.1.0",
+]
 vllm = ["expertkit-vllm==0.1.0"]
 
 [dependency-groups]
 dev = [
     "grpcio-tools==1.71.0",
+    "pydantic-settings>=2.14.2",
     "pytest>=8.3,<9",
     "ruff>=0.11,<1",
     "safetensors>=0.5.3,<1",
@@ -35,6 +39,15 @@ expertkit-torch = { workspace = true }
 expertkit-transport = { workspace = true }
 expertkit-vllm = { workspace = true }
 expertkit-worker = { workspace = true }
+torch = [
+    { index = "pytorch-cpu", marker = "sys_platform == 'linux' and platform_machine == 'aarch64'" },
+]
+
+# Speed up downloads in CN using mirrors 
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
 
 [tool.uv.workspace]
 members = [
