@@ -102,9 +102,6 @@ def save_config(
 
 
 def main() -> None:
-    # 2. After path is confirmed, set WorkerInstance and convert
-    # it to docker compose service
-
     WORKER_CONF_ROOT.mkdir(parents=True, exist_ok=True)
     inventory = read_inventory(INVENTORY_YAML)
     env = DeploymentEnv()  # ty: ignore[missing-argument]
