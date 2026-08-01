@@ -1,8 +1,12 @@
 ARG CANN_IMAGE="quay.io/ascend/cann:9.0.1-a3-ubuntu22.04-py3.12"
 ARG UV_IMAGE="ghcr.io/astral-sh/uv:0.11.30"
+# Selected nightly-main-a3 snapshot, pinned by digest.
+ARG VLLM_ASCEND_IMAGE="quay.io/ascend/vllm-ascend@sha256:a04db9765d8888bbec94d60e69924dc85aaa54e0702a4b68030d265f88f863f5"
+
 FROM ${UV_IMAGE} AS uv-bin
 
 FROM ${CANN_IMAGE} AS ek-worker-ascend-runtime
+ARG UV_DEFAULT_INDEX="https://pypi.org/simple"
 
 COPY --from=uv-bin /uv /uvx /usr/local/bin/
 
@@ -19,7 +23,8 @@ COPY ek-integration/expertkit_vllm/pyproject.toml \
     ./ek-integration/expertkit_vllm/pyproject.toml
 
 RUN --mount=type=cache,target=/root/.cache/uv \
-    UV_LINK_MODE=copy \
+    uv lock --default-index "${UV_DEFAULT_INDEX}" \
+    && UV_LINK_MODE=copy \
     uv sync \
       --locked \
       --package expertkit-worker \
@@ -34,17 +39,19 @@ COPY ek-worker/ ./ek-worker/
 RUN --mount=type=cache,target=/root/.cache/uv \
     UV_LINK_MODE=copy \
     uv sync \
-      --locked \
-      --package expertkit-worker \
-      --extra npu \
-      --no-dev
+    --locked \
+    --package expertkit-worker \
+    --extra npu \
+    --no-dev
 
-ARG VLLM_ASCEND_IMAGE="quay.io/ascend/vllm-ascend:v0.23.0rc1-a3"
-FROM ${VLLM_ASCEND_IMAGE} as ek-vllm-ascend-runtime
+FROM ${VLLM_ASCEND_IMAGE} AS ek-vllm-ascend-runtime
 
-WORKDIR /opt/expert-kit
-COPY pyproject.toml uv.lock ./
-COPY ek-proto/ ek-proto/
-COPY ek-transport/ ek-transport/
-COPY ek-worker/ ek-worker/
-COPY ek-integration/expertkit_vllm/ ek-integration/expertkit_vllm
+# Use wheels to boot up vLLM plugin for EK
+COPY dist/attention-wheels/ /tmp/ek-wheels/
+
+RUN python3 -m pip install \
+      --no-cache-dir \
+      --no-deps \
+      /tmp/ek-wheels/*.whl
+
+ENV EK_ENABLE=1

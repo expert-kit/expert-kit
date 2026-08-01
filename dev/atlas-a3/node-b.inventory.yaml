@@ -4,10 +4,10 @@ worker_base_port: 51234
 peer_base_port: 52234
 
 model:
-  name: DeepSeek-V2-Lite-Chat
+  name: Qwen3-30B-A3B
   weight_version: main
-  num_layers: 27
-  experts_per_layer: 64
+  num_layers: 48
+  experts_per_layer: 128
   hidden_dim: 2048
   expert_intermediate_dim: 768
   top_k: 8
@@ -20,12 +20,12 @@ worker:
   device_prefix: npu
   max_batch_tokens: 4096
   max_active_batches_per_device: 1
-  device_memory_limit: 20GiB
+  device_memory_limit: 50GiB
   shutdown_grace_secs: 30
 
 transport:
   type: grpc
-  max_pending_batches_per_device: 1
+  max_pending_batches_per_device: 8  # should align with dp_size
 
 controller:
   heartbeat_interval_secs: 3

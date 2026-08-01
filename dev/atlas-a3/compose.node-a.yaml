@@ -10,12 +10,29 @@ x-control-image: &control-image
       RUNTIME_IMAGE: docker.m.daocloud.io/library/debian:bookworm-slim
       UV_IMAGE: ghcr.nju.edu.cn/astral-sh/uv:0.11.30
 
+x-runtime-image: &runtime-image
+  image: ek-vllm-ascend-runtime:a3
+  build:
+    context: ../..
+    dockerfile: container/Dockerfile.npu
+    target: ek-vllm-ascend-runtime
+    args:
+      # NJU mirror of the selected nightly-main-a3 digest.
+      VLLM_ASCEND_IMAGE: quay.nju.edu.cn/ascend/vllm-ascend@sha256:a04db9765d8888bbec94d60e69924dc85aaa54e0702a4b68030d265f88f863f5
+
 x-model-mount: &model-mount
   type: bind
   source: ${EK_MODEL_PATH:?set EK_MODEL_PATH}
-  target: /model/${EK_MODEL_NAME:-DeepSeek-V2-Lite-Chat}
+  target: /model/${EK_MODEL_NAME:?set EK_MODEL_NAME}
   read_only: true
 
+x-dataset-mount: &dataset-mount
+  type: bind
+  source: ${EK_DATASET_PATH:? set EK_DATASET_PATH}
+  target: /dataset/data.jsonl
+  read_only: true
+  bind:
+    create_host_path: false
 
 services:
   postgres:
@@ -30,6 +47,7 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+    restart: unless-stopped
     ports:
       - "127.0.0.1:${EK_POSTGRES_PORT:?set EK_POSTGRES_PORT}:5432"
     volumes:
@@ -69,7 +87,7 @@ services:
       - ek-cli
       - weight-server
       - --model
-      - /model/${EK_MODEL_NAME:? EK_MODEL_NAME}
+      - /model/${EK_MODEL_NAME:?set EK_MODEL_NAME}
     networks:
       - expert-kit-network
 
@@ -124,33 +142,121 @@ services:
     networks:
       - expert-kit-network
 
-  attention-smoke:
-    profiles: ["smoke"]
-    image: ek-vllm-ascend-runtime:a3
-    build:
-      context: ../..
-      dockerfile: container/Dockerfile.npu
-      target: ek-vllm-ascend-runtime
-      args:
-        VLLM_ASCEND_IMAGE: quay.nju.edu.cn/ascend/vllm-ascend:v0.23.0rc1-a3
-        UV_IMAGE: ghcr.nju.edu.cn/astral-sh/uv:0.11.30
+  attention:
+    <<: *runtime-image
+    profiles: ["attn", "bench"]
     privileged: true
     ipc: host
     shm_size: 16g
     depends_on:
       controller:
         condition: service_started
-    environment:
-      ASCEND_RT_VISIBLE_DEVICES: "0"
+    healthcheck:
+      test:
+        - CMD
+        - python3
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2)"
+      interval: 10s
+      timeout: 3s
+      retries: 12
+      start_period: 10m
+
+    ports:
+      - "${EK_NODE_A_IP}:${EK_VLLM_SERVE_PORT:?set EK_VLLM_SERVE_PORT}:8000"
     volumes:
       - *model-mount
-      - ./results:/results
       - /usr/local/Ascend/driver:/usr/local/Ascend/driver:ro
       - /usr/local/Ascend/firmware:/usr/local/Ascend/firmware:ro
       - /etc/ascend_install.info:/etc/ascend_install.info:ro
       - /usr/local/bin/npu-smi:/usr/local/bin/npu-smi:ro
       - /usr/local/dcmi:/usr/local/dcmi:ro
       - /dev/devmm_svm:/dev/devmm_svm
+    entrypoint: ["vllm"]
+    command:
+      - serve
+      - /model/${EK_MODEL_NAME}
+      - --served-model-name
+      - ${EK_MODEL_NAME}
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+      - --gpu-memory-utilization
+      - "${EK_VLLM_MEMORY_UTILIZATION:-0.5}"
+      - --max-model-len
+      - "${EK_VLLM_MAX_MODEL_LEN:-4096}"
+      - --data-parallel-size
+      - "${EK_DP_SIZE:-1}"
+
+    environment:
+      EK_ENABLE: "1"
+      EK_ADDR: controller:5002
+      ASCEND_RT_VISIBLE_DEVICES: "${EK_VLLM_VISIBLE_DEVICES:?set EK_VLLM_VISIBLE_DEVICES}"
+
+    networks:
+      - expert-kit-network
+
+  benchmark:
+    <<: *runtime-image
+    profiles: ["bench"]
+    depends_on:
+      attention:
+        condition: service_healthy
+    entrypoint: ["vllm"]
+    volumes:
+      - *model-mount
+      - *dataset-mount
+      - /usr/local/Ascend/driver:/usr/local/Ascend/driver:ro
+      - /usr/local/Ascend/firmware:/usr/local/Ascend/firmware:ro
+      - /etc/ascend_install.info:/etc/ascend_install.info:ro
+      - /usr/local/bin/npu-smi:/usr/local/bin/npu-smi:ro
+      - /usr/local/dcmi:/usr/local/dcmi:ro
+      - /dev/devmm_svm:/dev/devmm_svm
+      - ./results:/results
+    command:
+      - bench
+      - serve
+      - --backend
+      - vllm
+      - --model
+      - ${EK_MODEL_NAME}
+      - --tokenizer
+      - /model/${EK_MODEL_NAME}
+      - --endpoint
+      - /v1/completions
+      - --base-url
+      - http://attention:8000
+      - --num-prompts
+      - "256"
+      - --output-len
+      - "128"
+      # Random data 
+      # - --dataset-name
+      # - random
+      # - --random-input-len
+      # - "32"
+      # - --random-output-len
+      # - "8"
+      # Custom dataset
+      - --dataset-name
+      - ${EK_DATASET_NAME}
+      - --dataset-path
+      - /dataset/data.jsonl
+      - --num-warmups
+      - ${EK_BENCH_WARMUPS?set EK_BENCH_WARMUPS}
+      - --max-concurrency
+      - ${EK_BENCH_MAX_CONCURRENCY?set EK_BENCH_MAX_CONCURRENCY}
+      - --save-result
+      - --result-dir
+      - /results
+      - --plot-timeline
+      - --label
+      - 8A16E-c8-n256-o128-grpc
+    environment:
+      EK_ENABLE: "0"
+      TORCH_DEVICE_BACKEND_AUTOLOAD: "0"
+      VLLM_PLUGINS: ""
     networks:
       - expert-kit-network
 

@@ -1,6 +1,7 @@
 # Build files
 target/
 build/
+dist/
 
 # Envs
 .vscode/
