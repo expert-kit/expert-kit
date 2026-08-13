@@ -39,6 +39,79 @@ The Frontend sends original model layer IDs. DeepSeek therefore skips its early
 dense-only layers, while Qwen follows its configured sparse-layer positions.
 The Worker and Weight Server must use the same checkpoint configuration.
 
+For an NCCL deployment, create one process-shared runtime for the Frontend and
+pass it to `load_model`. The Frontend and all NCCL Workers must use unique ranks
+in the same static world, matching `world_size`, rendezvous endpoint, and group
+name:
+
+```python
+from expertkit_torch import load_model
+from expertkit_transport.transports.nccl import NcclRuntime, NcclRuntimeConfig
+
+runtime = NcclRuntime(
+    NcclRuntimeConfig(
+        rank=0,
+        world_size=2,
+        rendezvous_endpoint="frontend-h200:29500",
+        group_name="qwen3-production",
+        device="cuda:0",
+    )
+)
+with load_model(
+    "/models/DeepSeek-V2-Lite-Chat",
+    mode="expertkit",
+    controller_endpoint="192.0.2.10:5002",
+    device="cuda:0",
+    timeout_seconds=120.0,
+    transport_runtime=runtime,
+) as loaded:
+    output = loaded.model.generate(...)
+```
+
+The first routed call lazily establishes the static NCCL world, so set
+`timeout_seconds` high enough to cover rendezvous and communicator setup on the
+deployment. Later routed calls reuse that world. The loaded model's Transport
+client owns and closes the runtime. NCCL carries
+CUDA Tensor payloads; a private gRPC endpoint still handles admission,
+metadata, completion, and errors. If `torch.distributed` is already initialized,
+the current implementation can reuse only an exact matching EK `WORLD`; it does
+not yet create a separate NCCL group beside an unrelated vLLM or torchrun world.
+
+For Transfer Engine, pass one process-wide Mooncake runtime in the same way:
+
+```python
+from expertkit_torch import load_model
+from expertkit_transport.transports.transfer_engine import (
+    TransferEngineRuntime,
+    TransferEngineRuntimeConfig,
+)
+
+runtime = TransferEngineRuntime(
+    TransferEngineRuntimeConfig(
+        segment_name="127.0.0.1:12012",
+        metadata_server="P2PHANDSHAKE",
+        protocol="nvlink_intra",
+        device="cuda:0",
+    )
+)
+with load_model(
+    "/models/DeepSeek-V2-Lite-Chat",
+    mode="expertkit",
+    controller_endpoint="127.0.0.1:5002",
+    device="cuda:0",
+    timeout_seconds=120.0,
+    transport_runtime=runtime,
+) as loaded:
+    output = loaded.model.generate(...)
+```
+
+Use distinct `segment_name` endpoints for the Frontend and Worker. The
+current production session lifecycle supports only a forced `nvlink_intra`
+backend, and both sides must select it. Install the EK safety-patched Linux
+wheel explicitly; runtime capability checks verify terminal DMA semantics,
+GPUDirect visibility, registration reference counts, forced selection, and
+drained IPC-cache invalidation before memory registration.
+
 ## Load a model
 
 `load_model` returns a context-manageable object containing the model and
@@ -50,7 +123,7 @@ from expertkit_torch import load_model
 with load_model(
     "/models/DeepSeek-V2-Lite-Chat",
     mode="expertkit",
-    controller_endpoint="10.0.0.10:5002",
+    controller_endpoint="192.0.2.10:5002",
     device="cuda:0",
 ) as loaded:
     output = loaded.model.generate(...)
@@ -97,11 +170,12 @@ uv run --package expertkit-torch ek-torch-benchmark \
 ```
 
 The Frontend does not select a Transport on the command line. Each Worker
-registers `grpc` or `shm`, the Controller publishes that value in topology, and
-the Transport package creates the matching connection. An SHM Worker and the
-Frontend must share the same OS shared-memory namespace and Unix user. SHM does
-not work across machines and does not remove GPU-to-Host or Host-to-GPU
-transfers.
+registers `grpc`, `shm`, `nccl`, or `transfer_engine`, the Controller publishes
+that value in topology, and the Transport package creates the matching
+connection. NCCL and Transfer Engine require the corresponding process-shared
+runtime shown above. An SHM Worker and the Frontend must share the same OS
+shared-memory namespace and Unix user. SHM does not work across machines and
+does not remove GPU-to-Host or Host-to-GPU transfers.
 
 The command reports one measured static batch per rank. Global maximum
 concurrency must be divisible by the selected rank count; each rank receives

@@ -17,8 +17,14 @@ from expertkit_transport.transports.base import (
     BatchBufferConfig,
     WorkerBatchReceiver,
     WorkerEndpointConfig,
+    WorkerTransportRuntime,
 )
 from expertkit_transport.transports.grpc import GrpcWorkerBatchReceiver
+from expertkit_transport.transports.nccl import (
+    NcclRuntime,
+    NcclRuntimeConfig,
+    NcclWorkerBatchReceiver,
+)
 from expertkit_transport.transports.shm import ShmWorkerBatchReceiver
 
 from expertkit_worker.app import WorkerApplication
@@ -29,13 +35,16 @@ from expertkit_worker.backends.factory import (
 )
 from expertkit_worker.config import (
     GrpcTransportConfig,
+    NcclTransportConfig,
     ShmTransportConfig,
+    TransferEngineTransportConfig,
     WorkerConfig,
     plan_device_resources,
     validate_available_device_memory,
 )
 from expertkit_worker.control import (
     ExpertStateReporter,
+    new_start_id,
 )
 from expertkit_worker.control.factory import create_controller_supervisor
 from expertkit_worker.device import (
@@ -160,6 +169,7 @@ async def build_worker_application(
         timeout_seconds=config.controller.heartbeat_timeout_secs,
     )
     instance_id = resolved_instance.instance_id
+    worker_start_id = new_start_id()
     activation_dtype = torch_dtype(config.model.activation_dtype)
     weight_dtype = torch_dtype(config.model.weight_dtype)
 
@@ -174,6 +184,7 @@ async def build_worker_application(
     )
     metrics = observability.metrics
     receiver: WorkerBatchReceiver | None = None
+    transport_runtime: WorkerTransportRuntime | None = None
     execution: WorkerExecutor | None = None
     disk_cache: DirectIOWeightDiskCache | None = None
     weight_services: WeightServices | None = None
@@ -219,6 +230,54 @@ async def build_worker_application(
             )
             computation_endpoint = config.transport.rpc_advertise
             transport_type = "shm"
+        elif isinstance(config.transport, NcclTransportConfig):
+            transport_runtime = NcclRuntime(
+                NcclRuntimeConfig(
+                    rank=config.transport.rank,
+                    world_size=config.transport.world_size,
+                    rendezvous_endpoint=config.transport.rendezvous_endpoint,
+                    group_name=config.transport.group_name,
+                    device=device,
+                )
+            )
+            receiver = NcclWorkerBatchReceiver(
+                config.transport.control_listen,
+                endpoint_config,
+                runtime=transport_runtime,
+                owns_runtime=True,
+                **receiver_options,
+            )
+            computation_endpoint = config.transport.control_advertise
+            transport_type = "nccl"
+        elif isinstance(config.transport, TransferEngineTransportConfig):
+            from expertkit_transport.transports.transfer_engine import (
+                TransferEngineRuntime,
+                TransferEngineRuntimeConfig,
+                TransferEngineWorkerBatchReceiver,
+            )
+
+            transport_runtime = TransferEngineRuntime(
+                TransferEngineRuntimeConfig(
+                    segment_name=config.transport.segment_advertise,
+                    metadata_server=config.transport.metadata_server,
+                    protocol=config.transport.protocol,
+                    device=device,
+                    device_name=config.transport.device_name,
+                    max_workers=config.transport.max_workers,
+                    transport_hint=config.transport.transport_hint,
+                )
+            )
+            receiver = TransferEngineWorkerBatchReceiver(
+                config.transport.control_listen,
+                endpoint_config,
+                runtime=transport_runtime,
+                worker_start_id=worker_start_id,
+                session_close_grace_secs=config.worker.shutdown_grace_secs,
+                owns_runtime=True,
+                **receiver_options,
+            )
+            computation_endpoint = config.transport.control_advertise
+            transport_type = "transfer_engine"
         else:
             raise AssertionError("validated Worker configuration selected no Transport")
 
@@ -253,9 +312,10 @@ async def build_worker_application(
             metrics=metrics,
             tracer=observability.tracer,
         )
+        transport_fixed_device_bytes = receiver.fixed_device_bytes
         resource_plan = plan_device_resources(
             device_memory_limit_bytes=int(config.worker.device_memory_limit),
-            fixed_slot_bytes=execution.fixed_device_bytes,
+            fixed_slot_bytes=(execution.fixed_device_bytes + transport_fixed_device_bytes),
             backend_estimate=backend.estimate_resources(config.worker.max_batch_tokens),
             active_batches=config.worker.max_active_batches_per_device,
             conversion_temporary_bytes=adapter.conversion_temporary_bytes(),
@@ -306,6 +366,7 @@ async def build_worker_application(
             reporter=reporter,
             computation_endpoint=computation_endpoint,
             transport_type=transport_type,
+            start_id=worker_start_id,
         )
         logger.info(
             "worker_resource_plan",
@@ -318,6 +379,7 @@ async def build_worker_application(
             runtime_reserve_bytes=resource_plan.runtime_reserve_bytes,
             weight_capacity_bytes=resource_plan.weight_capacity_bytes,
             max_experts=manager.max_experts,
+            transport_fixed_device_bytes=transport_fixed_device_bytes,
             fixed_host_staging_bytes=execution.fixed_host_staging_bytes,
         )
         return WorkerApplication(
@@ -334,6 +396,8 @@ async def build_worker_application(
             await execution.close()
         elif receiver is not None:
             await receiver.close()
+        elif transport_runtime is not None:
+            await transport_runtime.close()
         if weight_services is not None:
             await weight_services.close()
         elif disk_cache is not None:

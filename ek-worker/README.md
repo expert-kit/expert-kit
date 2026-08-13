@@ -1,9 +1,10 @@
 # Expert Kit Python Worker
 
 `expertkit-worker` runs routed expert FFNs for one model instance on one compute
-device. It receives bounded layer batches through gRPC or the experimental
-same-host shared-memory data path, executes only experts that the Controller has
-made ready, and returns one weighted partial output per batch.
+device. It receives bounded layer batches through gRPC, the experimental
+same-host shared-memory path, a static CUDA NCCL world, or Mooncake Transfer
+Engine, executes only experts that the Controller has made ready, and returns
+one weighted partial output per batch.
 
 ## Install
 
@@ -15,6 +16,11 @@ uv sync --locked
 
 This creates the repository root `.venv` and installs Proto, Transport, Worker,
 and the Torch integration. Run all commands below from the repository root.
+
+Transfer Engine deployments must additionally install the EK safety-patched
+`mooncake-transfer-engine` Linux wheel. It is intentionally not resolved from
+the public package index; the Transport runtime verifies its EK capability
+flags before registering any Tensor memory.
 
 The optional CPU-only GGML environment is installed with:
 
@@ -93,6 +99,57 @@ processes. Their listen counterparts select local bind addresses. In SHM mode,
 the RPC endpoint handles only session setup and small notifications; Tensor
 payloads use `/dev/shm`. The Frontend and Worker must see the same shared-memory
 namespace and run as the same Unix user.
+
+For an NCCL Worker, configure a unique rank in the process group:
+
+```yaml
+transport:
+  type: nccl
+  max_pending_batches_per_device: 1
+  control_listen: 0.0.0.0:51051
+  control_advertise: worker-h200-0:51051
+  rank: 1
+  world_size: 2
+  rendezvous_endpoint: frontend-h200:29500
+  group_name: qwen3-production
+```
+
+The static world includes the Frontend and every NCCL Worker. Give every
+process one unique rank and one indexed CUDA device; for a single Frontend plus
+one Worker, the usual ranks are `0` and `1`. All participants must use the same
+`world_size`, rendezvous endpoint, and group name. The rank-zero process hosts
+the PyTorch TCP rendezvous at `rendezvous_endpoint`. The Frontend creates one
+`NcclRuntime` with its own rank and passes it as the `transport_runtime` of its
+`RoutedMoEClient` or `BlockingRoutedMoEClient`; that client owns and closes the
+runtime. Each process must use a distinct rendezvous port for a distinct group.
+
+For a same-host Transfer Engine Worker using P2P handshake and intra-node
+NVLink, use a distinct Mooncake endpoint for the Worker process:
+
+```yaml
+transport:
+  type: transfer_engine
+  max_pending_batches_per_device: 1
+  control_listen: 0.0.0.0:52051
+  control_advertise: 127.0.0.1:52051
+  segment_advertise: 127.0.0.1:12011
+  metadata_server: P2PHANDSHAKE
+  protocol: nvlink_intra
+  device_name: ""
+  max_workers: 2
+  transport_hint: ""
+```
+
+The Frontend must create one process-shared `TransferEngineRuntime` with a
+different `segment_name`, such as `127.0.0.1:12012`, select the same
+`nvlink_intra` backend, and pass it to its routed client. One runtime is one data
+backend; this MVP does not mix intra-node NVLink and cross-host RDMA peers. The
+Worker registers the same generated `start_id` with both the Controller and its
+private session service. The private protocol also binds a Worker-issued nonce
+to a Frontend runtime generation, so stale epochs and endpoint reuse cannot
+silently reach old arena addresses. A Frontend crash without a successful
+`CloseSession` requires the corresponding Worker to restart before that
+Frontend endpoint is reused.
 
 The Weight Manager looks for a requested assigned expert in this order:
 
@@ -190,8 +247,18 @@ Worker spans; it is not part of the computation payload or any Tensor.
 
 The gRPC path serializes Tensor bytes through Host memory. The SHM path avoids
 protobuf Tensor payloads and loopback Tensor copies, but CUDA inputs and outputs
-still pass through pinned Host memory. Neither path is GPU Direct. RDMA, NCCL,
-NVSHMEM, Arrow Flight, and Mooncake are not implemented by this Worker.
+still pass through pinned Host memory. The NCCL path keeps admission, metadata,
+completion, and structured errors on a private gRPC control plane; only the
+three input Tensors and one output Tensor use NCCL point-to-point operations.
+NCCL membership is static, and communicator failure or rank replacement
+currently requires recreating the complete group. Transfer Engine uses a
+registered GPU arena and one-sided READ/WRITE operations; it accepts dynamic
+Worker generations without creating a global communicator. The current safe
+lifecycle is same-host `nvlink_intra`: graceful retire drains and invalidates
+cached IPC mappings, while a Frontend crash requires a Worker restart before
+the same advertised endpoint can represent a new runtime generation. The first
+version still performs one local device copy at each endpoint. NVSHMEM and
+Arrow Flight are not implemented by this Worker.
 
 There is no TLS, mTLS, authentication, or authorization. Run all Controller,
 Worker, Weight Manager, Weight Server, metrics, and tracing endpoints only on a

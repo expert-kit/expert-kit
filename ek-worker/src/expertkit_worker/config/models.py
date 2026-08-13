@@ -126,6 +126,19 @@ def _validate_network_address(value: str) -> str:
 NetworkAddress = Annotated[str, AfterValidator(_validate_network_address)]
 
 
+def _validate_host_address(value: str) -> str:
+    if "://" in value:
+        raise ValueError("host address must not include a URL scheme")
+    if not value or any(character.isspace() for character in value):
+        raise ValueError("host address must be non-empty and contain no whitespace")
+    if "/" in value:
+        raise ValueError("host address must not contain a path")
+    return value
+
+
+HostAddress = Annotated[str, AfterValidator(_validate_host_address)]
+
+
 def _validate_absolute_path(value: Path) -> Path:
     if not value.is_absolute():
         raise ValueError("path must be absolute")
@@ -237,8 +250,48 @@ class ShmTransportConfig(_StrictModel):
     shared_memory_dir: Literal["/dev/shm"] = "/dev/shm"
 
 
+class NcclTransportConfig(_StrictModel):
+    """Static NCCL process-group and control-plane settings."""
+
+    type: Literal["nccl"]
+    max_pending_batches_per_device: int = Field(gt=0)
+    control_listen: NetworkAddress
+    control_advertise: NetworkAddress
+    rank: int = Field(ge=0)
+    world_size: int = Field(gt=1)
+    rendezvous_endpoint: NetworkAddress
+    group_name: str = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def validate_process_group(self) -> NcclTransportConfig:
+        """Require this Worker rank to belong to the configured static group."""
+
+        if self.rank >= self.world_size:
+            raise ValueError("transport.rank must be less than transport.world_size")
+        return self
+
+
+class TransferEngineTransportConfig(_StrictModel):
+    """Mooncake Transfer Engine data path and EK control endpoint settings."""
+
+    type: Literal["transfer_engine"]
+    max_pending_batches_per_device: int = Field(gt=0)
+    control_listen: NetworkAddress
+    control_advertise: NetworkAddress
+    # For P2PHANDSHAKE this must be a peer-reachable host or host:port endpoint.
+    segment_advertise: HostAddress
+    metadata_server: str = Field(default="P2PHANDSHAKE", min_length=1)
+    # The first production lifecycle supports drained, generation-safe
+    # intra-node NVLink only. Other Mooncake data paths remain lower-level
+    # experiments until their remote handle caches can be invalidated safely.
+    protocol: Literal["nvlink_intra"] = "nvlink_intra"
+    device_name: str = ""
+    max_workers: int = Field(default=2, gt=0)
+    transport_hint: Literal[""] = ""
+
+
 TransportConfig = Annotated[
-    GrpcTransportConfig | ShmTransportConfig,
+    GrpcTransportConfig | ShmTransportConfig | NcclTransportConfig | TransferEngineTransportConfig,
     Field(discriminator="type"),
 ]
 
@@ -401,4 +454,21 @@ class WorkerConfig(_StrictModel):
                 raise ValueError(
                     "the fused backend supports only FP16 or BF16 activations and weights"
                 )
+        if isinstance(self.transport, NcclTransportConfig) and not self.worker.device.startswith(
+            "cuda:"
+        ):
+            raise ValueError("the NCCL transport requires a CUDA Worker device")
+        if (
+            isinstance(self.transport, TransferEngineTransportConfig)
+            and self.transport.protocol in {"nvlink", "nvlink_intra"}
+            and not self.worker.device.startswith("cuda:")
+        ):
+            raise ValueError("the Transfer Engine NVLink transports require a CUDA Worker device")
+        if (
+            isinstance(self.transport, TransferEngineTransportConfig)
+            and self.worker.max_active_batches_per_device
+            + self.transport.max_pending_batches_per_device
+            > 4096
+        ):
+            raise ValueError("Transfer Engine active and pending batch capacity cannot exceed 4096")
         return self

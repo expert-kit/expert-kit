@@ -22,6 +22,18 @@ class FailedWorkerBatch:
     error: TransportError
 
 
+def _to_fp32(tensor: torch.Tensor) -> torch.Tensor:
+    return tensor.to(torch.float32)
+
+
+def _index_add(
+    accumulator: torch.Tensor,
+    token_indices: torch.Tensor,
+    partial: torch.Tensor,
+) -> None:
+    accumulator.index_add_(0, token_indices, partial)
+
+
 def _validate_accumulator(
     plan: WorkerBatchPlan, pool: OutputPool, accumulator: torch.Tensor
 ) -> None:
@@ -63,8 +75,22 @@ async def _dispatch_plan(
                     dtype=torch.int64,
                     device=accumulator.device,
                 )
-            accumulator.index_add_(0, token_indices, partial.to(torch.float32))
-            lease.mark_consumed()
+            # Mark the lease before the first CUDA operation that can read
+            # ``partial``. A synchronous PyTorch exception does not prove that
+            # no preceding kernel was enqueued on the current stream.
+            lease.mark_consumed(
+                ownership_graph=(
+                    accumulator,
+                    partial,
+                    token_indices,
+                    plan,
+                    plan.batch,
+                    plan.target.transport,
+                )
+            )
+            partial_fp32 = _to_fp32(partial)
+            lease.retain_consumption_owners(partial_fp32)
+            _index_add(accumulator, token_indices, partial_fp32)
     except TransportError as error:
         return FailedWorkerBatch(plan=plan, error=error)
     return None

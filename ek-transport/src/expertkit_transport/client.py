@@ -7,7 +7,7 @@ import concurrent.futures
 import math
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 
 import torch
 
@@ -17,8 +17,28 @@ from expertkit_transport.controller.instance import resolve_default_instance
 from expertkit_transport.controller.topology import ControllerTopologyWatcher
 from expertkit_transport.errors import TransportError, TransportErrorCode
 from expertkit_transport.routing import RoundRobinSelector, execute_routed_layer
+from expertkit_transport.transports.base import (
+    WorkerTransportRuntime,
+    WorkerTransportRuntimeRegistry,
+)
 
 _RESULT_GRACE_SECONDS = 0.1
+_QUARANTINED_BLOCKING_GRAPHS: list[tuple[object, ...]] = []
+
+
+def _blocking_ownership_error(
+    diagnostic: str,
+    *owners: object,
+) -> TransportError:
+    _QUARANTINED_BLOCKING_GRAPHS.append(tuple(owners))
+    return TransportError(
+        TransportErrorCode.UNAVAILABLE,
+        retryable=False,
+        unsafe_tensor_ownership=True,
+        diagnostic=(
+            f"{diagnostic}; caller-owned accelerator storage is retained and the process must restart"
+        ),
+    )
 
 
 def _validate_timeout(timeout_seconds: float) -> None:
@@ -40,6 +60,8 @@ class RoutedMoEClient:
         top_k: int,
         dtype: torch.dtype,
         device: torch.device | str,
+        transport_runtime: WorkerTransportRuntime | None = None,
+        transport_runtimes: Mapping[int, WorkerTransportRuntime] | None = None,
         same_worker_retry_delay_seconds: float = 0.001,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
@@ -66,6 +88,8 @@ class RoutedMoEClient:
             isinstance(instance_id, bool) or not isinstance(instance_id, int) or instance_id <= 0
         ):
             raise ValueError("instance_id must be a positive integer or None")
+        if transport_runtime is not None and transport_runtimes is not None:
+            raise ValueError("transport_runtime and transport_runtimes are mutually exclusive")
         self._controller_endpoint = controller_endpoint
         self._requested_instance_id = instance_id
         self._instance_id: int | None = None
@@ -75,6 +99,10 @@ class RoutedMoEClient:
         self._top_k = top_k
         self._dtype = dtype
         self._device = torch.device(device)
+        self._runtime_registry = WorkerTransportRuntimeRegistry(
+            transport_runtimes,
+            default_runtime=transport_runtime,
+        )
         self._same_worker_retry_delay_seconds = same_worker_retry_delay_seconds
         self._clock = clock
         self._topology: ControllerTopologyWatcher | None = None
@@ -111,6 +139,7 @@ class RoutedMoEClient:
             dtype=self._dtype,
             device=self._device,
             clock=self._clock,
+            runtime_registry=self._runtime_registry,
         )
         try:
             await topology.start(monotonic_deadline=monotonic_deadline)
@@ -181,8 +210,11 @@ class RoutedMoEClient:
         if self._closed:
             return
         self._closed = True
-        if self._topology is not None:
-            await self._topology.close()
+        try:
+            if self._topology is not None:
+                await self._topology.close()
+        finally:
+            await self._runtime_registry.close()
 
 
 class BlockingRoutedMoEClient:
@@ -206,6 +238,8 @@ class BlockingRoutedMoEClient:
         top_k: int,
         dtype: torch.dtype,
         device: torch.device | str,
+        transport_runtime: WorkerTransportRuntime | None = None,
+        transport_runtimes: Mapping[int, WorkerTransportRuntime] | None = None,
         same_worker_retry_delay_seconds: float = 0.001,
     ) -> None:
         self._client_args = (controller_endpoint,)
@@ -217,6 +251,8 @@ class BlockingRoutedMoEClient:
             "top_k": top_k,
             "dtype": dtype,
             "device": device,
+            "transport_runtime": transport_runtime,
+            "transport_runtimes": transport_runtimes,
             "same_worker_retry_delay_seconds": same_worker_retry_delay_seconds,
         }
         self._accelerator = accelerator_for(device)
@@ -226,6 +262,7 @@ class BlockingRoutedMoEClient:
         self._thread_ready = threading.Event()
         self._lock = threading.Lock()
         self._active: set[threading.Event] = set()
+        self._poisoned_error: TransportError | None = None
         self._started = False
         self._closing = False
         self._closed = False
@@ -244,6 +281,8 @@ class BlockingRoutedMoEClient:
 
         _validate_timeout(timeout_seconds)
         with self._lock:
+            if self._poisoned_error is not None:
+                raise self._poisoned_error
             if self._closing:
                 raise RuntimeError("Routed-MoE client is closing")
             if self._started:
@@ -273,15 +312,38 @@ class BlockingRoutedMoEClient:
         _validate_timeout(timeout_seconds)
         completion = threading.Event()
         with self._lock:
+            if self._poisoned_error is not None:
+                raise self._poisoned_error
             if not self._started or self._closing:
                 raise RuntimeError("Routed-MoE client is not running")
             self._active.add(completion)
         loop, client = self._require_loop()
         deadline = time.monotonic() + timeout_seconds
+        task_started = threading.Event()
+        task_holder: list[asyncio.Task[object]] = []
         input_ready: torch.Event | None = None
         if self._accelerator is not None:
-            input_ready = self._accelerator.create_event()
-            input_ready.record(self._accelerator.current_stream())
+            caller_stream: object | None = None
+            try:
+                caller_stream = self._accelerator.current_stream()
+                input_ready = self._accelerator.create_event()
+                input_ready.record(caller_stream)
+            except BaseException as error:
+                completion.set()
+                with self._lock:
+                    self._active.discard(completion)
+                fatal = _blocking_ownership_error(
+                    "accelerator input-ready fence creation could not be proven",
+                    self,
+                    self._client,
+                    hidden_states,
+                    expert_ids,
+                    routing_weights,
+                    input_ready,
+                    caller_stream,
+                )
+                self._poison(fatal)
+                raise fatal from error
         future = asyncio.run_coroutine_threadsafe(
             self._execute(
                 client,
@@ -294,14 +356,35 @@ class BlockingRoutedMoEClient:
                 input_ready=input_ready,
                 accelerator=self._accelerator,
                 completion=completion,
+                owner=self,
+                task_started=task_started,
+                task_holder=task_holder,
             ),
             loop,
         )
         try:
             result, output_ready = future.result(timeout=timeout_seconds + _RESULT_GRACE_SECONDS)
+        except TransportError as error:
+            if error.unsafe_tensor_ownership:
+                self._poison(error)
+            raise
         except concurrent.futures.TimeoutError as error:
-            future.cancel()
+            # The async call owns caller CUDA storage until it reaches a proven
+            # terminal state. Cancel the loop Task to start transport cleanup,
+            # but keep the cross-thread Future live so a deferred ownership
+            # fatal can still take priority over the Host deadline.
+            task_started.wait()
+            task = task_holder[0]
+            loop.call_soon_threadsafe(task.cancel)
             completion.wait()
+            try:
+                future.result()
+            except TransportError as late_error:
+                if late_error.unsafe_tensor_ownership:
+                    self._poison(late_error)
+                    raise late_error from error
+            except BaseException:
+                pass
             raise TransportError(
                 TransportErrorCode.DEADLINE_EXCEEDED,
                 retryable=False,
@@ -312,7 +395,25 @@ class BlockingRoutedMoEClient:
                 self._active.discard(completion)
         if output_ready is not None:
             assert self._accelerator is not None
-            self._accelerator.current_stream().wait_event(output_ready)
+            caller_stream = None
+            try:
+                caller_stream = self._accelerator.current_stream()
+                caller_stream.wait_event(output_ready)
+                result.record_stream(caller_stream)
+            except BaseException as error:
+                fatal = _blocking_ownership_error(
+                    "accelerator caller-stream output fence could not be proven",
+                    self,
+                    self._client,
+                    result,
+                    hidden_states,
+                    expert_ids,
+                    routing_weights,
+                    output_ready,
+                    caller_stream,
+                )
+                self._poison(fatal)
+                raise fatal from error
         return result
 
     def close(self) -> None:
@@ -372,7 +473,15 @@ class BlockingRoutedMoEClient:
         input_ready: torch.Event | None,
         accelerator: TorchAccelerator | None,
         completion: threading.Event,
+        owner: BlockingRoutedMoEClient,
+        task_started: threading.Event,
+        task_holder: list[asyncio.Task[object]],
     ) -> tuple[torch.Tensor, torch.Event | None]:
+        task = asyncio.current_task()
+        if task is None:
+            raise RuntimeError("Blocking Transport coroutine is not running in an asyncio Task")
+        task_holder.append(task)
+        task_started.set()
         try:
             if input_ready is not None:
                 assert accelerator is not None
@@ -387,8 +496,36 @@ class BlockingRoutedMoEClient:
             )
             output_ready: torch.Event | None = None
             if accelerator is not None:
-                output_ready = accelerator.create_event()
-                output_ready.record(accelerator.current_stream())
+                output_stream: object | None = None
+                try:
+                    output_stream = accelerator.current_stream()
+                    output_ready = accelerator.create_event()
+                    output_ready.record(output_stream)
+                except BaseException as error:
+                    fatal = _blocking_ownership_error(
+                        "accelerator output-ready fence creation could not be proven",
+                        client,
+                        result,
+                        hidden_states,
+                        expert_ids,
+                        routing_weights,
+                        input_ready,
+                        output_ready,
+                        output_stream,
+                    )
+                    owner._poison(fatal)
+                    raise fatal from error
             return result, output_ready
+        except TransportError as error:
+            if error.unsafe_tensor_ownership:
+                owner._poison(error)
+            raise
         finally:
             completion.set()
+
+    def _poison(self, error: TransportError) -> None:
+        if not error.unsafe_tensor_ownership or error.retryable:
+            raise ValueError("Blocking client poison requires a nonretryable ownership fatal")
+        with self._lock:
+            if self._poisoned_error is None:
+                self._poisoned_error = error

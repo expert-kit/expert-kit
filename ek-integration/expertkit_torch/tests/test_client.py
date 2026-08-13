@@ -1,9 +1,11 @@
 """Tests for the Torch model-facing Routed-MoE client."""
 
+from collections.abc import Mapping
 from typing import ClassVar
 
 import pytest
 import torch
+from expertkit_transport import WorkerTransportRuntime
 
 from expertkit_torch import client
 from expertkit_torch.client import RoutedMoEClient
@@ -31,7 +33,19 @@ class FakeTransport:
         self.closed = True
 
 
-def routed_client() -> RoutedMoEClient:
+class FakeRuntime:
+    async def start(self) -> None:
+        pass
+
+    async def close(self) -> None:
+        pass
+
+
+def routed_client(
+    *,
+    transport_runtime: WorkerTransportRuntime | None = None,
+    transport_runtimes: Mapping[int, WorkerTransportRuntime] | None = None,
+) -> RoutedMoEClient:
     return RoutedMoEClient(
         "127.0.0.1:50050",
         instance_id=7,
@@ -40,6 +54,8 @@ def routed_client() -> RoutedMoEClient:
         hidden_dim=3,
         top_k=2,
         timeout_seconds=2,
+        transport_runtime=transport_runtime,
+        transport_runtimes=transport_runtimes,
     )
 
 
@@ -70,6 +86,34 @@ def test_forwards_final_assignments_once_with_wire_dtypes(monkeypatch) -> None:
     assert transport.calls[0]["distinct_expert_ids"] == (1, 3)
     routed.close()
     assert transport.closed is True
+
+
+def test_passes_process_shared_runtime_to_owned_blocking_client(monkeypatch) -> None:
+    FakeTransport.instances.clear()
+    monkeypatch.setattr(client, "BlockingRoutedMoEClient", FakeTransport)
+    runtime = FakeRuntime()
+    routed = routed_client(transport_runtime=runtime)
+
+    routed.start(device="cpu", dtype=torch.float32)
+
+    transport = FakeTransport.instances[0]
+    assert transport.configuration["transport_runtime"] is runtime
+    routed.close()
+    assert transport.closed is True
+
+
+def test_passes_runtime_mapping_to_owned_blocking_client(monkeypatch) -> None:
+    FakeTransport.instances.clear()
+    monkeypatch.setattr(client, "BlockingRoutedMoEClient", FakeTransport)
+    runtimes = {4: FakeRuntime()}
+    routed = routed_client(transport_runtimes=runtimes)
+
+    routed.start(device="cpu", dtype=torch.float32)
+
+    transport = FakeTransport.instances[0]
+    assert transport.configuration["transport_runtime"] is None
+    assert transport.configuration["transport_runtimes"] is runtimes
+    routed.close()
 
 
 def test_reuses_one_transport_and_rejects_a_dtype_change(monkeypatch) -> None:

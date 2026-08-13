@@ -11,7 +11,8 @@ use crate::{
         runtime_state::ControllerRuntimeState, service::instance::DefaultInstanceResolver,
     },
     proto::ek::control::v2::{
-        TopologyMessage, WatchTopologyRequest, topology_service_server::TopologyService,
+        TopologyMessage, WatchTopologyRequest, topology_message,
+        topology_service_server::TopologyService,
     },
 };
 
@@ -77,12 +78,31 @@ impl TopologyService for TopologyServiceImpl {
                             return;
                         }
                     };
+                    let delivered_version = match messages.last() {
+                        None => installed_version,
+                        Some(message) => match message.message.as_ref() {
+                            Some(topology_message::Message::Snapshot(snapshot)) => {
+                                snapshot.topology_version
+                            }
+                            Some(topology_message::Message::Update(update)) => {
+                                update.topology_version
+                            }
+                            None => {
+                                let _ = sender
+                                    .send(Err(Status::internal(
+                                        "Controller produced an empty topology message",
+                                    )))
+                                    .await;
+                                return;
+                            }
+                        },
+                    };
                     for message in messages {
                         if sender.send(Ok(message)).await.is_err() {
                             return;
                         }
                     }
-                    installed_version = newest;
+                    installed_version = delivered_version;
                     sent_initial = true;
                     continue;
                 }

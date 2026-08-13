@@ -225,3 +225,15 @@ def test_registration_and_identity_validation_rejects_invalid_values() -> None:
     with pytest.raises(ValueError, match="transport_type"):
         replace(_registration(), transport_type="rdma")
     assert new_start_id() != new_start_id()
+
+
+def test_nccl_registration_publishes_nccl_transport_type() -> None:
+    request = replace(_registration(), transport_type="nccl").to_protobuf()
+
+    assert request.transport_type == lifecycle_pb2.WORKER_TRANSPORT_NCCL
+
+
+def test_transfer_engine_registration_publishes_transfer_engine_type() -> None:
+    request = replace(_registration(), transport_type="transfer_engine").to_protobuf()
+
+    assert request.transport_type == lifecycle_pb2.WORKER_TRANSPORT_TRANSFER_ENGINE

@@ -37,6 +37,7 @@ observability = [
 npu = [
   "torch-npu==2.11.0rc1",
 ]
+transfer-engine = ["expertkit-transport[transfer-engine]==0.1.0"]
 
 [tool.uv.sources]
 expertkit-proto = { workspace = true }

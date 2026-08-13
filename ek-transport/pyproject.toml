@@ -15,6 +15,12 @@ dependencies = [
     "torch>=2.10,<2.12",
 ]
 
+[project.optional-dependencies]
+# The required EK safety-patched Linux wheel is installed explicitly because it
+# is not published to the public package index. Runtime capability gates reject
+# stock Mooncake wheels before any memory is registered.
+transfer-engine = []
+
 [tool.uv.sources]
 expertkit-proto = { workspace = true }
 

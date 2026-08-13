@@ -5,7 +5,12 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from expertkit_worker.config import ShmTransportConfig, WorkerConfig
+from expertkit_worker.config import (
+    NcclTransportConfig,
+    ShmTransportConfig,
+    TransferEngineTransportConfig,
+    WorkerConfig,
+)
 
 
 def _config(cache_path: Path, *, backend: str, device: str) -> dict[str, object]:
@@ -160,6 +165,76 @@ def test_shm_transport_uses_only_notification_rpc_fields(tmp_path: Path) -> None
     assert config.transport.shared_memory_dir == "/dev/shm"
 
 
+def test_nccl_transport_validates_static_process_group(tmp_path: Path) -> None:
+    raw = _config(tmp_path, backend="torch", device="cuda:0")
+    raw["transport"] = {
+        "type": "nccl",
+        "control_listen": "127.0.0.1:50051",
+        "control_advertise": "worker:50051",
+        "rank": 1,
+        "world_size": 2,
+        "rendezvous_endpoint": "controller:29500",
+        "group_name": "expert-kit",
+    }
+
+    config = WorkerConfig.model_validate(raw)
+
+    assert isinstance(config.transport, NcclTransportConfig)
+    assert config.transport.max_pending_batches_per_device == 1
+    assert config.transport.rank == 1
+    assert config.transport.world_size == 2
+
+    raw["transport"]["rank"] = 2  # type: ignore[index]
+    with pytest.raises(ValidationError, match="rank must be less than"):
+        WorkerConfig.model_validate(raw)
+
+
+def test_transfer_engine_transport_validates_control_and_segment_settings(
+    tmp_path: Path,
+) -> None:
+    raw = _config(tmp_path, backend="torch", device="cuda:0")
+    raw["transport"] = {
+        "type": "transfer_engine",
+        "control_listen": "127.0.0.1:50051",
+        "control_advertise": "worker:50051",
+        "segment_advertise": "192.0.2.32",
+        "metadata_server": "P2PHANDSHAKE",
+        "protocol": "nvlink_intra",
+        "device_name": "auto-discovery",
+    }
+
+    config = WorkerConfig.model_validate(raw)
+
+    assert isinstance(config.transport, TransferEngineTransportConfig)
+    assert config.transport.max_pending_batches_per_device == 1
+    assert config.transport.segment_advertise == "192.0.2.32"
+    assert config.transport.protocol == "nvlink_intra"
+    assert config.transport.max_workers == 2
+
+
+def test_transfer_engine_nvlink_requires_cuda(tmp_path: Path) -> None:
+    raw = _config(tmp_path, backend="ggml", device="cpu")
+    worker = raw["worker"]
+    assert isinstance(worker, dict)
+    worker["ggml"] = {"cpu_threads": 1}
+    raw["transport"] = {
+        "type": "transfer_engine",
+        "max_pending_batches_per_device": 1,
+        "control_listen": "127.0.0.1:50051",
+        "control_advertise": "worker:50051",
+        "segment_advertise": "127.0.0.1:12011",
+        "protocol": "nvlink_intra",
+    }
+
+    with pytest.raises(ValidationError, match="NVLink transports require a CUDA"):
+        WorkerConfig.model_validate(raw)
+
+    raw["transport"]["segment_advertise"] = "http://192.0.2.32"  # type: ignore[index]
+    raw["transport"]["protocol"] = "tcp"  # type: ignore[index]
+    with pytest.raises(ValidationError, match="URL scheme"):
+        WorkerConfig.model_validate(raw)
+
+
 @pytest.mark.parametrize(
     "transport",
     [
@@ -174,6 +249,23 @@ def test_shm_transport_uses_only_notification_rpc_fields(tmp_path: Path) -> None
             "type": "shm",
             "rpc_listen": "127.0.0.1:50051",
             "rpc_advertise": "worker:50051",
+            "listen": "127.0.0.1:50052",
+        },
+        {
+            "type": "nccl",
+            "control_listen": "127.0.0.1:50051",
+            "control_advertise": "worker:50051",
+            "rank": 1,
+            "world_size": 2,
+            "rendezvous_endpoint": "controller:29500",
+            "group_name": "expert-kit",
+            "listen": "127.0.0.1:50052",
+        },
+        {
+            "type": "transfer_engine",
+            "control_listen": "127.0.0.1:50051",
+            "control_advertise": "worker:50051",
+            "segment_advertise": "192.0.2.32",
             "listen": "127.0.0.1:50052",
         },
     ],

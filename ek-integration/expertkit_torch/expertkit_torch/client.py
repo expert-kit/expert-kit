@@ -4,9 +4,14 @@ from __future__ import annotations
 
 import math
 import threading
+from collections.abc import Mapping
 
 import torch
-from expertkit_transport import BlockingRoutedMoEClient, validate_and_convert_routing
+from expertkit_transport import (
+    BlockingRoutedMoEClient,
+    WorkerTransportRuntime,
+    validate_and_convert_routing,
+)
 
 
 class RoutedMoEClient:
@@ -27,6 +32,8 @@ class RoutedMoEClient:
         hidden_dim: int,
         top_k: int,
         timeout_seconds: float = 6.0,
+        transport_runtime: WorkerTransportRuntime | None = None,
+        transport_runtimes: Mapping[int, WorkerTransportRuntime] | None = None,
     ) -> None:
         if not controller_endpoint:
             raise ValueError("controller_endpoint must not be empty")
@@ -46,6 +53,8 @@ class RoutedMoEClient:
             raise ValueError("top_k must not exceed experts_per_layer")
         if not math.isfinite(timeout_seconds) or timeout_seconds <= 0:
             raise ValueError("timeout_seconds must be finite and positive")
+        if transport_runtime is not None and transport_runtimes is not None:
+            raise ValueError("transport_runtime and transport_runtimes are mutually exclusive")
 
         self._controller_endpoint = controller_endpoint
         self._instance_id = instance_id
@@ -54,6 +63,8 @@ class RoutedMoEClient:
         self._hidden_dim = hidden_dim
         self._top_k = top_k
         self._timeout_seconds = timeout_seconds
+        self._transport_runtime = transport_runtime
+        self._transport_runtimes = transport_runtimes
         self._transport: BlockingRoutedMoEClient | None = None
         self._device: torch.device | None = None
         self._dtype: torch.dtype | None = None
@@ -82,6 +93,8 @@ class RoutedMoEClient:
                 top_k=self._top_k,
                 dtype=dtype,
                 device=resolved_device,
+                transport_runtime=self._transport_runtime,
+                transport_runtimes=self._transport_runtimes,
             )
             try:
                 transport.start(timeout_seconds=self._timeout_seconds)

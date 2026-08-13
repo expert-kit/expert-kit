@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import math
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -11,6 +12,7 @@ from types import ModuleType
 from typing import Any, Literal
 
 import torch
+from expertkit_transport import WorkerTransportRuntime
 from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 
 from expertkit_torch.client import RoutedMoEClient
@@ -200,6 +202,9 @@ def _validate_loading_arguments(
     controller_endpoint: str,
     instance_id: int | None,
     dtype: ModelDType,
+    timeout_seconds: float,
+    transport_runtime: WorkerTransportRuntime | None,
+    transport_runtimes: Mapping[int, WorkerTransportRuntime] | None,
 ) -> str:
     resolved_path = str(model_path)
     if not resolved_path.strip():
@@ -208,6 +213,13 @@ def _validate_loading_arguments(
         raise ValueError("mode must be 'expertkit' or 'local'")
     if dtype not in _DTYPES:
         raise ValueError("dtype must be auto, float16, bfloat16, or float32")
+    if (
+        isinstance(timeout_seconds, bool)
+        or not isinstance(timeout_seconds, int | float)
+        or not math.isfinite(timeout_seconds)
+        or timeout_seconds <= 0
+    ):
+        raise ValueError("timeout_seconds must be finite and positive")
     if mode == "expertkit":
         if not controller_endpoint.strip():
             raise ValueError("controller_endpoint must not be empty")
@@ -215,6 +227,12 @@ def _validate_loading_arguments(
             isinstance(instance_id, bool) or not isinstance(instance_id, int) or instance_id <= 0
         ):
             raise ValueError("instance_id must be a positive integer or None")
+    if transport_runtime is not None and transport_runtimes is not None:
+        raise ValueError("transport_runtime and transport_runtimes are mutually exclusive")
+    if mode == "local" and (transport_runtime is not None or transport_runtimes is not None):
+        raise ValueError(
+            "transport_runtime and transport_runtimes are only valid in expertkit mode"
+        )
     return resolved_path
 
 
@@ -226,6 +244,9 @@ def load_model(
     instance_id: int | None = None,
     device: str | torch.device = "cuda:0",
     dtype: ModelDType = "auto",
+    timeout_seconds: float = 6.0,
+    transport_runtime: WorkerTransportRuntime | None = None,
+    transport_runtimes: Mapping[int, WorkerTransportRuntime] | None = None,
 ) -> LoadedModel:
     """Load one supported causal language model.
 
@@ -237,6 +258,14 @@ def load_model(
             Controller default is resolved during Transport startup.
         device: Single Frontend device that owns attention and routing.
         dtype: Checkpoint loading dtype or ``auto`` to use checkpoint metadata.
+        timeout_seconds: Per-layer Transport deadline. Increase this for the
+            first request when NCCL rendezvous is expected to initialize lazily.
+        transport_runtime: Optional process-shared communication runtime. The
+            created Transport client owns and closes it.
+        transport_runtimes: Optional mapping from protocol Transport type to
+            process-shared runtime. Use this when several runtime-backed
+            Transports coexist; it is mutually exclusive with
+            ``transport_runtime``.
 
     Returns:
         A context-manageable object owning the model, tokenizer, and Transport
@@ -254,6 +283,9 @@ def load_model(
         controller_endpoint=controller_endpoint,
         instance_id=instance_id,
         dtype=dtype,
+        timeout_seconds=timeout_seconds,
+        transport_runtime=transport_runtime,
+        transport_runtimes=transport_runtimes,
     )
     config = AutoConfig.from_pretrained(resolved_path)
     model_type = str(config.model_type)
@@ -275,6 +307,9 @@ def load_model(
                     experts_per_layer=spec.experts_per_layer(config),
                     hidden_dim=config.hidden_size,
                     top_k=config.num_experts_per_tok,
+                    timeout_seconds=timeout_seconds,
+                    transport_runtime=transport_runtime,
+                    transport_runtimes=transport_runtimes,
                 )
                 replacement = spec.create_class(client, layer_ids)
                 with (

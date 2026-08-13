@@ -315,6 +315,94 @@ def test_nonretryable_failure_does_not_refresh_topology() -> None:
     run(scenario())
 
 
+@pytest.mark.parametrize("unsafe_first", [True, False])
+def test_unsafe_failure_precedes_sibling_ordinary_nonretryable(
+    unsafe_first: bool,
+) -> None:
+    async def scenario() -> None:
+        unsafe = TransportError(
+            TransportErrorCode.UNAVAILABLE,
+            retryable=False,
+            unsafe_tensor_ownership=True,
+            diagnostic="unsafe CUDA ownership",
+        )
+        ordinary = TransportError(
+            TransportErrorCode.INVALID_REQUEST,
+            retryable=False,
+            diagnostic="ordinary invalid request",
+        )
+        first_error, second_error = (unsafe, ordinary) if unsafe_first else (ordinary, unsafe)
+        first = target("worker-a", ScriptedTransport([first_error]))
+        second = target("worker-b", ScriptedTransport([second_error]))
+        snapshot = TopologySnapshot(
+            instance_id=7,
+            version=11,
+            routes={(2, 0): (first,), (2, 1): (second,)},
+        )
+        topology = FakeTopologyProvider(snapshot)
+        pools = pools_for((first, second))
+
+        with pytest.raises(TransportError) as caught:
+            await execute_routed_layer(
+                routed_batch(torch.tensor([[0, 1]], dtype=torch.int32)),
+                topology,
+                RoundRobinSelector(),
+                pools,
+                monotonic_deadline=float("inf"),
+            )
+
+        assert caught.value is unsafe
+        assert topology.refresh_calls == []
+        await close_pools(pools)
+
+    run(scenario())
+
+
+def test_retry_failure_prefers_unsafe_over_last_ordinary_error() -> None:
+    async def scenario() -> None:
+        first_busy = TransportError(TransportErrorCode.BUSY, retryable=True)
+        second_busy = TransportError(TransportErrorCode.BUSY, retryable=True)
+        unsafe = TransportError(
+            TransportErrorCode.UNAVAILABLE,
+            retryable=False,
+            unsafe_tensor_ownership=True,
+            diagnostic="unsafe retry CUDA ownership",
+        )
+        ordinary_last = TransportError(TransportErrorCode.BUSY, retryable=True)
+        initial_a = target("initial-a", ScriptedTransport([first_busy]))
+        initial_b = target("initial-b", ScriptedTransport([second_busy]))
+        replacement_a = target("replacement-a", ScriptedTransport([unsafe]))
+        replacement_b = target("replacement-b", ScriptedTransport([ordinary_last]))
+        initial = TopologySnapshot(
+            instance_id=7,
+            version=11,
+            routes={(2, 0): (initial_a,), (2, 1): (initial_b,)},
+        )
+        refreshed = TopologySnapshot(
+            instance_id=7,
+            version=12,
+            routes={(2, 0): (replacement_a,), (2, 1): (replacement_b,)},
+        )
+        topology = FakeTopologyProvider(initial, refreshed)
+        workers = (initial_a, initial_b, replacement_a, replacement_b)
+        pools = pools_for(workers)
+
+        with pytest.raises(TransportError) as caught:
+            await execute_routed_layer(
+                routed_batch(torch.tensor([[0, 1]], dtype=torch.int32)),
+                topology,
+                RoundRobinSelector(),
+                pools,
+                monotonic_deadline=float("inf"),
+            )
+
+        assert caught.value is unsafe
+        assert len(topology.refresh_calls) == 1
+        await close_pools(pools)
+
+    run(scenario())
+
+
 def test_same_process_retry_waits_once_when_no_replacement_exists() -> None:
     async def scenario() -> None:
         busy = TransportError(TransportErrorCode.BUSY, retryable=True)

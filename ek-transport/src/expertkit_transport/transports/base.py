@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 from abc import ABC, abstractmethod
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
+from typing import Protocol, runtime_checkable
 
 import torch
 
@@ -41,6 +43,85 @@ class WorkerTransport(ABC):
     @abstractmethod
     async def close(self) -> None:
         """Stop submissions and release connection resources."""
+
+
+@runtime_checkable
+class WorkerTransportRuntime(Protocol):
+    """Own process-level resources shared by concrete Worker connections."""
+
+    async def start(self) -> None:
+        """Start shared communication resources without blocking on peer work."""
+
+    async def close(self) -> None:
+        """Release shared resources after every Worker connection is closed."""
+
+
+class WorkerTransportRuntimeRegistry:
+    """Resolve and own process-level runtimes used by Worker connections.
+
+    Explicit entries support deployments that mix runtime-backed Transport
+    types.  ``default_runtime`` preserves the original single-runtime client
+    API for deployments that use at most one such Transport implementation.
+    Concrete connections start their selected runtime lazily; the registry
+    closes every distinct owned runtime exactly once.
+    """
+
+    def __init__(
+        self,
+        runtimes: Mapping[int, WorkerTransportRuntime] | None = None,
+        *,
+        default_runtime: WorkerTransportRuntime | None = None,
+    ) -> None:
+        resolved: dict[int, WorkerTransportRuntime] = {}
+        for transport_type, runtime in (runtimes or {}).items():
+            if (
+                isinstance(transport_type, bool)
+                or not isinstance(transport_type, int)
+                or transport_type <= 0
+            ):
+                raise ValueError("Transport runtime type must be a positive integer")
+            if not isinstance(runtime, WorkerTransportRuntime):
+                raise TypeError("Transport runtimes must implement start() and close()")
+            resolved[transport_type] = runtime
+        if default_runtime is not None and not isinstance(
+            default_runtime,
+            WorkerTransportRuntime,
+        ):
+            raise TypeError("default Transport runtime must implement start() and close()")
+        self._runtimes = resolved
+        self._default_runtime = default_runtime
+        self._close_task: asyncio.Task[None] | None = None
+
+    def runtime_for(self, transport_type: int) -> WorkerTransportRuntime | None:
+        """Return the explicitly registered runtime or the legacy default."""
+
+        if isinstance(transport_type, bool) or not isinstance(transport_type, int):
+            raise TypeError("transport_type must be an integer")
+        return self._runtimes.get(transport_type, self._default_runtime)
+
+    async def close(self) -> None:
+        """Close every distinct runtime once, even when one close fails."""
+
+        if self._close_task is None:
+            self._close_task = asyncio.create_task(
+                self._close_all(),
+                name="worker-transport-runtime-registry-close",
+            )
+        await asyncio.shield(self._close_task)
+
+    async def _close_all(self) -> None:
+        unique: dict[int, WorkerTransportRuntime] = {}
+        for runtime in (*self._runtimes.values(), self._default_runtime):
+            if runtime is not None:
+                unique.setdefault(id(runtime), runtime)
+        if unique:
+            results = await asyncio.gather(
+                *(runtime.close() for runtime in unique.values()),
+                return_exceptions=True,
+            )
+            for result in results:
+                if isinstance(result, BaseException):
+                    raise result
 
 
 class ReceiverClosed(RuntimeError):
@@ -179,9 +260,26 @@ class ReceivedBatch(ABC):
     async def reject(self, error: TransportError) -> None:
         """Finish the request with a structured computation rejection."""
 
+    async def reject_unsafe(self, error: TransportError) -> None:
+        """Reject work whose device access cannot be proven terminal.
+
+        Most Transports do not expose registered device storage, so their safe
+        fallback is the ordinary rejection path.  A Transport that can retain
+        remotely accessible storage must override this method and quarantine
+        that storage before acknowledging the failure.
+        """
+
+        await self.reject(error)
+
 
 class WorkerBatchReceiver(ABC):
     """Supply admitted batches and result communication to Worker execution."""
+
+    @property
+    def fixed_device_bytes(self) -> int:
+        """Return device memory retained outside the execution-slot buffers."""
+
+        return 0
 
     @abstractmethod
     async def start(self) -> None:

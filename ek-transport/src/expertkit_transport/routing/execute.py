@@ -110,6 +110,15 @@ def _required_topology_version(
     return max(required, default=None)
 
 
+def _unsafe_error(
+    failures: tuple[FailedWorkerBatch, ...],
+) -> TransportError | None:
+    return next(
+        (failure.error for failure in failures if failure.error.unsafe_tensor_ownership),
+        None,
+    )
+
+
 def _unavailable_before_required_version(
     failures: tuple[FailedWorkerBatch, ...],
     required_version: int,
@@ -212,6 +221,9 @@ async def execute_routed_layer(
         assert accumulator is not None
         return accumulator.to(batch.hidden_states.dtype)
 
+    unsafe = _unsafe_error(failures)
+    if unsafe is not None:
+        raise unsafe
     nonretryable = next(
         (failure.error for failure in failures if not failure.error.retryable),
         None,
@@ -261,5 +273,8 @@ async def execute_routed_layer(
         monotonic_deadline=monotonic_deadline,
     )
     if retry_failures:
+        unsafe = _unsafe_error(retry_failures)
+        if unsafe is not None:
+            raise unsafe
         raise retry_failures[-1].error
     return accumulator.to(batch.hidden_states.dtype)

@@ -22,6 +22,7 @@ from expertkit_transport.transports.base import (
 
 from expertkit_worker.backends import (
     BackendFatalError,
+    BackendFatalReason,
     BackendRequestError,
     BackendWeightUnavailable,
     ComputeBackend,
@@ -34,6 +35,22 @@ from expertkit_worker.observability.api import NoopWorkerMetrics, WorkerMetrics
 from .slot import ExecutionSlotFactory
 
 logger = structlog.get_logger(__name__)
+
+_QUARANTINED_EXECUTIONS: list[object] = []
+
+
+# A fatal can surface after CUDA input copies were enqueued but before the slot
+# records/synchronizes its terminal event.  The reason alone cannot prove those
+# copies stopped, including an allocator OOM raised later in the same scope.
+# Request-scoped BackendRequestError failures never enter this path.
+_UNSAFE_TRANSPORT_FATAL_REASONS = frozenset(
+    {
+        BackendFatalReason.DEVICE_OOM,
+        BackendFatalReason.DEVICE_FAILURE,
+        BackendFatalReason.ASYNC_EXECUTION,
+        BackendFatalReason.UNEXPECTED,
+    }
+)
 
 
 def _request_error(error: BackendRequestError) -> TransportError:
@@ -175,7 +192,8 @@ class WorkerExecutor:
             partial(self._executor.shutdown, wait=True, cancel_futures=True),
         )
         for slot in self._slots:
-            slot.close()
+            if not slot.quarantined:
+                slot.close()
 
     async def _serve_slot(self, slot: ExecutionSlot) -> None:
         while True:
@@ -262,14 +280,19 @@ class WorkerExecutor:
             await received.reject(rejection)
             return None
         except BackendFatalError as error:
+            slot.quarantine()
+            if all(execution is not self for execution in _QUARANTINED_EXECUTIONS):
+                _QUARANTINED_EXECUTIONS.append(self)
             with suppress(Exception):
-                await received.reject(
-                    TransportError(
-                        TransportErrorCode.UNAVAILABLE,
-                        retryable=True,
-                        diagnostic="Worker Backend cannot continue serving",
-                    )
+                rejection = TransportError(
+                    TransportErrorCode.UNAVAILABLE,
+                    retryable=error.reason not in _UNSAFE_TRANSPORT_FATAL_REASONS,
+                    diagnostic="Worker Backend cannot continue serving",
                 )
+                if error.reason in _UNSAFE_TRANSPORT_FATAL_REASONS:
+                    await received.reject_unsafe(rejection)
+                else:
+                    await received.reject(rejection)
             return error
 
         try:
@@ -310,11 +333,19 @@ class WorkerExecutor:
             work = loop.run_in_executor(self._executor, context.run, execute)
         try:
             return await asyncio.shield(work)
-        except asyncio.CancelledError:
+        except asyncio.CancelledError as cancelled:
+            # The execution thread owns fixed CUDA resources until it reaches a
+            # terminal result.  Repeated task cancellation must not interrupt
+            # that wait, and an eventual fatal must take precedence so the
+            # caller can quarantine the ownership graph.
+            while not work.done():
+                with suppress(asyncio.CancelledError):
+                    await asyncio.shield(work)
             try:
-                result = await work
-            except BaseException:
-                pass
-            else:
-                result.release()
-            raise
+                result = work.result()
+            except BackendFatalError:
+                raise
+            except BaseException as terminal_error:
+                raise cancelled from terminal_error
+            result.release()
+            raise cancelled

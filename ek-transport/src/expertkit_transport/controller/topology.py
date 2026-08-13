@@ -28,6 +28,7 @@ from expertkit_transport.routing import (
     WorkerConnection,
     WorkerIdentity,
 )
+from expertkit_transport.transports.base import WorkerTransportRuntimeRegistry
 from expertkit_transport.transports.factory import create_worker_transport
 
 _CONTROL_MESSAGE_BYTES = 1024 * 1024
@@ -81,6 +82,7 @@ class ControllerTopologyWatcher(TopologyProvider):
         reconnect_delay_seconds: float = 0.1,
         clock: Callable[[], float] = time.monotonic,
         resource_factory: WorkerConnectionFactory | None = None,
+        runtime_registry: WorkerTransportRuntimeRegistry | None = None,
     ) -> None:
         if not controller_endpoint:
             raise ValueError("controller_endpoint must not be empty")
@@ -111,6 +113,7 @@ class ControllerTopologyWatcher(TopologyProvider):
         self._reconnect_delay_seconds = reconnect_delay_seconds
         self._clock = clock
         self._resource_factory = resource_factory or self._create_worker_resources
+        self._runtime_registry = runtime_registry or WorkerTransportRuntimeRegistry()
 
         self._snapshot = TopologySnapshot(instance_id=instance_id, version=0, routes={})
         self._route_descriptions: RouteDescriptions = {}
@@ -246,10 +249,13 @@ class ControllerTopologyWatcher(TopologyProvider):
         self._resources.clear()
         self._pools.clear()
         if resources:
-            await asyncio.gather(
+            results = await asyncio.gather(
                 *(self._close_worker_resources(resource) for resource in resources),
-                return_exceptions=False,
+                return_exceptions=True,
             )
+            for result in results:
+                if isinstance(result, BaseException):
+                    raise result
 
     async def _watch(self) -> None:
         assert self._channel is not None
@@ -373,6 +379,8 @@ class ControllerTopologyWatcher(TopologyProvider):
             dtype=self._dtype,
             device=self._device,
             max_in_flight=route.max_in_flight,
+            worker_start_id=route.identity.start_id,
+            runtime_registry=self._runtime_registry,
         )
         try:
             pool = OutputPool(

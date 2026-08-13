@@ -1007,6 +1007,11 @@ impl ControllerRuntimeState {
                 requested: current_version,
             });
         }
+        // Version zero requests a complete baseline snapshot. Positive versions
+        // declare an installed snapshot and may safely receive retained updates.
+        if current_version == 0 {
+            return Ok(snapshot_messages(instance_id, topology));
+        }
         if current_version == topology.version {
             return Ok(Vec::new());
         }
@@ -1068,15 +1073,12 @@ fn validate_registration(registration: &RegisterWorkerRequest) -> Result<(), Con
             "activation dtype is invalid",
         ));
     }
-    if WorkerTransportType::try_from(registration.transport_type)
+    let transport = WorkerTransportType::try_from(registration.transport_type)
         .ok()
         .filter(|transport| *transport != WorkerTransportType::Unspecified)
-        .is_none()
-    {
-        return Err(ControllerStateError::InvalidRegistration(
+        .ok_or(ControllerStateError::InvalidRegistration(
             "worker Transport type is invalid",
-        ));
-    }
+        ))?;
     let Some(device) = registration.device.as_ref() else {
         return Err(ControllerStateError::InvalidRegistration(
             "one device is required",
@@ -1090,6 +1092,15 @@ fn validate_registration(registration: &RegisterWorkerRequest) -> Result<(), Con
     {
         return Err(ControllerStateError::InvalidRegistration(
             "device and capacity limits must be positive",
+        ));
+    }
+    if transport == WorkerTransportType::WorkerTransportTransferEngine
+        && u64::from(registration.max_active_batches_per_device)
+            + u64::from(registration.max_pending_batches_per_device)
+            > 4096
+    {
+        return Err(ControllerStateError::InvalidRegistration(
+            "Transfer Engine capacity cannot exceed 4096",
         ));
     }
     validate_host_port(&registration.computation_endpoint)?;
@@ -1584,6 +1595,22 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn registration_rejects_excessive_transfer_engine_capacity() {
+        let state = ControllerRuntimeState::new(8);
+        let mut request = registration("worker-0", "start-0");
+        request.transport_type = WorkerTransportType::WorkerTransportTransferEngine as i32;
+        request.max_active_batches_per_device = 4096;
+        request.max_pending_batches_per_device = 1;
+
+        assert!(matches!(
+            state.register(request).await,
+            Err(ControllerStateError::InvalidRegistration(
+                "Transfer Engine capacity cannot exceed 4096"
+            ))
+        ));
+    }
+
+    #[tokio::test]
     async fn restart_keeps_placement_but_requires_a_new_full_ready_report() {
         let store = TransientControllerStateStore::shared();
         let state = ControllerRuntimeState::restore(8, store.clone())
@@ -1795,15 +1822,15 @@ mod tests {
             .await
             .unwrap();
         let messages = state.topology_messages(7, 0).await.unwrap();
-        let topology_message::Message::Update(update) = messages[0].message.as_ref().unwrap()
+        let topology_message::Message::Snapshot(snapshot) = messages[0].message.as_ref().unwrap()
         else {
-            panic!("expected retained update");
+            panic!("expected baseline snapshot");
         };
-        assert_eq!(update.changes.len(), 1);
-        assert_eq!(update.changes[0].expert_id, 2);
-        assert_eq!(update.changes[0].replicas[0].worker_id, "worker-0");
+        assert_eq!(snapshot.routes.len(), 1);
+        assert_eq!(snapshot.routes[0].expert_id, 2);
+        assert_eq!(snapshot.routes[0].replicas[0].worker_id, "worker-0");
         assert_eq!(
-            update.changes[0].replicas[0].transport_type,
+            snapshot.routes[0].replicas[0].transport_type,
             WorkerTransportType::WorkerTransportGrpc as i32
         );
 
@@ -1900,6 +1927,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn topology_zero_version_receives_a_complete_snapshot() {
+        let state = ControllerRuntimeState::new(8);
+        register_live_worker(&state).await;
+        let placement = state
+            .set_targets("worker-0", "start-0", vec![target(1, 2)])
+            .await
+            .unwrap();
+        state
+            .apply_state_report(
+                "worker-0",
+                "start-0",
+                placement.generation,
+                1,
+                true,
+                vec![ready(1, 2)],
+            )
+            .await
+            .unwrap();
+
+        let messages = state.topology_messages(7, 0).await.unwrap();
+        assert!(messages.iter().all(|message| matches!(
+            message.message,
+            Some(topology_message::Message::Snapshot(_))
+        )));
+        let topology_message::Message::Snapshot(snapshot) = messages[0].message.as_ref().unwrap()
+        else {
+            unreachable!();
+        };
+        assert_eq!(snapshot.topology_version, 1);
+        assert_eq!(snapshot.routes.len(), 1);
+        assert_eq!(snapshot.routes[0].layer_id, 1);
+        assert_eq!(snapshot.routes[0].expert_id, 2);
+    }
+
+    #[tokio::test]
     async fn topology_replays_history_or_falls_back_to_snapshot() {
         let state = ControllerRuntimeState::new(1);
         let lease = register_live_worker(&state).await;
@@ -1928,7 +1990,19 @@ mod tests {
             retained[0].message,
             Some(topology_message::Message::Update(_))
         ));
-        let recovered = state.topology_messages(7, 0).await.unwrap();
+        let reopened = state.open_heartbeat("worker-0", "start-0").await.unwrap();
+        state
+            .heartbeat(
+                "worker-0",
+                "start-0",
+                reopened,
+                2,
+                WorkerRunState::WorkerRunning as i32,
+            )
+            .await
+            .unwrap();
+
+        let recovered = state.topology_messages(7, 1).await.unwrap();
         assert!(matches!(
             recovered[0].message,
             Some(topology_message::Message::Snapshot(_))
@@ -1937,8 +2011,8 @@ mod tests {
         else {
             unreachable!();
         };
-        assert_eq!(snapshot.topology_version, 2);
-        assert!(snapshot.routes.is_empty());
+        assert_eq!(snapshot.topology_version, 3);
+        assert_eq!(snapshot.routes.len(), 1);
     }
 
     #[tokio::test]

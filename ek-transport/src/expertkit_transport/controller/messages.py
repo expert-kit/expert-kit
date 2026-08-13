@@ -224,8 +224,17 @@ class TopologyMessageAssembler:
                 if replica.transport_type not in {
                     lifecycle_pb2.WORKER_TRANSPORT_GRPC,
                     lifecycle_pb2.WORKER_TRANSPORT_SHM,
+                    lifecycle_pb2.WORKER_TRANSPORT_NCCL,
+                    lifecycle_pb2.WORKER_TRANSPORT_TRANSFER_ENGINE,
                 }:
                     raise TopologyProtocolError("topology Worker Transport type is invalid")
+                if (
+                    replica.transport_type == lifecycle_pb2.WORKER_TRANSPORT_TRANSFER_ENGINE
+                    and replica.max_active_batches + replica.max_pending_batches > 4096
+                ):
+                    raise TopologyProtocolError(
+                        "Transfer Engine topology capacity cannot exceed 4096"
+                    )
                 identity = WorkerIdentity(replica.worker_id, replica.start_id)
                 if identity in identities:
                     raise TopologyProtocolError("topology route repeats one Worker process")

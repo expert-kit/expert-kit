@@ -9,7 +9,9 @@ from expertkit_worker.config.models import (
     LogLevel,
     QuantizationConfig,
     QuantizationType,
+    NcclTransportConfig,
     ShmTransportConfig,
+    TransferEngineTransportConfig,
     WorkerConfig,
 )
 from expertkit_worker.config.resources import (
@@ -28,7 +30,9 @@ __all__ = [
     "LogLevel",
     "QuantizationConfig",
     "QuantizationType",
+    "NcclTransportConfig",
     "ShmTransportConfig",
+    "TransferEngineTransportConfig",
     "WorkerConfig",
     "load_config",
     "plan_device_resources",
