@@ -1,0 +1,122 @@
+schema_version = 1
+name = "expert-kit-mooncake-rdma2"
+
+[upstream]
+repository = "https://github.com/kvcache-ai/Mooncake.git"
+commit = "731c4521dae71a78bc6fe4e218ad52cfc6ed3554"
+source_date_epoch = 1784774179
+
+[artifact]
+distribution = "mooncake-transfer-engine"
+version = "0.3.12.dev20260817+ek.731c4521.rdma2"
+wheel_filename = "mooncake_transfer_engine-0.3.12.dev20260817+ek.731c4521.rdma2-cp312-cp312-manylinux_2_35_x86_64.whl"
+python_tag = "cp312"
+abi_tag = "cp312"
+platform_tag = "manylinux_2_35_x86_64"
+
+[platform]
+os_id = "ubuntu"
+os_version_id = "22.04"
+architecture = "x86_64"
+glibc = "2.35"
+
+[toolchain]
+python = "3.12.13"
+python_implementation = "CPython"
+gcc = "11.4.0"
+cmake = "3.22.1"
+make = "4.3"
+cuda = "12.8.61"
+
+[submodules.pybind11]
+path = "extern/pybind11"
+commit = "58c382a8e3d7081364d2f5c62e7f429f0412743b"
+
+[submodules.yalantinglibs]
+path = "extern/yalantinglibs"
+commit = "6a0e067d9a43492cf8e4e280b531924fbd724dbd"
+
+[patches]
+combined_diff_sha256 = "0f4695afa2c5fd19aac5aefb4a758700c3e9b82c670ea9c0e7aba57d273cb5c7"
+combined_diff_algorithm = "sha256 of: git diff --binary <upstream.commit> -- ."
+
+[[patches.files]]
+path = "patches/ek-731c4521.patch"
+sha256 = "c6168451f17443bc00e01455a55eff411a2787d8c88139aed43adf9048d78e26"
+
+[[patches.files]]
+path = "patches/ek-rdma-731c4521.patch"
+sha256 = "67cfe82e5191c8be2582f989f346a8d21527b87a2601314b36269cec0370b3f2"
+
+[yalantinglibs]
+generator = "Unix Makefiles"
+build_type = "Release"
+cmake_definitions = [
+  "BUILD_EXAMPLES=OFF",
+  "BUILD_BENCHMARK=OFF",
+  "BUILD_UNIT_TESTS=OFF",
+  "INSTALL_THIRDPARTY=ON",
+  "INSTALL_STANDALONE=ON",
+  "INSTALL_INDEPENDENT_THIRDPARTY=ON",
+  "INSTALL_INDEPENDENT_STANDALONE=ON",
+]
+
+[build]
+generator = "Unix Makefiles"
+build_type = "Release"
+upstream_wheel_script = "scripts/build_wheel.sh"
+upstream_wheel_python = "3.12"
+wheel_staging_name = ".ek-rdma2-wheel-staging"
+cmake_definitions = [
+  "WITH_TE=ON",
+  "WITH_STORE=OFF",
+  "WITH_STORE_GO=OFF",
+  "WITH_STORE_RUST=OFF",
+  "WITH_P2P_STORE=OFF",
+  "WITH_RUST_EXAMPLE=OFF",
+  "WITH_EP=OFF",
+  "USE_CUDA=ON",
+  "USE_INTRA_NVLINK=ON",
+  "USE_TCP=ON",
+  "USE_TENT=ON",
+  "USE_HTTP=ON",
+  "USE_ETCD=OFF",
+  "USE_REDIS=OFF",
+  "USE_MLX5DV=OFF",
+  "USE_EVENT_DRIVEN_COMPLETION=OFF",
+  "WITH_METRICS=ON",
+  "TENT_METRICS_ENABLED=OFF",
+  "BUILD_SHARED_LIBS=OFF",
+  "BUILD_UNIT_TESTS=ON",
+  "BUILD_EXAMPLES=ON",
+  "BUILD_BENCHMARK=ON",
+  "ENABLE_DEBUG_SYMBOLS=ON",
+]
+
+[verification]
+expected_torch_cuda = "12.8"
+expected_torch_version = "2.10.0+cu128"
+forbidden_environment = ["MC_USE_TENT", "MC_USE_TEV1", "MC_FORCE_TCP"]
+required_shared_libraries = [
+  "libcudart.so.12",
+  "libcuda.so.1",
+  "libibverbs.so.1",
+  "libmlx5.so.1",
+  "libnuma.so.1",
+  "libcurl.so.4",
+]
+required_module_capabilities = [
+  "EK_SAFE_TERMINAL_BATCH_SYNC",
+  "EK_HAS_GPUDIRECT_ACQUIRE",
+  "EK_INTRA_NVLINK_REGISTRATION_REFCOUNT",
+  "EK_FORCE_CONFIGURED_TRANSPORT",
+  "EK_DRAINED_NVLINK_INTRA_LOCAL_INVALIDATION",
+  "EK_FORCE_CONFIGURED_RDMA_TRANSPORT",
+  "EK_DRAINED_RDMA_REMOTE_DESCRIPTOR_INVALIDATION",
+]
+required_engine_methods = [
+  "get_configured_backend",
+  "flush_gpudirect_writes",
+  "invalidate_drained_nvlink_intra_segment",
+  "invalidate_drained_rdma_segment",
+]

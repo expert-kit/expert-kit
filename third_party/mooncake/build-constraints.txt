@@ -1,0 +1,8 @@
+pip==26.2.1
+setuptools==84.0.0
+wheel==0.47.0
+build==1.5.0
+auditwheel==6.8.0
+packaging==26.3
+pyproject-hooks==1.2.0
+pyelftools==0.33
