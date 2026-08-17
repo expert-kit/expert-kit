@@ -4,8 +4,8 @@
 # lock is the network trust boundary: pip must install it with
 # --require-hashes and --only-binary=:all:.
 
-auditwheel==6.8.0 \
-    --hash=sha256:5c1659851e6ae6163a41306044726b5a7425694c923c5e9188fde9c6918ae106
+auditwheel==6.8.1 \
+    --hash=sha256:9cc3a9038d970c843ede84c6ebd3d837350162f6bb1843c11bda8a5d6b5fe39a
 build==1.5.0 \
     --hash=sha256:13f3eecb844759ab66efec90ca17639bbf14dc06cb2fdf37a9010322d9c50a6f
 packaging==26.3 \
