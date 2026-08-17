@@ -5,12 +5,14 @@ from __future__ import annotations
 import asyncio
 import threading
 import time
+from types import SimpleNamespace
 
 import pytest
 import torch
 
 from expertkit_transport.errors import TransportError
 from expertkit_transport.transports.base import WorkerEndpointConfig
+from expertkit_transport.transports.transfer_engine import runtime as runtime_module
 from expertkit_transport.transports.transfer_engine.arena import TransferArena
 from expertkit_transport.transports.transfer_engine.runtime import (
     TransferEngineRuntime,
@@ -51,6 +53,151 @@ def test_runtime_rejects_nvlink_on_a_cpu_device_and_nonempty_hint() -> None:
         )
 
 
+def test_runtime_requires_explicit_cuda_rdma_configuration() -> None:
+    common = {
+        "segment_name": "192.0.2.11",
+        "metadata_server": "P2PHANDSHAKE",
+        "protocol": "rdma",
+        "device_name": "mlx5_0",
+    }
+    with pytest.raises(ValueError, match="enable_experimental_rdma=True"):
+        TransferEngineRuntimeConfig(device="cuda:0", **common)
+    with pytest.raises(ValueError, match="indexed CUDA device"):
+        TransferEngineRuntimeConfig(
+            device="cpu",
+            enable_experimental_rdma=True,
+            **common,
+        )
+    with pytest.raises(ValueError, match="non-empty device_name"):
+        TransferEngineRuntimeConfig(
+            segment_name="192.0.2.11",
+            metadata_server="P2PHANDSHAKE",
+            protocol="rdma",
+            device="cuda:0",
+            enable_experimental_rdma=True,
+        )
+    with pytest.raises(ValueError, match="metadata_server=P2PHANDSHAKE"):
+        TransferEngineRuntimeConfig(
+            segment_name="192.0.2.11",
+            metadata_server="etcd://192.0.2.12:2379",
+            protocol="rdma",
+            device="cuda:0",
+            device_name="mlx5_0",
+            enable_experimental_rdma=True,
+        )
+    config = TransferEngineRuntimeConfig(
+        device="cuda:0",
+        enable_experimental_rdma=True,
+        **common,
+    )
+    assert config.protocol == "rdma"
+    assert config.device == torch.device("cuda:0")
+
+    with pytest.raises(ValueError, match="valid only when protocol is rdma"):
+        TransferEngineRuntimeConfig(
+            segment_name="127.0.0.1",
+            metadata_server="P2PHANDSHAKE",
+            protocol="tcp",
+            device="cpu",
+            enable_experimental_rdma=True,
+        )
+
+
+def test_rdma_native_capabilities_fail_closed_independently() -> None:
+    config = TransferEngineRuntimeConfig(
+        segment_name="192.0.2.11",
+        metadata_server="P2PHANDSHAKE",
+        protocol="rdma",
+        device="cuda:0",
+        device_name="mlx5_0",
+        enable_experimental_rdma=True,
+    )
+    capabilities = {
+        "EK_SAFE_TERMINAL_BATCH_SYNC": True,
+        "EK_HAS_GPUDIRECT_ACQUIRE": True,
+        "EK_FORCE_CONFIGURED_RDMA_TRANSPORT": True,
+        "EK_DRAINED_RDMA_REMOTE_DESCRIPTOR_INVALIDATION": True,
+    }
+    runtime_module._validate_native_capabilities(  # type: ignore[attr-defined]
+        SimpleNamespace(**capabilities),
+        config,
+    )
+    for missing, diagnostic in (
+        ("EK_FORCE_CONFIGURED_RDMA_TRANSPORT", "force the configured RDMA backend"),
+        (
+            "EK_DRAINED_RDMA_REMOTE_DESCRIPTOR_INVALIDATION",
+            "drained RDMA remote-descriptor invalidation",
+        ),
+    ):
+        incomplete = dict(capabilities)
+        incomplete[missing] = False
+        with pytest.raises(RuntimeError, match=diagnostic):
+            runtime_module._validate_native_capabilities(  # type: ignore[attr-defined]
+                SimpleNamespace(**incomplete),
+                config,
+            )
+
+
+def test_configured_backend_query_requires_an_exact_native_result() -> None:
+    engine = SimpleNamespace(get_configured_backend=lambda: "rdma")
+    query = runtime_module._configured_backend_query(  # type: ignore[attr-defined]
+        engine,
+        "rdma",
+    )
+    assert query is not None
+    assert (
+        runtime_module._validate_configured_backend(  # type: ignore[attr-defined]
+            query(),
+            "rdma",
+        )
+        == "rdma"
+    )
+    with pytest.raises(RuntimeError, match="expected rdma, got 'tcp'"):
+        runtime_module._validate_configured_backend(  # type: ignore[attr-defined]
+            "tcp",
+            "rdma",
+        )
+    with pytest.raises(RuntimeError, match="cannot report"):
+        runtime_module._configured_backend_query(  # type: ignore[attr-defined]
+            object(),
+            "rdma",
+        )
+    assert (
+        runtime_module._configured_backend_query(  # type: ignore[attr-defined]
+            object(),
+            "tcp",
+        )
+        is None
+    )
+
+
+def test_remote_invalidation_api_is_backend_specific() -> None:
+    engine = SimpleNamespace(
+        invalidate_drained_nvlink_intra_segment=lambda target: target,
+        invalidate_drained_rdma_segment=lambda target: target,
+    )
+    _, nvlink_subject = runtime_module._remote_invalidation_api(  # type: ignore[attr-defined]
+        engine,
+        "nvlink_intra",
+    )
+    _, rdma_subject = runtime_module._remote_invalidation_api(  # type: ignore[attr-defined]
+        engine,
+        "rdma",
+    )
+    assert "intra-NVLink" in nvlink_subject
+    assert "RDMA" in rdma_subject
+    with pytest.raises(RuntimeError, match="requires a forced"):
+        runtime_module._remote_invalidation_api(  # type: ignore[attr-defined]
+            engine,
+            "tcp",
+        )
+    with pytest.raises(RuntimeError, match="lacks mooncake drained rdma"):
+        runtime_module._remote_invalidation_api(  # type: ignore[attr-defined]
+            object(),
+            "rdma",
+        )
+
+
 @pytest.mark.parametrize("name", ["MC_USE_TENT", "MC_USE_TEV1"])
 def test_runtime_rejects_any_tent_environment_value(
     name: str,
@@ -64,6 +211,32 @@ def test_runtime_rejects_any_tent_environment_value(
                 metadata_server="P2PHANDSHAKE",
                 protocol="tcp",
                 device="cpu",
+            ),
+            engine=_BlockingEngine(),
+        )
+        with pytest.raises(RuntimeError, match=r"does not support TENT.*unset"):
+            await runtime.start()
+        assert not runtime._registrations  # type: ignore[attr-defined]
+        await runtime.close()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("name", ["MC_USE_TENT", "MC_USE_TEV1"])
+def test_experimental_rdma_does_not_bypass_tent_rejection(
+    name: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def scenario() -> None:
+        monkeypatch.setenv(name, "0")
+        runtime = TransferEngineRuntime(
+            TransferEngineRuntimeConfig(
+                segment_name="192.0.2.11",
+                metadata_server="P2PHANDSHAKE",
+                protocol="rdma",
+                device="cuda:0",
+                device_name="mlx5_0",
+                enable_experimental_rdma=True,
             ),
             engine=_BlockingEngine(),
         )
@@ -170,6 +343,71 @@ class _BlockingEngine:
         self.started.set()
         assert self.release.wait(5)
         return 0
+
+
+class _BackendReportingEngine(_BlockingEngine):
+    def __init__(self, backend: str) -> None:
+        super().__init__()
+        self.backend = backend
+        self.invalidated_sessions: list[str] = []
+
+    def get_configured_backend(self) -> str:
+        return self.backend
+
+    def invalidate_drained_rdma_segment(self, target_session: str) -> int:
+        assert target_session
+        self.invalidated_sessions.append(target_session)
+        return 0
+
+
+def test_runtime_rejects_native_backend_mismatch_before_registration(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def scenario() -> None:
+        monkeypatch.setattr(torch.cuda, "set_device", lambda _device: None)
+        runtime = TransferEngineRuntime(
+            TransferEngineRuntimeConfig(
+                segment_name="192.0.2.11",
+                metadata_server="P2PHANDSHAKE",
+                protocol="rdma",
+                device="cuda:0",
+                device_name="mlx5_0",
+                enable_experimental_rdma=True,
+            ),
+            engine=_BackendReportingEngine("tcp"),
+        )
+        with pytest.raises(RuntimeError, match="expected rdma, got 'tcp'"):
+            await runtime.start()
+        assert not runtime._registrations  # type: ignore[attr-defined]
+        await runtime.close()
+
+    asyncio.run(scenario())
+
+
+def test_runtime_uses_exact_rdma_backend_and_native_invalidation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def scenario() -> None:
+        monkeypatch.setattr(torch.cuda, "set_device", lambda _device: None)
+        engine = _BackendReportingEngine("rdma")
+        runtime = TransferEngineRuntime(
+            TransferEngineRuntimeConfig(
+                segment_name="192.0.2.11",
+                metadata_server="P2PHANDSHAKE",
+                protocol="rdma",
+                device="cuda:0",
+                device_name="mlx5_0",
+                enable_experimental_rdma=True,
+            ),
+            engine=engine,
+        )
+        await runtime.start()
+        assert runtime.backend == "rdma"
+        await runtime.invalidate_remote_session("192.0.2.10:19001")
+        assert engine.invalidated_sessions == ["192.0.2.10:19001"]
+        await runtime.close()
+
+    asyncio.run(scenario())
 
 
 class _BlockingRegistrationEngine(_BlockingEngine):

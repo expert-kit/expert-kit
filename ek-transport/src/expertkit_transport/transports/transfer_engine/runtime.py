@@ -53,6 +53,95 @@ def _p2p_session_id(endpoint: str, rpc_port: int) -> str:
     return f"{hostname}:{rpc_port}"
 
 
+def _require_native_capability(native_api: object, name: str, diagnostic: str) -> None:
+    if getattr(native_api, name, False) is not True:
+        raise RuntimeError(diagnostic)
+
+
+def _validate_native_capabilities(
+    native_api: object,
+    config: TransferEngineRuntimeConfig,
+) -> None:
+    """Fail before engine construction when a backend lacks EK safety contracts."""
+
+    _require_native_capability(
+        native_api,
+        "EK_SAFE_TERMINAL_BATCH_SYNC",
+        "the installed Mooncake wheel cannot prove terminal DMA state; "
+        "install an Expert Kit safety-capable wheel",
+    )
+    if config.device.type == "cuda":
+        _require_native_capability(
+            native_api,
+            "EK_HAS_GPUDIRECT_ACQUIRE",
+            "the installed Mooncake wheel lacks the GPUDirect acquire fence",
+        )
+    if config.protocol == "nvlink_intra":
+        _require_native_capability(
+            native_api,
+            "EK_INTRA_NVLINK_REGISTRATION_REFCOUNT",
+            "the installed Mooncake wheel lacks safe intra-NVLink registration reference counting",
+        )
+        _require_native_capability(
+            native_api,
+            "EK_FORCE_CONFIGURED_TRANSPORT",
+            "the installed Mooncake wheel cannot force the configured intra-NVLink backend",
+        )
+        _require_native_capability(
+            native_api,
+            "EK_DRAINED_NVLINK_INTRA_LOCAL_INVALIDATION",
+            "the installed Mooncake wheel lacks drained intra-NVLink segment invalidation",
+        )
+    elif config.protocol == "rdma":
+        _require_native_capability(
+            native_api,
+            "EK_FORCE_CONFIGURED_RDMA_TRANSPORT",
+            "the installed Mooncake wheel cannot force the configured RDMA backend",
+        )
+        _require_native_capability(
+            native_api,
+            "EK_DRAINED_RDMA_REMOTE_DESCRIPTOR_INVALIDATION",
+            "the installed Mooncake wheel lacks drained RDMA remote-descriptor invalidation",
+        )
+
+
+def _configured_backend_query(engine: object, backend: str) -> Callable[[], object] | None:
+    if backend not in {"nvlink_intra", "rdma"}:
+        return None
+    query = getattr(engine, "get_configured_backend", None)
+    if not callable(query):
+        raise RuntimeError("the Mooncake wheel cannot report its configured data backend")
+    return query
+
+
+def _validate_configured_backend(actual: object, expected: str) -> str:
+    if not isinstance(actual, str) or actual != expected:
+        raise RuntimeError(
+            f"Mooncake configured backend mismatch: expected {expected}, got {actual!r}"
+        )
+    return actual
+
+
+def _remote_invalidation_api(
+    engine: object,
+    backend: str,
+) -> tuple[Callable[[str], object], str]:
+    if backend == "nvlink_intra":
+        name = "invalidate_drained_nvlink_intra_segment"
+        subject = "Mooncake drained intra-NVLink segment invalidation"
+    elif backend == "rdma":
+        name = "invalidate_drained_rdma_segment"
+        subject = "Mooncake drained RDMA remote-descriptor invalidation"
+    else:
+        raise RuntimeError(
+            "drained remote-session invalidation requires a forced intra-NVLink or RDMA backend"
+        )
+    invalidate = getattr(engine, name, None)
+    if not callable(invalidate):
+        raise RuntimeError(f"the Mooncake wheel lacks {subject.lower()}")
+    return invalidate, subject
+
+
 @dataclass(frozen=True, slots=True)
 class TransferEngineRuntimeConfig:
     """Configure one Mooncake engine shared by every connection in a process."""
@@ -64,6 +153,7 @@ class TransferEngineRuntimeConfig:
     device_name: str = ""
     max_workers: int = 2
     transport_hint: str = ""
+    enable_experimental_rdma: bool = False
 
     def __post_init__(self) -> None:
         for name in ("segment_name", "metadata_server", "protocol"):
@@ -73,6 +163,8 @@ class TransferEngineRuntimeConfig:
         for name in ("device_name", "transport_hint"):
             if not isinstance(getattr(self, name), str):
                 raise ValueError(f"{name} must be a string")
+        if not isinstance(self.enable_experimental_rdma, bool):
+            raise ValueError("enable_experimental_rdma must be a Boolean")
         if self.protocol not in _SUPPORTED_PROTOCOLS:
             raise ValueError("protocol must be tcp, rdma, nvlink, or nvlink_intra")
         if self.transport_hint:
@@ -92,6 +184,17 @@ class TransferEngineRuntimeConfig:
             raise ValueError("Transfer Engine runtime requires an indexed CUDA device")
         if self.protocol in {"nvlink", "nvlink_intra"} and device.type != "cuda":
             raise ValueError("Transfer Engine NVLink backends require a CUDA device")
+        if self.protocol == "rdma":
+            if not self.enable_experimental_rdma:
+                raise ValueError("Transfer Engine RDMA requires enable_experimental_rdma=True")
+            if device.type != "cuda":
+                raise ValueError("Transfer Engine RDMA requires an indexed CUDA device")
+            if not self.device_name.strip():
+                raise ValueError("Transfer Engine RDMA requires a non-empty device_name")
+            if self.metadata_server != "P2PHANDSHAKE":
+                raise ValueError("Transfer Engine RDMA requires metadata_server=P2PHANDSHAKE")
+        elif self.enable_experimental_rdma:
+            raise ValueError("enable_experimental_rdma is valid only when protocol is rdma")
         object.__setattr__(self, "device", device)
 
 
@@ -197,6 +300,7 @@ class TransferEngineRuntime(TransferEngineRuntimeProtocol):
         self._registration_lock = asyncio.Lock()
         self._ready_task: asyncio.Task[None] | None = None
         self._session_id: str | None = None
+        self._actual_backend: str | None = None
         self._generation = uuid.uuid4().hex
         self._registrations: dict[int, tuple[torch.Tensor, int]] = {}
         self._pending_registrations: dict[int, tuple[torch.Tensor, int]] = {}
@@ -217,7 +321,7 @@ class TransferEngineRuntime(TransferEngineRuntimeProtocol):
 
     @property
     def backend(self) -> str:
-        return self._config.protocol
+        return self._actual_backend or self._config.protocol
 
     @property
     def generation(self) -> str:
@@ -424,22 +528,15 @@ class TransferEngineRuntime(TransferEngineRuntimeProtocol):
     ) -> None:
         if not target_session:
             raise ValueError("target_session must not be empty")
-        if self.backend != "nvlink_intra":
-            raise RuntimeError(
-                "drained remote-session invalidation is supported only for the "
-                "forced intra-NVLink backend"
-            )
         self.ensure_healthy()
         engine = self._require_engine()
-        invalidate = getattr(engine, "invalidate_drained_nvlink_intra_segment", None)
-        if not callable(invalidate):
-            raise RuntimeError("the Mooncake wheel lacks drained intra-NVLink segment invalidation")
+        invalidate, subject = _remote_invalidation_api(engine, self.backend)
         result = await self._run_native(
             partial(invalidate, target_session),
             monotonic_deadline=monotonic_deadline,
-            subject="Mooncake drained intra-NVLink segment invalidation",
+            subject=subject,
         )
-        self._require_success(result, "Mooncake drained intra-NVLink segment invalidation")
+        self._require_success(result, subject)
 
     async def close(self) -> None:
         if self._close_task is None:
@@ -491,67 +588,12 @@ class TransferEngineRuntime(TransferEngineRuntimeProtocol):
                     "Mooncake Transfer Engine is unavailable; install the "
                     "expertkit-transport[transfer-engine] extra"
                 ) from error
-            if (
-                getattr(
-                    mooncake_engine,
-                    "EK_SAFE_TERMINAL_BATCH_SYNC",
-                    False,
-                )
-                is not True
-            ):
-                raise RuntimeError(
-                    "the installed Mooncake wheel cannot prove terminal DMA state; "
-                    "install the Expert Kit safety-patched wheel"
-                )
-            if (
-                self.device.type == "cuda"
-                and getattr(
-                    mooncake_engine,
-                    "EK_HAS_GPUDIRECT_ACQUIRE",
-                    False,
-                )
-                is not True
-            ):
-                raise RuntimeError("the installed Mooncake wheel lacks the GPUDirect acquire fence")
-            if (
-                self.device.type == "cuda"
-                and getattr(
-                    mooncake_engine,
-                    "EK_INTRA_NVLINK_REGISTRATION_REFCOUNT",
-                    False,
-                )
-                is not True
-            ):
-                raise RuntimeError(
-                    "the installed Mooncake wheel lacks safe intra-NVLink "
-                    "registration reference counting"
-                )
-            if (
-                self._config.protocol == "nvlink_intra"
-                and getattr(
-                    mooncake_engine,
-                    "EK_FORCE_CONFIGURED_TRANSPORT",
-                    False,
-                )
-                is not True
-            ):
-                raise RuntimeError(
-                    "the installed Mooncake wheel cannot force the configured intra-NVLink backend"
-                )
-            if (
-                self._config.protocol == "nvlink_intra"
-                and getattr(
-                    mooncake_engine,
-                    "EK_DRAINED_NVLINK_INTRA_LOCAL_INVALIDATION",
-                    False,
-                )
-                is not True
-            ):
-                raise RuntimeError(
-                    "the installed Mooncake wheel lacks drained intra-NVLink segment invalidation"
-                )
+            _validate_native_capabilities(mooncake_engine, self._config)
             self._engine = mooncake_engine.TransferEngine()
         engine = self._require_engine()
+        backend_query = _configured_backend_query(engine, self._config.protocol)
+        if self._config.protocol in {"nvlink_intra", "rdma"}:
+            _remote_invalidation_api(engine, self._config.protocol)
         result = await self._run_native(
             partial(
                 engine.initialize,
@@ -565,6 +607,17 @@ class TransferEngineRuntime(TransferEngineRuntimeProtocol):
             allow_during_close=True,
         )
         self._require_success(result, "Mooncake initialization")
+        if backend_query is not None:
+            actual_backend = await self._run_native(
+                backend_query,
+                monotonic_deadline=math.inf,
+                subject="Mooncake configured backend discovery",
+                allow_during_close=True,
+            )
+            self._actual_backend = _validate_configured_backend(
+                actual_backend,
+                self._config.protocol,
+            )
         rpc_port = await self._run_native(
             engine.get_rpc_port,
             monotonic_deadline=math.inf,
@@ -753,6 +806,7 @@ class TransferEngineRuntime(TransferEngineRuntimeProtocol):
                         allow_during_close=True,
                     )
         self._session_id = None
+        self._actual_backend = None
         self._engine = None
         self._executor.shutdown(wait=True, cancel_futures=False)
 

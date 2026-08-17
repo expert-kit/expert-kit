@@ -661,26 +661,28 @@ class TransferEngineWorkerTransport(WorkerTransport):
         ):
             try:
                 # Prepare gates the complete Mooncake target and drains every
-                # sibling before ACK.  Keep that gate held while this arena is
-                # deregistered so no surviving sibling can reopen a stale CUDA
-                # IPC mapping in the deregister/invalidation window.
+                # sibling before ACK. Keep that gate held while this arena is
+                # deregistered so no surviving sibling can reach stale backend
+                # state in the deregistration/commit window.
                 await self._close_phase("prepare")
                 await self._rollback_registration()
-                # Commit invalidates the target-wide cache, retires this epoch,
-                # and only then lets surviving sibling sessions execute again.
+                # Commit performs backend-specific retirement, retires this
+                # epoch, and only then lets sibling sessions execute again.
+                # Intra-NVLink and RDMA invalidate their backend-specific
+                # remote-target caches after synchronous deregistration.
                 await self._close_phase("commit")
             except BaseException as error:
                 close_failure = error
                 diagnostic = (
                     "Transfer Engine two-phase CloseSession could not prove target gating, "
-                    "arena deregistration, and cache invalidation; the arena is retained "
+                    "arena deregistration, and backend retirement; the arena is retained "
                     "and this process must restart"
                 )
                 self._retain_arena = True
                 self._poisoned_diagnostic = diagnostic
                 # Deregistration may already have committed before CommitClose
                 # or its ACK failed. The runtime then no longer owns this slab,
-                # while the Worker can still hold its stale CUDA IPC mapping.
+                # while the Worker may still retain backend-specific peer state.
                 # Retain the complete ownership graph independently of topology
                 # references until process exit.
                 _UNSAFE_CLOSE_GRAPHS.append(

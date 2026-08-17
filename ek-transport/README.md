@@ -37,11 +37,18 @@ The Transfer Engine extra intentionally does not install a public Mooncake
 wheel. Run `uv sync --locked --extra transfer-engine` first, then install the EK
 safety-patched Linux wheel into that environment and invoke `.venv/bin/python`
 or `uv run --no-sync`. The runtime refuses to register memory unless the binding
-advertises terminal batch semantics, a GPUDirect acquire fence, safe
-intra-NVLink registration reference counts, forced backend selection, and
-drained intra-NVLink cache invalidation. Importing a stock wheel is not enough.
-The validated version, server artifact SHA256, build flags, and required native
-API are recorded in [`third_party/mooncake/README.md`](../third_party/mooncake/README.md).
+advertises terminal batch semantics and, for CUDA, a GPUDirect acquire fence.
+The forced `nvlink_intra` profile additionally requires registration reference
+counts and drained IPC-cache invalidation. Experimental RDMA additionally
+requires `EK_FORCE_CONFIGURED_RDMA_TRANSPORT`,
+`EK_DRAINED_RDMA_REMOTE_DESCRIPTOR_INVALIDATION`, and
+`invalidate_drained_rdma_segment(target_session)`; both forced profiles must
+report the exact installed backend through `get_configured_backend()`. Importing
+a stock wheel is not enough. The reproducible source patches, validated wheel
+versions and hashes, build flags, and native API are recorded in
+[`third_party/mooncake/README.md`](../third_party/mooncake/README.md).
+The current dual-backend artifact is linked against CUDA 12.8; follow that
+document's runtime-matching guidance when PyTorch bundles an older CUDA runtime.
 
 The real NCCL multi-process tests require at least two visible CUDA devices and
 a PyTorch build with NCCL support. They are marked `cuda` and skip cleanly when
@@ -108,16 +115,32 @@ does not enable the gRPC Tensor payload path in an SHM Worker.
   native API cannot safely cancel an in-flight DMA, cancellation and deadline
   handling retain the slot until the native operation is terminal.
 - P2P handshake mode requires every process to advertise a distinct reachable
-  `host:port`. The production Worker configuration currently enables only one
-  forced `nvlink_intra` backend per runtime. Graceful route retirement waits for
-  all DMA, validates a Worker-issued session nonce, and invalidates the drained
-  local IPC/handle cache before either side deregisters an arena.
-- Cross-host RDMA/TCP and per-peer mixed backend selection remain lower-level
-  experiments. Their data calls exist, but dynamic endpoint retirement and
-  restart are not yet lifecycle-safe, so the production Worker config rejects
-  them. TENT selection is not enabled by the current EK session contract; run
-  with `MC_USE_TENT` and `MC_USE_TEV1` unset. The validated path uses the forced
-  legacy `nvlink_intra` backend.
+  `host:port`. One process runtime still selects exactly one backend; a single
+  runtime cannot mix intra-node NVLink and cross-host RDMA peers. OpenSession
+  rejects peers whose selected backend differs.
+- Graceful `nvlink_intra` and capability-gated RDMA retirement use the same
+  two-phase close: prepare gates every sibling session for a remote target and
+  drains DMA, then the owner synchronously deregisters its arena before commit.
+  Commit invalidates the Worker's backend-specific remote-target cache. RDMA
+  evicts only the stale address/rkey descriptor; it deliberately keeps shared
+  QPs installed. Any ambiguous step quarantines the arena and requires process
+  restart.
+- RDMA is disabled unless both sides explicitly set
+  `enable_experimental_rdma=True`, use indexed CUDA devices and explicit RDMA
+  device names, use `P2PHANDSHAKE`, and install a native binding that can prove
+  the exact installed transport set is `{rdma}`, report `rdma` as the actual
+  backend, and evict a drained remote descriptor. A wheel missing any one of
+  those contracts fails before memory registration.
+- RDMA route removal and re-add within the same live remote runtime generation
+  reuse the still-valid QP after refreshing the descriptor. Because graceful
+  close does not destroy a shared QP, the Worker retains an endpoint-to-runtime
+  generation tombstone. A new process generation must advertise a new endpoint
+  or restart the Worker before reusing the old endpoint. Network partitions,
+  deregistration failures, and crash windows remain fault-injection gates before
+  this opt-in profile can be promoted to production.
+- TCP and per-peer mixed backend selection remain lower-level experiments.
+  TENT selection is rejected even when its environment variables are set to
+  `0`; run with `MC_USE_TENT` and `MC_USE_TEV1` unset.
 - NVSHMEM and Arrow Flight Transports are not present.
 - TLS, authentication, and authorization are not implemented. Endpoints must
   remain inside a trusted isolated network.

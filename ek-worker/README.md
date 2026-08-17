@@ -151,6 +151,34 @@ silently reach old arena addresses. A Frontend crash without a successful
 `CloseSession` requires the corresponding Worker to restart before that
 Frontend endpoint is reused.
 
+Cross-host RDMA uses the same Worker type but is deliberately gated while its
+native lifecycle API is being validated:
+
+```yaml
+transport:
+  type: transfer_engine
+  max_pending_batches_per_device: 1
+  control_listen: 0.0.0.0:52051
+  control_advertise: 192.0.2.11:52051
+  segment_advertise: 192.0.2.11:12011
+  metadata_server: P2PHANDSHAKE
+  protocol: rdma
+  device_name: mlx5_0
+  max_workers: 2
+  transport_hint: ""
+  enable_experimental_rdma: true
+```
+
+The Frontend must select `rdma`, an indexed CUDA device, a peer-reachable
+segment endpoint, an explicit RDMA device, and the same opt-in. Startup requires
+native `EK_FORCE_CONFIGURED_RDMA_TRANSPORT` and an exact `rdma` result from
+`get_configured_backend()`, plus
+`EK_DRAINED_RDMA_REMOTE_DESCRIPTOR_INVALIDATION` and
+`invalidate_drained_rdma_segment(target_session)`. RDMA requires
+`metadata_server: P2PHANDSHAKE`. A wheel missing any one of those contracts
+fails before registering memory. TENT must remain disabled; merely defining
+`MC_USE_TENT` or `MC_USE_TEV1`, including with value `0`, is rejected.
+
 The Weight Manager looks for a requested assigned expert in this order:
 
 ```text
@@ -253,12 +281,23 @@ three input Tensors and one output Tensor use NCCL point-to-point operations.
 NCCL membership is static, and communicator failure or rank replacement
 currently requires recreating the complete group. Transfer Engine uses a
 registered GPU arena and one-sided READ/WRITE operations; it accepts dynamic
-Worker generations without creating a global communicator. The current safe
-lifecycle is same-host `nvlink_intra`: graceful retire drains and invalidates
-cached IPC mappings, while a Frontend crash requires a Worker restart before
-the same advertised endpoint can represent a new runtime generation. The first
-version still performs one local device copy at each endpoint. NVSHMEM and
-Arrow Flight are not implemented by this Worker.
+Worker generations without creating a global communicator. The validated safe
+lifecycle is same-host `nvlink_intra`; experimental RDMA uses the same
+generation binding and two-phase close only when the native binding proves
+forced RDMA selection, reports the actual backend exactly, and supports drained
+RDMA descriptor invalidation. Graceful retire gates sibling sessions, drains
+DMA, synchronously deregisters the owning arena, and then evicts the old remote
+address/rkey descriptor before commit completes. Shared QPs remain installed.
+Any ambiguous step retains the arena and requires process restart.
+
+The Worker retains an RDMA endpoint-to-runtime generation tombstone after the
+last session closes. Route removal and re-add from the same live runtime are
+supported, but a different process generation cannot reuse that endpoint until
+the Worker restarts; alternatively, advertise a new endpoint. Network faults,
+crash windows, and deregistration failures still need real hardware fault
+injection before this opt-in can be promoted to production. The first Transfer
+Engine version still performs one local device copy at each endpoint. NVSHMEM
+and Arrow Flight are not implemented by this Worker.
 
 There is no TLS, mTLS, authentication, or authorization. Run all Controller,
 Worker, Weight Manager, Weight Server, metrics, and tracing endpoints only on a

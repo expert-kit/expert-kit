@@ -270,10 +270,11 @@ async def start_pair(
     max_pending_batches: int = 1,
     max_in_flight: int = 2,
     session_close_grace_secs: float = 0.2,
+    backend: str = "tcp",
 ) -> _RunningPair:
     link = _FakeLink()
-    client_runtime = _FakeRuntime(link, "client:19001")
-    worker_runtime = _FakeRuntime(link, "worker:19002")
+    client_runtime = _FakeRuntime(link, "client:19001", backend=backend)
+    worker_runtime = _FakeRuntime(link, "worker:19002", backend=backend)
     config = endpoint_config()
     receiver = TransferEngineWorkerBatchReceiver(
         "127.0.0.1:0",
@@ -342,6 +343,33 @@ def test_worker_pulls_three_inputs_and_writes_one_output() -> None:
                 ("read", "client:19001", 3),
                 ("write", "client:19001", 1),
             ]
+        finally:
+            await pair.close()
+
+    asyncio.run(scenario())
+
+
+def test_rdma_backend_negotiates_and_uses_two_phase_invalidation() -> None:
+    async def scenario() -> None:
+        pair = await start_pair(max_in_flight=1, backend="rdma")
+        output = torch.empty((2, 3), dtype=torch.float32)
+        try:
+            submission = asyncio.create_task(
+                pair.transport.execute(
+                    worker_batch(),
+                    output,
+                    monotonic_deadline=time.monotonic() + 5,
+                )
+            )
+            received = await pair.receiver.receive()
+            assert received.batch.distinct_expert_ids == (0, 1, 3)
+            await complete(received)
+            await submission
+
+            await pair.transport.close()
+            assert pair.worker_runtime.invalidated_sessions == ["client:19001"]
+            assert not pair.receiver._sessions  # type: ignore[attr-defined]
+            assert pair.client_runtime.quarantine_reason is None
         finally:
             await pair.close()
 
@@ -1191,18 +1219,24 @@ def test_open_session_rejects_a_backend_mismatch() -> None:
     asyncio.run(scenario())
 
 
-def test_same_endpoint_rejects_a_new_frontend_runtime_generation() -> None:
+def test_nvlink_same_endpoint_allows_new_generation_only_after_close() -> None:
     async def scenario() -> None:
         link = _FakeLink()
-        worker_runtime = _FakeRuntime(link, "worker:19002")
+        worker_runtime = _FakeRuntime(
+            link,
+            "worker:19002",
+            backend="nvlink_intra",
+        )
         original_runtime = _FakeRuntime(
             link,
             "client:19001",
+            backend="nvlink_intra",
             generation="frontend-generation-a",
         )
         restarted_runtime = _FakeRuntime(
             link,
             "client:19001",
+            backend="nvlink_intra",
             generation="frontend-generation-b",
         )
         receiver = TransferEngineWorkerBatchReceiver(
@@ -1242,6 +1276,83 @@ def test_same_endpoint_rejects_a_new_frontend_runtime_generation() -> None:
             await original.close()
             await receiver.close()
             await original_runtime.close()
+            await restarted_runtime.close()
+            await worker_runtime.close()
+
+    asyncio.run(scenario())
+
+
+def test_rdma_closed_endpoint_keeps_generation_tombstone() -> None:
+    async def scenario() -> None:
+        link = _FakeLink()
+        worker_runtime = _FakeRuntime(link, "worker:19002", backend="rdma")
+        original_runtime = _FakeRuntime(
+            link,
+            "client:19001",
+            backend="rdma",
+            generation="frontend-generation-a",
+        )
+        same_generation_runtime = _FakeRuntime(
+            link,
+            "client:19001",
+            backend="rdma",
+            generation="frontend-generation-a",
+        )
+        restarted_runtime = _FakeRuntime(
+            link,
+            "client:19001",
+            backend="rdma",
+            generation="frontend-generation-b",
+        )
+        receiver = TransferEngineWorkerBatchReceiver(
+            "127.0.0.1:0",
+            endpoint_config(),
+            runtime=worker_runtime,
+            worker_start_id="worker-start-a",
+            max_active_batches=1,
+            max_pending_batches=1,
+            owns_runtime=False,
+        )
+        await receiver.start()
+
+        def transport(runtime: _FakeRuntime) -> TransferEngineWorkerTransport:
+            return TransferEngineWorkerTransport(
+                f"127.0.0.1:{receiver.bound_port}",
+                endpoint_config(),
+                max_in_flight=1,
+                device="cpu",
+                runtime=runtime,
+                expected_worker_start_id="worker-start-a",
+            )
+
+        original = transport(original_runtime)
+        same_generation = transport(same_generation_runtime)
+        restarted = transport(restarted_runtime)
+        try:
+            await original.start()
+            await original.close()
+            assert receiver._target_generations == {  # type: ignore[attr-defined]
+                "client:19001": "frontend-generation-a"
+            }
+
+            with pytest.raises(TransportError, match="INVALID_ARGUMENT"):
+                await restarted.start()
+
+            # Route removal/re-add within the same live Frontend process is
+            # safe: its endpoint and runtime generation still identify the
+            # descriptor owner retained by the Worker tombstone.
+            await same_generation.start()
+            await same_generation.close()
+            assert receiver._target_generations == {  # type: ignore[attr-defined]
+                "client:19001": "frontend-generation-a"
+            }
+        finally:
+            await restarted.close()
+            await same_generation.close()
+            await original.close()
+            await receiver.close()
+            await original_runtime.close()
+            await same_generation_runtime.close()
             await restarted_runtime.close()
             await worker_runtime.close()
 

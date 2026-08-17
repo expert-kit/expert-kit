@@ -281,13 +281,28 @@ class TransferEngineTransportConfig(_StrictModel):
     # For P2PHANDSHAKE this must be a peer-reachable host or host:port endpoint.
     segment_advertise: HostAddress
     metadata_server: str = Field(default="P2PHANDSHAKE", min_length=1)
-    # The first production lifecycle supports drained, generation-safe
-    # intra-node NVLink only. Other Mooncake data paths remain lower-level
-    # experiments until their remote handle caches can be invalidated safely.
-    protocol: Literal["nvlink_intra"] = "nvlink_intra"
+    # RDMA remains explicitly experimental until the native binding advertises
+    # forced selection, exact backend reporting, and drained cache invalidation.
+    protocol: Literal["nvlink_intra", "rdma"] = "nvlink_intra"
     device_name: str = ""
     max_workers: int = Field(default=2, gt=0)
     transport_hint: Literal[""] = ""
+    enable_experimental_rdma: bool = False
+
+    @model_validator(mode="after")
+    def validate_rdma_opt_in(self) -> TransferEngineTransportConfig:
+        """Keep cross-host RDMA behind an explicit, backend-specific gate."""
+
+        if self.protocol == "rdma":
+            if not self.enable_experimental_rdma:
+                raise ValueError("transport.enable_experimental_rdma must be true for RDMA")
+            if not self.device_name.strip():
+                raise ValueError("transport.device_name is required for RDMA")
+            if self.metadata_server != "P2PHANDSHAKE":
+                raise ValueError("transport.metadata_server must be P2PHANDSHAKE for RDMA")
+        elif self.enable_experimental_rdma:
+            raise ValueError("transport.enable_experimental_rdma is valid only for RDMA")
+        return self
 
 
 TransportConfig = Annotated[
@@ -458,12 +473,15 @@ class WorkerConfig(_StrictModel):
             "cuda:"
         ):
             raise ValueError("the NCCL transport requires a CUDA Worker device")
-        if (
-            isinstance(self.transport, TransferEngineTransportConfig)
-            and self.transport.protocol in {"nvlink", "nvlink_intra"}
-            and not self.worker.device.startswith("cuda:")
+        if isinstance(self.transport, TransferEngineTransportConfig) and not (
+            self.worker.device.startswith("cuda:")
         ):
-            raise ValueError("the Transfer Engine NVLink transports require a CUDA Worker device")
+            if self.transport.protocol == "nvlink_intra":
+                raise ValueError(
+                    "the Transfer Engine NVLink transports require a CUDA Worker device"
+                )
+            if self.transport.protocol == "rdma":
+                raise ValueError("the Transfer Engine RDMA transport requires a CUDA Worker device")
         if (
             isinstance(self.transport, TransferEngineTransportConfig)
             and self.worker.max_active_batches_per_device

@@ -230,6 +230,10 @@ class TransferEngineWorkerBatchReceiver(WorkerBatchReceiver):
         self._on_rejection = on_rejection or (lambda _reason: None)
         self._sessions: dict[str, TransferEngineSession] = {}
         self._session_nonces: dict[str, tuple[str, str, str]] = {}
+        # Active target ownership plus RDMA endpoint-generation tombstones.
+        # Descriptor-only retirement deliberately preserves shared QPs, so an
+        # endpoint must not be rebound to a different remote process generation
+        # until this Worker runtime itself restarts.
         self._target_generations: dict[str, str] = {}
         self._target_close_gates: dict[str, set[str]] = {}
         self._target_commit_locks: dict[str, asyncio.Lock] = {}
@@ -943,14 +947,15 @@ class TransferEngineWorkerBatchReceiver(WorkerBatchReceiver):
                             "Transfer Engine target generation ownership is corrupted"
                         )
 
-            # Keep the target gate visible while native invalidation runs so
-            # sibling Execute/Open calls can fail explicitly instead of waiting
-            # behind the global session lock or reopening the stale mapping.
+            # Keep the target gate visible while backend-specific retirement
+            # commits so sibling Execute/Open calls cannot reopen stale state.
+            # Intra-NVLink and RDMA invalidate backend-specific remote-target
+            # caches here, after the owner synchronously deregistered its arena.
             try:
                 await self._runtime.invalidate_remote_session(session.target_session_id)
             except BaseException:
                 self._runtime.quarantine(
-                    "Transfer Engine could not invalidate a drained remote segment cache"
+                    "Transfer Engine could not commit drained remote-target retirement"
                 )
                 raise
 
@@ -962,7 +967,7 @@ class TransferEngineWorkerBatchReceiver(WorkerBatchReceiver):
                 self._sessions.pop(session.client_epoch)
                 if not self._sessions:
                     self._sessions_empty.set()
-                if not remaining_target_sessions:
+                if not remaining_target_sessions and session.backend != "rdma":
                     self._target_generations.pop(session.target_session_id)
                 gates.remove(session.client_epoch)
                 if not gates:

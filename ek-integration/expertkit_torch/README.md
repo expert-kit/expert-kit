@@ -105,12 +105,38 @@ with load_model(
     output = loaded.model.generate(...)
 ```
 
-Use distinct `segment_name` endpoints for the Frontend and Worker. The
-current production session lifecycle supports only a forced `nvlink_intra`
-backend, and both sides must select it. Install the EK safety-patched Linux
-wheel explicitly; runtime capability checks verify terminal DMA semantics,
+Use distinct `segment_name` endpoints for the Frontend and Worker. Both sides
+must select the same single backend. Install an EK safety-capable Linux wheel
+explicitly; the validated `nvlink_intra` profile checks terminal DMA semantics,
 GPUDirect visibility, registration reference counts, forced selection, and
 drained IPC-cache invalidation before memory registration.
+
+An experimental cross-host runtime can instead request RDMA explicitly:
+
+```python
+runtime = TransferEngineRuntime(
+    TransferEngineRuntimeConfig(
+        segment_name="192.0.2.10:12012",
+        metadata_server="P2PHANDSHAKE",
+        protocol="rdma",
+        device="cuda:0",
+        device_name="mlx5_0",
+        enable_experimental_rdma=True,
+    )
+)
+```
+
+The Worker needs a peer-reachable endpoint, the same `rdma` selection and
+opt-in, and its own RDMA device. This profile additionally requires native
+`EK_FORCE_CONFIGURED_RDMA_TRANSPORT` and an exact `rdma` result from
+`get_configured_backend()`, plus
+`EK_DRAINED_RDMA_REMOTE_DESCRIPTOR_INVALIDATION` and
+`invalidate_drained_rdma_segment(target_session)`. RDMA requires
+`metadata_server="P2PHANDSHAKE"`. A wheel missing any one of those contracts
+fails closed before memory registration. Defining `MC_USE_TENT` or
+`MC_USE_TEV1`, even as `0`, is rejected. Graceful route re-add is limited to the
+same runtime generation; a new process must use a new endpoint or restart the
+Worker that retains the old endpoint-generation tombstone.
 
 ## Load a model
 
