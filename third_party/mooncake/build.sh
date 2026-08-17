@@ -575,7 +575,8 @@ git -C "${SOURCE_TREE}" diff --check
 [[ -z "$(git -C "${SOURCE_TREE}" ls-files --others --exclude-standard)" ]] ||
   die "patch application unexpectedly created untracked files"
 PATCHED_DIFF_SHA256="$({
-  git -C "${SOURCE_TREE}" diff --binary "${BASE_COMMIT}" -- .
+  git -C "${SOURCE_TREE}" -c core.abbrev=40 \
+    diff --binary --full-index "${BASE_COMMIT}" -- .
 } | sha256sum | awk '{print $1}')"
 check_exact "combined patched diff SHA256" "${PATCHED_DIFF_SHA256}" \
   "$(manifest_scalar patches.combined_diff_sha256)"

@@ -291,6 +291,7 @@ def test_build_script_is_fail_closed_and_publishes_an_atomic_bundle() -> None:
     assert '{"https", "file"}' in build_script
     assert 'fetch --depth 1 --no-tags origin "${BASE_COMMIT}"' in build_script
     assert '"submodule.${submodule_path}.active" true' in build_script
+    assert 'diff --binary --full-index "${BASE_COMMIT}" -- .' in build_script
     assert "--install requires --python to belong to a virtual environment" in build_script
     assert 'CUDA_LINK="/usr/local/cuda"' in build_script
     assert "--work-dir must be outside the Expert Kit Git worktree" in build_script

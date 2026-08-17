@@ -37,8 +37,8 @@ path = "extern/yalantinglibs"
 commit = "6a0e067d9a43492cf8e4e280b531924fbd724dbd"
 
 [patches]
-combined_diff_sha256 = "0f4695afa2c5fd19aac5aefb4a758700c3e9b82c670ea9c0e7aba57d273cb5c7"
-combined_diff_algorithm = "sha256 of: git diff --binary <upstream.commit> -- ."
+combined_diff_sha256 = "f5aedfee0a54f2850fb958c4119c38fea8331b7facfdc51febc4601953497786"
+combined_diff_algorithm = "sha256 of: git -c core.abbrev=40 diff --binary --full-index <upstream.commit> -- ."
 
 [[patches.files]]
 path = "patches/ek-731c4521.patch"
