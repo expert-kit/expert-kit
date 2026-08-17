@@ -510,15 +510,20 @@ for name, item in manifest["submodules"].items():
     print(f"{name}\t{item['path']}\t{item['commit']}")
 PY
   )
-  SUBMODULE_CONFIG=(-c protocol.file.allow=always)
   for row in "${SUBMODULE_ROWS[@]}"; do
     IFS=$'\t' read -r submodule_name submodule_path submodule_commit <<<"${row}"
     local_submodule="${SOURCE_DIR}/${submodule_path}"
     git -C "${local_submodule}" cat-file -e "${submodule_commit}^{commit}" 2>/dev/null ||
       die "source submodule is missing ${submodule_commit}: ${local_submodule}"
-    SUBMODULE_CONFIG+=(-c "submodule.${submodule_path}.url=${local_submodule}")
+    # Persist the override only in the isolated clone. A command-scoped `-c`
+    # URL is enough to copy objects but leaves the submodule marked inactive,
+    # which would make the status check below fail despite a correct checkout.
+    git -C "${SOURCE_TREE}" config \
+      "submodule.${submodule_path}.url" "${local_submodule}"
+    git -C "${SOURCE_TREE}" config \
+      "submodule.${submodule_path}.active" true
   done
-  git -C "${SOURCE_TREE}" "${SUBMODULE_CONFIG[@]}" \
+  git -C "${SOURCE_TREE}" -c protocol.file.allow=always \
     submodule update --init --recursive
 else
   git -C "${SOURCE_TREE}" submodule update --init --recursive
