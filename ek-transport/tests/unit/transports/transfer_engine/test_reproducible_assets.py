@@ -136,12 +136,29 @@ def test_manifest_pins_source_artifact_and_build_inputs() -> None:
     )
     assert {requirement for requirement, _hash in locked_requirements} == set(pins)
     assert len({digest for _requirement, digest in locked_requirements}) == len(pins)
+    assert manifest["toolchain"]["patchelf_package"] == "0.19.1.0"
+    assert manifest["toolchain"]["patchelf"] == "0.19.1"
+    assert (
+        "patchelf==0.19.1.0",
+        "a8f6331ccf40c345507279f755f4a38c2cb00b9efda746fd43c17713cce0aba4",
+    ) in locked_requirements
 
     build_script = (_MOONCAKE_ROOT / "build.sh").read_text(encoding="utf-8")
     assert "transport_uint_test" in build_script
     assert "--require-torch" in build_script
     assert "--require-hashes" in build_script
     assert "PIP_NO_INDEX=1" in build_script
+    assert 'export PATH="${BUILD_VENV}/bin:${PATH}"' in build_script
+    assert 'BUILD_PATCHELF="${BUILD_VENV}/bin/patchelf"' in build_script
+    assert 'check_exact "patchelf executable"' in build_script
+    assert 'check_exact "wheel-build patchelf executable"' in build_script
+    system_packages = re.search(
+        r"REQUIRED_UBUNTU_PACKAGES=\(\n(?P<body>.*?)\n\)",
+        build_script,
+        flags=re.DOTALL,
+    )
+    assert system_packages is not None
+    assert "patchelf" not in system_packages.group("body")
 
 
 def test_ordered_patch_hashes_match_the_manifest() -> None:
@@ -314,4 +331,5 @@ def test_build_script_is_fail_closed_and_publishes_an_atomic_bundle() -> None:
         "patchelf",
     ):
         assert package_name in readme
+    assert "`patchelf` is intentionally not a system prerequisite" in readme
     assert "BUNDLE-COMPLETE.sha256" in readme

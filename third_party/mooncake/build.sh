@@ -262,7 +262,7 @@ done
 
 for command_name in \
   git cmake ctest make gcc g++ ldd getconf sha256sum awk sed grep find \
-  patchelf pkg-config dpkg-query readelf basename dirname mkdir mktemp cp mv \
+  pkg-config dpkg-query readelf basename dirname mkdir mktemp cp mv \
   rmdir rm ls head uname tail; do
   command -v -- "${command_name}" >/dev/null ||
     die "required command not found: ${command_name}"
@@ -307,7 +307,6 @@ REQUIRED_UBUNTU_PACKAGES=(
   libyaml-cpp-dev
   libcurl4-openssl-dev
   pkg-config
-  patchelf
   libc6-dev
   libc-bin
 )
@@ -613,6 +612,27 @@ export PIP_FIND_LINKS="${PYTHON_WHEELHOUSE}"
   --requirement "${BUILD_LOCK}"
 "${BUILD_PYTHON}" -m pip check
 
+# auditwheel invokes patchelf as an external command. Keep that executable in
+# the same hash-pinned build environment and reject any fallback to the older
+# Ubuntu system binary.
+export PATH="${BUILD_VENV}/bin:${PATH}"
+BUILD_PATCHELF="${BUILD_VENV}/bin/patchelf"
+[[ -x "${BUILD_PATCHELF}" ]] ||
+  die "hashed build lock did not install an executable patchelf"
+check_exact "patchelf executable" "$(command -v -- patchelf)" "${BUILD_PATCHELF}"
+PATCHELF_PACKAGE_VERSION="$(
+  "${BUILD_PYTHON}" - <<'PY'
+import importlib.metadata
+
+print(importlib.metadata.version("patchelf"))
+PY
+)"
+check_exact "patchelf Python package" "${PATCHELF_PACKAGE_VERSION}" \
+  "$(manifest_scalar toolchain.patchelf_package)"
+PATCHELF_VERSION="$("${BUILD_PATCHELF}" --version | sed -n '1s/^patchelf //p')"
+check_exact "patchelf" "${PATCHELF_VERSION}" \
+  "$(manifest_scalar toolchain.patchelf)"
+
 YLT_GENERATOR="$(manifest_scalar yalantinglibs.generator)"
 YLT_BUILD_TYPE="$(manifest_scalar yalantinglibs.build_type)"
 readarray -t YLT_DEFINITIONS < <(manifest_array yalantinglibs.cmake_definitions)
@@ -718,6 +738,8 @@ PY
   unset CI FREE_BUILD_DIR
   unset NON_CUDA_BUILD CU13_BUILD NPU_BUILD EFA_BUILD EFA_NON_CUDA_BUILD MUSA_BUILD
   export PATH="${BUILD_VENV}/bin:${PATH}"
+  check_exact "wheel-build patchelf executable" "$(command -v -- patchelf)" \
+    "${BUILD_PATCHELF}"
   export BUILD_DIR="${RELATIVE_BUILD_DIR}"
   export PLATFORM_TAG="$(manifest_scalar artifact.platform_tag)"
   export PYTHON_VERSION="${WHEEL_PYTHON_VERSION}"

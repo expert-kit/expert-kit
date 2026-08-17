@@ -66,7 +66,7 @@ system administrator:
 build-essential cmake git
 libibverbs-dev libgoogle-glog-dev libgtest-dev libjsoncpp-dev
 libunwind-dev libnuma-dev libpython3-dev libssl-dev libyaml-cpp-dev
-libcurl4-openssl-dev pkg-config patchelf libc6-dev libc-bin
+libcurl4-openssl-dev pkg-config libc6-dev libc-bin
 ```
 
 This is the dependency set for the CMake profile in the manifest, not
@@ -74,6 +74,13 @@ Mooncake's larger all-feature package list. The script checks the package
 database, the selected CPython `Python.h`, and the required command versions
 before creating the build workspace. It never installs system packages or
 invokes a privilege-elevation tool.
+
+`patchelf` is intentionally not a system prerequisite. The hashed Python build
+lock supplies `patchelf==0.19.1.0` (CLI version 0.19.1) inside the isolated
+builder virtual environment. The script places that environment first on
+`PATH` and verifies the executable and both version forms before auditwheel is
+allowed to repair the wheel, so it cannot silently fall back to an older
+distribution-provided binary.
 
 CUDA must be the complete 12.8.61 toolkit. `/usr/local/cuda` must resolve to
 that toolkit, the `nvcc` selected from `PATH` (and `CUDA_HOME`, when already
