@@ -133,8 +133,9 @@ MOONCAKE_SOURCE_DIR=/path/to/mooncake
 
 The script first verifies that its manifest, constraints, scripts, and patches
 are tracked and byte-for-byte clean at the current Expert Kit commit. It then
-checks out the manifest revision, verifies and applies the ordered patches,
-and builds the pinned native package. When explicitly requested, `--install`
+fetches only the exact manifest revision (not the full upstream history),
+verifies and applies the ordered patches, and builds the pinned native package.
+When explicitly requested, `--install`
 installs that exact output with `--no-deps` into the already prepared virtual
 environment selected by `--python`, runs `pip check`, and performs a
 Torch-first ABI verification.

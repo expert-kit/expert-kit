@@ -487,7 +487,12 @@ if [[ -n "${SOURCE_DIR}" ]]; then
     die "--source-dir does not contain audited commit ${BASE_COMMIT}"
   git clone --no-hardlinks --no-checkout -- "${SOURCE_DIR}" "${SOURCE_TREE}"
 else
-  git clone --no-checkout -- "${SOURCE_URL}" "${SOURCE_TREE}"
+  # Fetch only the audited commit instead of transferring the complete
+  # upstream history. The explicit object ID remains the trust anchor, and the
+  # checkout below still verifies it before any patch is applied.
+  git init --quiet "${SOURCE_TREE}"
+  git -C "${SOURCE_TREE}" remote add origin "${SOURCE_URL}"
+  git -C "${SOURCE_TREE}" fetch --depth 1 --no-tags origin "${BASE_COMMIT}"
 fi
 git -C "${SOURCE_TREE}" checkout --detach "${BASE_COMMIT}"
 check_exact "Mooncake commit" \
