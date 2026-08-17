@@ -383,6 +383,27 @@ async def _close_writer(writer: asyncio.StreamWriter | None) -> None:
         await writer.wait_closed()
 
 
+async def _close_listener_control(
+    server: asyncio.Server | None,
+    writer: asyncio.StreamWriter | None,
+    pending_connections: asyncio.Queue[
+        tuple[asyncio.StreamReader, asyncio.StreamWriter]
+    ],
+) -> None:
+    """Close accepted streams before waiting for the listener to terminate."""
+
+    if server is not None:
+        server.close()
+    if writer is None:
+        with suppress(asyncio.QueueEmpty):
+            _reader, writer = pending_connections.get_nowait()
+    await _close_writer(writer)
+    if server is not None:
+        # Python 3.12 waits for active accepted connections here, so their
+        # writers must be closed first to avoid a circular wait.
+        await server.wait_closed()
+
+
 async def _connect(config: SmokeConfig, deadline: float) -> tuple[Any, Any]:
     last_error: OSError | None = None
     while True:
@@ -411,6 +432,24 @@ def _check_environment() -> None:
             "explicit Transfer Engine smoke forbids environment variables: "
             + ", ".join(enabled)
         )
+
+
+def _report_phase(config: SmokeConfig, phase: str) -> None:
+    """Emit a secret-free progress marker before or after blocking native work."""
+
+    print(
+        json.dumps(
+            {
+                "event": "phase",
+                "role": config.role,
+                "backend": config.backend,
+                "phase": phase,
+            },
+            sort_keys=True,
+        ),
+        file=sys.stderr,
+        flush=True,
+    )
 
 
 def _load_hardware(config: SmokeConfig) -> tuple[Any, Any]:
@@ -450,6 +489,7 @@ def _make_pattern(torch: Any, config: SmokeConfig) -> Any:
 
 
 async def _start_runtime(runtime: Any, config: SmokeConfig) -> None:
+    _report_phase(config, "runtime_start:start")
     await runtime.start()
     # start() queries the safety-patched binding's get_configured_backend() and
     # fails on a mismatch. Keep the explicit assertion visible in this smoke.
@@ -457,6 +497,7 @@ async def _start_runtime(runtime: Any, config: SmokeConfig) -> None:
         raise SmokeFailure(
             f"configured backend mismatch: expected {config.backend}, got {runtime.backend!r}"
         )
+    _report_phase(config, "runtime_start:done")
 
 
 async def _run_listener(config: SmokeConfig, deadline: float) -> dict[str, Any]:
@@ -480,13 +521,8 @@ async def _run_listener(config: SmokeConfig, deadline: float) -> dict[str, Any]:
         connections.put_nowait((reader, accepted_writer))
 
     try:
-        server = await asyncio.start_server(
-            accept,
-            config.control_endpoint.host,
-            config.control_endpoint.port,
-            limit=_CONTROL_LIMIT,
-        )
-        await _start_runtime(runtime, config)
+        # Allocate the CUDA region before Mooncake initializes, matching the
+        # proven production Worker arena lifecycle and allocator ordering.
         destination = torch.full(
             (config.elements,),
             -1.0,
@@ -494,16 +530,29 @@ async def _run_listener(config: SmokeConfig, deadline: float) -> dict[str, Any]:
             device=config.device,
         )
         torch.cuda.synchronize(config.device)
+        _report_phase(config, "cuda_buffer:ready")
+        server = await asyncio.start_server(
+            accept,
+            config.control_endpoint.host,
+            config.control_endpoint.port,
+            limit=_CONTROL_LIMIT,
+        )
+        await _start_runtime(runtime, config)
+        _report_phase(config, "register_memory:start")
         await runtime.register_tensor(destination, monotonic_deadline=deadline)
         registered = True
+        _report_phase(config, "register_memory:done")
+        _report_phase(config, "control_peer:wait")
         try:
             async with asyncio.timeout(_remaining(deadline)):
                 reader, writer = await connections.get()
         except TimeoutError as error:
             raise SmokeFailure("timed out waiting for the initiator") from error
         server.close()
-        await server.wait_closed()
-        server = None
+        # Do not await server.wait_closed() while the accepted writer is still
+        # active. Python 3.12 waits for that connection and would deadlock the
+        # control protocol before the target descriptor can be sent.
+        _report_phase(config, "control_peer:connected")
 
         hello = await _receive_message(reader, deadline)
         initiator_session = _validate_hello(hello, config)
@@ -522,10 +571,13 @@ async def _run_listener(config: SmokeConfig, deadline: float) -> dict[str, Any]:
         )
         await _send_message(writer, target, deadline)
         descriptor_exposed = True
+        _report_phase(config, "target:sent")
 
         complete = await _receive_message(reader, deadline)
         _validate_write_complete(complete, config)
+        _report_phase(config, "remote_write_acquire:start")
         await runtime.acquire_remote_writes(monotonic_deadline=deadline)
+        _report_phase(config, "remote_write_acquire:done")
         torch.cuda.synchronize(config.device)
         expected = _make_pattern(torch, config)
         mismatch_count = int(torch.count_nonzero(destination != expected).item())
@@ -547,20 +599,21 @@ async def _run_listener(config: SmokeConfig, deadline: float) -> dict[str, Any]:
             )
         return _success_report(config)
     finally:
-        if server is not None:
-            server.close()
-            await server.wait_closed()
-        await _close_writer(writer)
+        await _close_listener_control(server, writer, connections)
         if registered and destination is not None:
             if descriptor_exposed and not peer_invalidated:
                 runtime.quarantine(
                     "smoke listener lost remote-descriptor retirement acknowledgement"
                 )
             else:
+                _report_phase(config, "unregister_memory:start")
                 await runtime.unregister_tensor(
                     destination, monotonic_deadline=math.inf
                 )
+                _report_phase(config, "unregister_memory:done")
+        _report_phase(config, "runtime_close:start")
         await runtime.close()
+        _report_phase(config, "runtime_close:done")
 
 
 async def _run_initiator(config: SmokeConfig, deadline: float) -> dict[str, Any]:
@@ -571,12 +624,18 @@ async def _run_initiator(config: SmokeConfig, deadline: float) -> dict[str, Any]
     target_session: str | None = None
     remote_invalidated = False
     try:
-        await _start_runtime(runtime, config)
+        # Allocate before Mooncake initializes for the same reason as the
+        # listener destination and the production TransferArena slabs.
         source = _make_pattern(torch, config)
         torch.cuda.synchronize(config.device)
+        _report_phase(config, "cuda_buffer:ready")
+        await _start_runtime(runtime, config)
+        _report_phase(config, "register_memory:start")
         await runtime.register_tensor(source, monotonic_deadline=deadline)
         registered = True
+        _report_phase(config, "register_memory:done")
         reader, writer = await _connect(config, deadline)
+        _report_phase(config, "control_peer:connected")
         hello = _base_message(config, "hello")
         hello.update(
             {
@@ -592,7 +651,9 @@ async def _run_initiator(config: SmokeConfig, deadline: float) -> dict[str, Any]
         target_session, target_address = _validate_target(target, config)
         if target_session == runtime.session_id:
             raise SmokeFailure("both roles advertised the same Mooncake session")
+        _report_phase(config, "target:received")
 
+        _report_phase(config, "batch_write:start")
         await runtime.batch_write(
             target_session,
             [source],
@@ -600,17 +661,20 @@ async def _run_initiator(config: SmokeConfig, deadline: float) -> dict[str, Any]
             [config.elements * _ELEMENT_BYTES],
             monotonic_deadline=deadline,
         )
+        _report_phase(config, "batch_write:done")
         complete = _base_message(config, "write_complete")
         complete["bytes"] = config.elements * _ELEMENT_BYTES
         await _send_message(writer, complete, deadline)
         result = await _receive_message(reader, deadline)
         ok, mismatch_count = _validate_result(result, config)
 
+        _report_phase(config, "remote_invalidation:start")
         await runtime.invalidate_remote_session(
             target_session,
             monotonic_deadline=math.inf,
         )
         remote_invalidated = True
+        _report_phase(config, "remote_invalidation:done")
         acknowledgement = _base_message(config, "result_ack")
         acknowledgement["invalidated"] = True
         await _send_message(writer, acknowledgement, deadline)
@@ -637,8 +701,12 @@ async def _run_initiator(config: SmokeConfig, deadline: float) -> dict[str, Any]
                 )
         await _close_writer(writer)
         if registered and source is not None:
+            _report_phase(config, "unregister_memory:start")
             await runtime.unregister_tensor(source, monotonic_deadline=math.inf)
+            _report_phase(config, "unregister_memory:done")
+        _report_phase(config, "runtime_close:start")
         await runtime.close()
+        _report_phase(config, "runtime_close:done")
 
 
 def _success_report(config: SmokeConfig) -> dict[str, Any]:

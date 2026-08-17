@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import importlib.util
+import json
+import time
 from pathlib import Path
 
 import pytest
@@ -179,3 +182,155 @@ def test_forced_or_tent_environment_is_rejected(monkeypatch, variable: str) -> N
 
     with pytest.raises(smoke.SmokeFailure, match=variable):
         smoke._check_environment()
+
+
+def test_phase_marker_is_flushed_and_does_not_expose_endpoints_or_run_id(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    config = smoke._parse_config(_arguments("rdma"))
+
+    smoke._report_phase(config, "register_memory:start")
+
+    payload = json.loads(capsys.readouterr().err)
+    assert payload == {
+        "backend": "rdma",
+        "event": "phase",
+        "phase": "register_memory:start",
+        "role": "listener",
+    }
+    encoded = json.dumps(payload)
+    assert config.segment_name not in encoded
+    assert config.control_endpoint.host not in encoded
+    assert config.run_id not in encoded
+
+
+class _StopAtRuntimeStart(RuntimeError):
+    pass
+
+
+class _OrderingRuntime:
+    backend = "rdma"
+
+    def __init__(self, calls: list[str]) -> None:
+        self._calls = calls
+
+    async def start(self) -> None:
+        self._calls.append("runtime_start")
+        raise _StopAtRuntimeStart
+
+    async def close(self) -> None:
+        self._calls.append("runtime_close")
+
+
+class _OrderingCuda:
+    def __init__(self, calls: list[str]) -> None:
+        self._calls = calls
+
+    def synchronize(self, _device: str) -> None:
+        self._calls.append("cuda_synchronize")
+
+
+class _OrderingTorch:
+    float32 = object()
+
+    def __init__(self, calls: list[str]) -> None:
+        self._calls = calls
+        self.cuda = _OrderingCuda(calls)
+
+    def full(self, *_args: object, **_kwargs: object) -> object:
+        self._calls.append("cuda_allocate")
+        return object()
+
+
+class _OrderingServer:
+    def close(self) -> None:
+        pass
+
+    async def wait_closed(self) -> None:
+        pass
+
+
+def test_listener_closes_accepted_writer_before_waiting_for_server() -> None:
+    events: list[str] = []
+
+    class Writer:
+        closed = False
+
+        def close(self) -> None:
+            events.append("writer_close")
+            self.closed = True
+
+        async def wait_closed(self) -> None:
+            events.append("writer_wait_closed")
+
+    writer = Writer()
+
+    class Server:
+        def close(self) -> None:
+            events.append("server_close")
+
+        async def wait_closed(self) -> None:
+            assert writer.closed
+            events.append("server_wait_closed")
+
+    connections: asyncio.Queue[tuple[object, object]] = asyncio.Queue()
+    asyncio.run(smoke._close_listener_control(Server(), writer, connections))
+
+    assert events == [
+        "server_close",
+        "writer_close",
+        "writer_wait_closed",
+        "server_wait_closed",
+    ]
+
+
+def test_listener_allocates_cuda_region_before_runtime_start(monkeypatch) -> None:
+    calls: list[str] = []
+    config = smoke._parse_config(_arguments("rdma"))
+    torch = _OrderingTorch(calls)
+    runtime = _OrderingRuntime(calls)
+
+    async def start_server(*_args: object, **_kwargs: object) -> _OrderingServer:
+        calls.append("control_server_start")
+        return _OrderingServer()
+
+    monkeypatch.setattr(smoke, "_load_hardware", lambda _config: (torch, runtime))
+    monkeypatch.setattr(smoke.asyncio, "start_server", start_server)
+
+    with pytest.raises(_StopAtRuntimeStart):
+        asyncio.run(smoke._run_listener(config, time.monotonic() + 10))
+
+    assert calls == [
+        "cuda_allocate",
+        "cuda_synchronize",
+        "control_server_start",
+        "runtime_start",
+        "runtime_close",
+    ]
+
+
+def test_initiator_allocates_cuda_region_before_runtime_start(monkeypatch) -> None:
+    calls: list[str] = []
+    arguments = _arguments("rdma")
+    arguments[arguments.index("listener")] = "initiator"
+    arguments[arguments.index("listener.test:46000")] = "initiator.test:46000"
+    config = smoke._parse_config(arguments)
+    torch = _OrderingTorch(calls)
+    runtime = _OrderingRuntime(calls)
+
+    def make_pattern(_torch: object, _config: smoke.SmokeConfig) -> object:
+        calls.append("cuda_allocate")
+        return object()
+
+    monkeypatch.setattr(smoke, "_load_hardware", lambda _config: (torch, runtime))
+    monkeypatch.setattr(smoke, "_make_pattern", make_pattern)
+
+    with pytest.raises(_StopAtRuntimeStart):
+        asyncio.run(smoke._run_initiator(config, time.monotonic() + 10))
+
+    assert calls == [
+        "cuda_allocate",
+        "cuda_synchronize",
+        "runtime_start",
+        "runtime_close",
+    ]
