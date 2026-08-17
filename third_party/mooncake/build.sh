@@ -685,7 +685,7 @@ readarray -t ENGINE_FLAG_FILES < <(
 )
 ((${#ENGINE_FLAG_FILES[@]} == 1)) ||
   die "expected exactly one generated engine flags.make; found ${#ENGINE_FLAG_FILES[@]}"
-grep -Eq '(^|[^A-Z0-9_])USE_RDMA([^A-Z0-9_]|$)' "${ENGINE_FLAG_FILES[0]}" ||
+grep -Eq '(^|[[:space:]])-DUSE_RDMA([[:space:]]|$)' "${ENGINE_FLAG_FILES[0]}" ||
   die "engine compile flags do not contain USE_RDMA"
 
 cmake --build "${CMAKE_BUILD_DIR}" --parallel "${JOBS}"

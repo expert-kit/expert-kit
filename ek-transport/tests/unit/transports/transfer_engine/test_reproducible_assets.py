@@ -295,6 +295,7 @@ def test_build_script_is_fail_closed_and_publishes_an_atomic_bundle() -> None:
     assert "--install requires --python to belong to a virtual environment" in build_script
     assert 'CUDA_LINK="/usr/local/cuda"' in build_script
     assert "CMAKE_CUDA_COMPILER:[^=]*=" in build_script
+    assert "-DUSE_RDMA([[:space:]]|$)" in build_script
     assert "--work-dir must be outside the Expert Kit Git worktree" in build_script
     assert "input_assets_clean_against_commit" in build_script
     assert "build_script_sha256" in build_script
