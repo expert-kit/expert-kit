@@ -662,7 +662,7 @@ for definition in "CMAKE_BUILD_TYPE=${BUILD_TYPE}" "${CMAKE_DEFINITIONS[@]}"; do
     die "CMake cache does not contain audited setting ${definition}"
 done
 
-CONFIGURED_NVCC="$(sed -n 's/^CMAKE_CUDA_COMPILER:FILEPATH=//p' "${CMAKE_CACHE}")"
+CONFIGURED_NVCC="$(sed -n 's/^CMAKE_CUDA_COMPILER:[^=]*=//p' "${CMAKE_CACHE}")"
 [[ -x "${CONFIGURED_NVCC}" ]] || die "CMake did not configure an executable CUDA compiler"
 check_exact "configured nvcc toolkit" "$(abspath "${CONFIGURED_NVCC}")" \
   "$(abspath "${CUDA_LINK_NVCC}")"
