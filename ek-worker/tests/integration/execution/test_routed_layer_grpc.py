@@ -23,6 +23,7 @@ from expertkit_transport.transports.grpc import (
 )
 
 from expertkit_worker.backends.torch import TorchBackend, TorchExpertWeights
+from expertkit_worker.control import WorkerRuntimeIdentity
 from expertkit_worker.execution import WorkerExecutor
 from expertkit_worker.weights import ReadyWeightTable
 
@@ -131,6 +132,7 @@ async def _start_worker(
         server,
         backend,
         instance_id=_INSTANCE_ID,
+        identity=WorkerRuntimeIdentity(worker_id, f"{worker_id}-start"),
         buffer_config=BatchBufferConfig(
             max_batch_tokens=_MAX_BATCH_TOKENS,
             hidden_dim=_HIDDEN_DIM,

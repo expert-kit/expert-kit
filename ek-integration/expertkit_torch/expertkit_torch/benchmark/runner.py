@@ -9,6 +9,7 @@ from dataclasses import asdict, dataclass
 from typing import Any
 
 import torch
+from expertkit_transport import frontend_request_span
 
 _FIXED_INPUT_TEXT = "Expert Kit routed mixture of experts benchmark input"
 
@@ -167,6 +168,31 @@ def _synchronize(device: torch.device) -> None:
 
 
 def _measure_generation(
+    model: Any,
+    tokenizer: Any,
+    input_ids: torch.Tensor,
+    *,
+    output_length: int,
+    clock: Callable[[], float],
+    synchronize: Callable[[torch.device], None],
+) -> RunMetrics:
+    attributes = {
+        "expertkit.batch_size": int(input_ids.shape[0]),
+        "expertkit.input_length": int(input_ids.shape[1]),
+        "expertkit.output_length": output_length,
+    }
+    with frontend_request_span(attributes=attributes):
+        return _measure_generation_body(
+            model,
+            tokenizer,
+            input_ids,
+            output_length=output_length,
+            clock=clock,
+            synchronize=synchronize,
+        )
+
+
+def _measure_generation_body(
     model: Any,
     tokenizer: Any,
     input_ids: torch.Tensor,

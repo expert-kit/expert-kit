@@ -72,6 +72,25 @@ def test_forwards_final_assignments_once_with_wire_dtypes(monkeypatch) -> None:
     assert transport.closed is True
 
 
+def test_close_flushes_frontend_spans_after_transport_cleanup(monkeypatch) -> None:
+    events: list[str] = []
+
+    class OrderedTransport(FakeTransport):
+        def close(self) -> None:
+            events.append("transport.close")
+            super().close()
+
+    monkeypatch.setattr(client, "BlockingRoutedMoEClient", OrderedTransport)
+    monkeypatch.setattr(client, "flush_tracing", lambda: events.append("tracing.flush"))
+    routed = routed_client()
+    routed.start(device="cpu", dtype=torch.float32)
+
+    routed.close()
+    routed.close()
+
+    assert events == ["transport.close", "tracing.flush"]
+
+
 def test_reuses_one_transport_and_rejects_a_dtype_change(monkeypatch) -> None:
     FakeTransport.instances.clear()
     monkeypatch.setattr(client, "BlockingRoutedMoEClient", FakeTransport)

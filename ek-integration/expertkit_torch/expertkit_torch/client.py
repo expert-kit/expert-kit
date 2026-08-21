@@ -6,7 +6,12 @@ import math
 import threading
 
 import torch
-from expertkit_transport import BlockingRoutedMoEClient, validate_and_convert_routing
+from expertkit_transport import (
+    BlockingRoutedMoEClient,
+    flush_tracing,
+    validate_and_convert_routing,
+)
+from expertkit_transport.tracing import get_frontend_tracer, trace_span
 
 
 class RoutedMoEClient:
@@ -55,6 +60,7 @@ class RoutedMoEClient:
         self._top_k = top_k
         self._timeout_seconds = timeout_seconds
         self._transport: BlockingRoutedMoEClient | None = None
+        self._tracer = get_frontend_tracer()
         self._device: torch.device | None = None
         self._dtype: torch.dtype | None = None
         self._lock = threading.Lock()
@@ -125,22 +131,29 @@ class RoutedMoEClient:
         ):
             raise ValueError("all Routed-MoE tensors must use the activation device")
 
-        encoded_experts, fp32_weights, distinct_expert_ids = validate_and_convert_routing(
-            expert_ids,
-            routing_weights,
-            experts_per_layer=self._experts_per_layer,
-        )
-        self.start(device=hidden_states.device, dtype=hidden_states.dtype)
-        transport = self._transport
-        assert transport is not None
-        return transport.execute(
-            layer_id=layer_id,
-            hidden_states=hidden_states,
-            expert_ids=encoded_experts,
-            routing_weights=fp32_weights,
-            distinct_expert_ids=distinct_expert_ids,
-            timeout_seconds=self._timeout_seconds,
-        )
+        attributes = {
+            "expertkit.layer_id": layer_id,
+            "expertkit.token_count": int(hidden_states.shape[0]),
+            "expertkit.assignment_count": int(hidden_states.shape[0]) * self._top_k,
+        }
+        with trace_span(self._tracer, "frontend.layer", attributes=attributes):
+            with trace_span(self._tracer, "frontend.decompose", attributes=attributes):
+                encoded_experts, fp32_weights, distinct_expert_ids = validate_and_convert_routing(
+                    expert_ids,
+                    routing_weights,
+                    experts_per_layer=self._experts_per_layer,
+                )
+            self.start(device=hidden_states.device, dtype=hidden_states.dtype)
+            transport = self._transport
+            assert transport is not None
+            return transport.execute(
+                layer_id=layer_id,
+                hidden_states=hidden_states,
+                expert_ids=encoded_experts,
+                routing_weights=fp32_weights,
+                distinct_expert_ids=distinct_expert_ids,
+                timeout_seconds=self._timeout_seconds,
+            )
 
     def close(self) -> None:
         """Close Transport resources; repeated calls are safe."""
@@ -151,5 +164,8 @@ class RoutedMoEClient:
             self._closed = True
             transport = self._transport
             self._transport = None
-        if transport is not None:
-            transport.close()
+        try:
+            if transport is not None:
+                transport.close()
+        finally:
+            flush_tracing()

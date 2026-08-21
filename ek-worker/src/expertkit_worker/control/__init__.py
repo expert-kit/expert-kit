@@ -5,7 +5,9 @@ from expertkit_worker.control.lifecycle import (
     HeartbeatSender,
     RegistrationResult,
     WorkerRegistration,
+    WorkerRuntimeIdentity,
     new_start_id,
+    new_worker_runtime_identity,
 )
 from expertkit_worker.control.parts import (
     DrainAuthorization,
@@ -33,5 +35,7 @@ __all__ = [
     "WeightControlDrainError",
     "WeightControlSession",
     "WorkerRegistration",
+    "WorkerRuntimeIdentity",
     "new_start_id",
+    "new_worker_runtime_identity",
 ]

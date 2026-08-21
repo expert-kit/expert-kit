@@ -16,6 +16,7 @@ from expertkit_transport.controller.instance import resolve_default_instance
 from expertkit_transport.controller.topology import ControllerTopologyWatcher
 from expertkit_transport.errors import TransportError, TransportErrorCode
 from expertkit_transport.routing import RoundRobinSelector, execute_routed_layer
+from expertkit_transport.tracing import Tracer, get_frontend_tracer
 
 _RESULT_GRACE_SECONDS = 0.1
 
@@ -78,6 +79,7 @@ class RoutedMoEClient:
         self._clock = clock
         self._topology: ControllerTopologyWatcher | None = None
         self._selector = RoundRobinSelector()
+        self._tracer: Tracer | None = get_frontend_tracer()
         self._started = False
         self._closed = False
 
@@ -172,6 +174,7 @@ class RoutedMoEClient:
             monotonic_deadline=monotonic_deadline,
             same_worker_retry_delay_seconds=self._same_worker_retry_delay_seconds,
             clock=self._clock,
+            tracer=self._tracer,
         )
 
     async def close(self) -> None:

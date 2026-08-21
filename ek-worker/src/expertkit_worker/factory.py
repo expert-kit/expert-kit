@@ -12,6 +12,7 @@ from expertkit_transport.controller import (
     ResolvedDefaultInstance,
     resolve_default_instance,
 )
+from expertkit_transport.tracing import trace_span
 from expertkit_transport.transports.base import (
     BatchBufferConfig,
     WorkerBatchReceiver,
@@ -35,6 +36,7 @@ from expertkit_worker.config import (
 )
 from expertkit_worker.control import (
     ExpertStateReporter,
+    new_worker_runtime_identity,
 )
 from expertkit_worker.control.factory import create_controller_supervisor
 from expertkit_worker.execution import WorkerExecutor
@@ -104,6 +106,7 @@ async def build_worker_application(
         timeout_seconds=config.controller.heartbeat_timeout_secs,
     )
     instance_id = resolved_instance.instance_id
+    identity = new_worker_runtime_identity(config.worker.id)
     activation_dtype = torch_dtype(config.model.activation_dtype)
     weight_dtype = torch_dtype(config.model.weight_dtype)
     device = torch.device(config.worker.device)
@@ -112,7 +115,7 @@ async def build_worker_application(
 
     observability = create_observability(
         config.observability,
-        worker_id=config.worker.id,
+        identity=identity,
     )
     metrics = observability.metrics
     receiver: WorkerBatchReceiver | None = None
@@ -170,7 +173,17 @@ async def build_worker_application(
             current = manager_holder[0]
             if current is None:
                 raise RuntimeError("Weight Manager is not installed in the selected Backend")
-            return current.acquire_many(layer_id, expert_ids)
+            with trace_span(
+                observability.tracer,
+                "worker.load_expert",
+                attributes={
+                    "expertkit.layer_id": layer_id,
+                    "expertkit.expert_ids": ",".join(str(expert_id) for expert_id in expert_ids),
+                    "expertkit.worker_id": identity.worker_id,
+                    "expertkit.worker_start_id": identity.start_id,
+                },
+            ):
+                return current.acquire_many(layer_id, expert_ids)
 
         backend = create_compute_backend(
             config,
@@ -189,6 +202,7 @@ async def build_worker_application(
             receiver,
             backend,
             instance_id=instance_id,
+            identity=identity,
             buffer_config=buffer_config,
             slot_count=config.worker.max_active_batches_per_device,
             metrics=metrics,
@@ -240,6 +254,7 @@ async def build_worker_application(
 
         control = create_controller_supervisor(
             config,
+            identity=identity,
             instance_id=instance_id,
             activation_dtype=activation_dtype,
             receiver=receiver,

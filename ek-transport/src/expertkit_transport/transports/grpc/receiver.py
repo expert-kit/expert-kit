@@ -20,7 +20,12 @@ from expertkit_transport.errors import (
     TransportErrorCode,
     TransportProtocolError,
 )
-from expertkit_transport.tracing import TraceContext, Tracer, TraceSpan
+from expertkit_transport.tracing import (
+    TraceContext,
+    Tracer,
+    TraceSpan,
+    incoming_trace_context,
+)
 from expertkit_transport.transports.base import (
     BatchBufferConfig,
     ReceivedBatch,
@@ -93,6 +98,10 @@ class _GrpcReceivedBatch(ReceivedBatch):
         self.response: asyncio.Future[bytes] = asyncio.get_running_loop().create_future()
 
     @property
+    def transport_name(self) -> str:
+        return "grpc"
+
+    @property
     def trace_context(self) -> TraceContext | None:
         return self._trace_context
 
@@ -136,7 +145,7 @@ class _GrpcReceivedBatch(ReceivedBatch):
         if self._wait_span is not None:
             raise RuntimeError("gRPC waiting span is already active")
         self._wait_span = tracer.start_span(
-            "worker.request.wait",
+            "worker.queue_wait",
             context=self._trace_context,
             attributes=_batch_trace_attributes(self.batch),
         )
@@ -347,11 +356,12 @@ class GrpcWorkerBatchReceiver(WorkerBatchReceiver):
         if self._closing:
             self._record_rejection(TransportErrorCode.UNAVAILABLE.value)
             await context.abort(grpc.StatusCode.UNAVAILABLE, "Worker is shutting down")
-        trace_enabled = self._tracer is not None and self._tracer.current_span_is_recording()
-        trace_context = self._tracer.capture_context() if trace_enabled else None
+        trace_context = incoming_trace_context(self._tracer, context.invocation_metadata())
+        trace_enabled = trace_context is not None
         try:
             with self._trace_span(
-                "worker.request.decode",
+                "worker.request_decode",
+                context=trace_context,
                 attributes={"expertkit.request_bytes": len(payload)},
                 enabled=trace_enabled,
             ) as span:
@@ -377,7 +387,11 @@ class GrpcWorkerBatchReceiver(WorkerBatchReceiver):
         rejection = await self._admit(item)
         if rejection is not None:
             self._record_rejection(rejection.code.value)
-            with self._trace_span("worker.response.encode", enabled=trace_enabled):
+            with self._trace_span(
+                "worker.response_encode",
+                context=trace_context,
+                enabled=trace_enabled,
+            ):
                 return await self._run_cpu(encode_error_response, rejection, self._spec)
 
         try:
@@ -426,7 +440,7 @@ class GrpcWorkerBatchReceiver(WorkerBatchReceiver):
                 if partial_output.ndim != 2 or partial_output.shape[0] != item.token_count:
                     raise ValueError("partial output token count does not match the received batch")
                 with self._trace_span(
-                    "worker.response.encode",
+                    "worker.response_encode",
                     enabled=item.trace_context is not None,
                 ):
                     payload = await self._run_cpu(
@@ -454,7 +468,7 @@ class GrpcWorkerBatchReceiver(WorkerBatchReceiver):
                 status = _NATIVE_ERROR_STATUS.get(error.code)
                 if status is None:
                     with self._trace_span(
-                        "worker.response.encode",
+                        "worker.response_encode",
                         enabled=item.trace_context is not None,
                     ):
                         payload = await self._run_cpu(
@@ -494,12 +508,17 @@ class GrpcWorkerBatchReceiver(WorkerBatchReceiver):
         self,
         name: str,
         *,
+        context: TraceContext | None = None,
         attributes: dict[str, str | int] | None = None,
         enabled: bool = True,
     ) -> Any:
         if self._tracer is None or not enabled:
             return nullcontext(None)
-        return self._tracer.start_as_current_span(name, attributes=attributes)
+        return self._tracer.start_as_current_span(
+            name,
+            context=context,
+            attributes=attributes,
+        )
 
     def _record_rejection(self, reason: str) -> None:
         with suppress(Exception):

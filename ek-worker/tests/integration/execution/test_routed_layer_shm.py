@@ -10,6 +10,7 @@ from expertkit_transport.transports.base import BatchBufferConfig
 from expertkit_transport.transports.shm import ShmWorkerBatchReceiver, ShmWorkerTransport
 
 from expertkit_worker.backends.torch import TorchBackend, TorchExpertWeights
+from expertkit_worker.control import WorkerRuntimeIdentity
 from expertkit_worker.execution import WorkerExecutor
 from expertkit_worker.weights import ReadyWeightTable
 
@@ -75,6 +76,7 @@ def test_worker_execution_uses_shared_input_and_output_destinations() -> None:
             server,
             backend,
             instance_id=7,
+            identity=WorkerRuntimeIdentity("worker-shm", "worker-shm-start"),
             buffer_config=BatchBufferConfig(4, _HIDDEN_DIM, 2, torch.float32, "cpu"),
             slot_count=1,
         )

@@ -28,6 +28,7 @@ from expertkit_worker.backends import (
     InvalidBackendInput,
     UnsupportedBackendBatch,
 )
+from expertkit_worker.control.lifecycle import WorkerRuntimeIdentity
 from expertkit_worker.execution.slot import ExecutionResult, ExecutionSlot
 from expertkit_worker.observability.api import NoopWorkerMetrics, WorkerMetrics
 
@@ -70,6 +71,7 @@ class WorkerExecutor:
         backend: ComputeBackend,
         *,
         instance_id: int,
+        identity: WorkerRuntimeIdentity,
         buffer_config: BatchBufferConfig,
         slot_count: int,
         clock: Callable[[], float] = time.monotonic,
@@ -80,6 +82,8 @@ class WorkerExecutor:
             raise ValueError("instance_id must be a positive integer")
         if isinstance(slot_count, bool) or not isinstance(slot_count, int) or slot_count <= 0:
             raise ValueError("slot_count must be a positive integer")
+        if not isinstance(identity, WorkerRuntimeIdentity):
+            raise TypeError("identity must be a WorkerRuntimeIdentity")
         backend.capabilities.validate_runtime(
             max_batch_tokens=buffer_config.max_batch_tokens,
             active_batches=slot_count,
@@ -88,6 +92,7 @@ class WorkerExecutor:
         self._receiver = receiver
         self._backend = backend
         self._instance_id = instance_id
+        self._identity = identity
         self._clock = clock
         self._metrics = metrics or NoopWorkerMetrics()
         self._tracer = tracer
@@ -217,11 +222,17 @@ class WorkerExecutor:
             "expertkit.topology_version": batch.topology_version,
             "expertkit.token_count": batch.token_count,
             "expertkit.assignment_count": batch.token_count * batch.top_k,
+            "expertkit.expert_ids": ",".join(
+                str(expert_id) for expert_id in batch.distinct_expert_ids
+            ),
+            "expertkit.worker_id": self._identity.worker_id,
+            "expertkit.worker_start_id": self._identity.start_id,
+            "expertkit.transport": received.transport_name,
             "expertkit.backend": type(self._backend).__name__,
             "expertkit.device": str(slot.device),
         }
         span_context = self._tracer.start_as_current_span(
-            "worker.batch.execute",
+            "worker.forward",
             context=received.trace_context,
             attributes=attributes,
         )

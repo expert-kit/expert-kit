@@ -3,12 +3,13 @@
 import asyncio
 import time
 from collections.abc import Awaitable, Callable
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, contextmanager
 
 import grpc
 import pytest
 import torch
 
+import expertkit_transport.transports.grpc.client as grpc_client_module
 from expertkit_transport.batches import WorkerBatch
 from expertkit_transport.errors import TransportError, TransportErrorCode
 from expertkit_transport.transports import WorkerEndpointConfig
@@ -112,6 +113,55 @@ def test_client_compacts_request_and_fills_preallocated_output() -> None:
             await client.close()
 
     run(scenario())
+
+
+def test_client_records_real_stages_and_propagates_traceparent(monkeypatch) -> None:
+    stages: list[str] = []
+    span_attributes: dict[str, dict[str, object]] = {}
+    metadata: dict[str, str] = {}
+
+    @contextmanager
+    def record_span(_tracer: object, name: str, **kwargs: object):
+        stages.append(name)
+        span_attributes[name] = dict(kwargs.get("attributes") or {})  # type: ignore[arg-type]
+        yield None
+
+    monkeypatch.setattr(grpc_client_module, "get_frontend_tracer", object)
+    monkeypatch.setattr(grpc_client_module, "trace_span", record_span)
+    monkeypatch.setattr(
+        grpc_client_module,
+        "current_trace_metadata",
+        lambda: (("traceparent", "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01"),),
+    )
+
+    async def scenario() -> None:
+        async def execute(payload: bytes, context: grpc.aio.ServicerContext) -> bytes:
+            metadata.update(dict(context.invocation_metadata()))
+            source = decode_request(payload, batch_spec())
+            return encode_success_response(source.hidden_states, batch_spec())
+
+        async with raw_server(execute) as endpoint:
+            client = GrpcWorkerTransport(endpoint, batch_spec(), max_in_flight=1, device="cpu")
+            await client.start()
+            try:
+                await client.execute(
+                    worker_batch(),
+                    prepare_output(client),
+                    monotonic_deadline=float("inf"),
+                )
+            finally:
+                await client.close()
+
+    run(scenario())
+
+    assert stages == [
+        "frontend.tensor_slice",
+        "frontend.serialize",
+        "frontend.send_worker",
+        "frontend.deserialize",
+    ]
+    assert span_attributes["frontend.send_worker"]["expertkit.transport"] == "grpc"
+    assert metadata["traceparent"].startswith("00-0123456789abcdef")
 
 
 def test_client_maps_structured_computation_error() -> None:
