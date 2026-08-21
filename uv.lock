@@ -868,6 +868,7 @@ ggml = [
     { name = "expertkit-worker", extra = ["ggml"] },
 ]
 observability = [
+    { name = "expertkit-transport", extra = ["observability"] },
     { name = "expertkit-worker", extra = ["observability"] },
 ]
 vllm = [
@@ -891,6 +892,7 @@ requires-dist = [
     { name = "expertkit-proto", editable = "ek-proto" },
     { name = "expertkit-torch", editable = "ek-integration/expertkit_torch" },
     { name = "expertkit-transport", editable = "ek-transport" },
+    { name = "expertkit-transport", extras = ["observability"], marker = "extra == 'observability'", editable = "ek-transport" },
     { name = "expertkit-vllm", marker = "extra == 'vllm'", editable = "ek-integration/expertkit_vllm" },
     { name = "expertkit-worker", editable = "ek-worker" },
     { name = "expertkit-worker", extras = ["fused"], marker = "extra == 'fused'", editable = "ek-worker" },
@@ -955,14 +957,23 @@ dependencies = [
     { name = "torch" },
 ]
 
+[package.optional-dependencies]
+observability = [
+    { name = "opentelemetry-exporter-otlp-proto-grpc" },
+    { name = "opentelemetry-sdk" },
+]
+
 [package.metadata]
 requires-dist = [
     { name = "expertkit-proto", editable = "ek-proto" },
     { name = "grpcio", specifier = "==1.71.0" },
     { name = "numpy", specifier = ">=2.1,<3" },
+    { name = "opentelemetry-exporter-otlp-proto-grpc", marker = "extra == 'observability'", specifier = "==1.39.1" },
+    { name = "opentelemetry-sdk", marker = "extra == 'observability'", specifier = "==1.39.1" },
     { name = "protobuf", specifier = "==5.29.6" },
     { name = "torch", specifier = "==2.11.0" },
 ]
+provides-extras = ["observability"]
 
 [[package]]
 name = "expertkit-vllm"

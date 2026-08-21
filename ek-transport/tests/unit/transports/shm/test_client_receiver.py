@@ -2,12 +2,14 @@
 
 import asyncio
 import time
+from contextlib import contextmanager
 from dataclasses import replace
 
 import grpc
 import pytest
 import torch
 
+import expertkit_transport.transports.shm.client as shm_client_module
 from expertkit_transport.batches import WorkerBatch
 from expertkit_transport.errors import TransportError, TransportErrorCode
 from expertkit_transport.transports import WorkerEndpointConfig
@@ -99,6 +101,66 @@ def test_shared_memory_path_compacts_and_returns_without_tensor_payloads() -> No
             await server.close()
 
     asyncio.run(scenario())
+
+
+def test_shared_memory_records_stages_and_propagates_traceparent(monkeypatch) -> None:
+    stages: list[str] = []
+    span_attributes: dict[str, dict[str, object]] = {}
+    metadata: dict[str, str] = {}
+
+    @contextmanager
+    def record_span(_tracer: object, name: str, **kwargs: object):
+        stages.append(name)
+        span_attributes[name] = dict(kwargs.get("attributes") or {})  # type: ignore[arg-type]
+        yield None
+
+    monkeypatch.setattr(shm_client_module, "get_frontend_tracer", object)
+    monkeypatch.setattr(shm_client_module, "trace_span", record_span)
+    monkeypatch.setattr(
+        shm_client_module,
+        "current_trace_metadata",
+        lambda: (("traceparent", "00-0123456789abcdef0123456789abcdef-0123456789abcdef-01"),),
+    )
+    original_execute = ShmWorkerBatchReceiver._execute_shared_memory
+
+    async def capture(
+        receiver: ShmWorkerBatchReceiver,
+        payload: bytes,
+        context: grpc.aio.ServicerContext,
+    ) -> bytes:
+        metadata.update(dict(context.invocation_metadata()))
+        return await original_execute(receiver, payload, context)
+
+    monkeypatch.setattr(ShmWorkerBatchReceiver, "_execute_shared_memory", capture)
+
+    async def scenario() -> None:
+        server, client = await start_pair()
+        output = prepare(client)
+        try:
+            submission = asyncio.create_task(
+                client.execute(batch(), output, monotonic_deadline=time.monotonic() + 5)
+            )
+            received = await server.receive()
+            destination = received.output_destination
+            assert destination is not None
+            destination.copy_(received.batch.hidden_states)
+            received.release_input()
+            await received.complete(destination)
+            await submission
+        finally:
+            await client.close()
+            await server.close()
+
+    asyncio.run(scenario())
+
+    assert stages == [
+        "frontend.tensor_slice",
+        "frontend.serialize",
+        "frontend.send_worker",
+        "frontend.deserialize",
+    ]
+    assert span_attributes["frontend.send_worker"]["expertkit.transport"] == "shm"
+    assert metadata["traceparent"].startswith("00-0123456789abcdef")
 
 
 def test_worker_revalidates_routing_values_from_shared_memory() -> None:

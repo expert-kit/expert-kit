@@ -12,6 +12,7 @@ from expertkit_transport.buffers import OutputPool
 from expertkit_transport.errors import TransportError
 from expertkit_transport.routing.grouping import WorkerBatchPlan
 from expertkit_transport.routing.topology import WorkerIdentity
+from expertkit_transport.tracing import Tracer, trace_span
 
 
 @dataclass(frozen=True, slots=True)
@@ -47,24 +48,33 @@ async def _dispatch_plan(
     pool: OutputPool,
     accumulator: torch.Tensor,
     monotonic_deadline: float,
+    *,
+    tracer: Tracer | None,
+    attempt: int,
 ) -> FailedWorkerBatch | None:
     try:
-        async with pool.lease(monotonic_deadline=monotonic_deadline) as lease:
-            await plan.target.transport.execute(
-                plan.batch,
-                lease.tensor[: plan.batch.token_count],
-                monotonic_deadline=monotonic_deadline,
-            )
-            partial = lease.tensor[: plan.batch.token_count]
-            token_indices = plan.batch.token_indices
-            if token_indices is None:
-                token_indices = torch.arange(
-                    plan.batch.token_count,
-                    dtype=torch.int64,
-                    device=accumulator.device,
+        with trace_span(
+            tracer,
+            "frontend.worker_batch",
+            attributes=_plan_attributes(plan, attempt),
+        ):
+            async with pool.lease(monotonic_deadline=monotonic_deadline) as lease:
+                await plan.target.transport.execute(
+                    plan.batch,
+                    lease.tensor[: plan.batch.token_count],
+                    monotonic_deadline=monotonic_deadline,
                 )
-            accumulator.index_add_(0, token_indices, partial.to(torch.float32))
-            lease.mark_consumed()
+                partial = lease.tensor[: plan.batch.token_count]
+                token_indices = plan.batch.token_indices
+                if token_indices is None:
+                    token_indices = torch.arange(
+                        plan.batch.token_count,
+                        dtype=torch.int64,
+                        device=accumulator.device,
+                    )
+                with trace_span(tracer, "frontend.merge"):
+                    accumulator.index_add_(0, token_indices, partial.to(torch.float32))
+                lease.mark_consumed()
     except TransportError as error:
         return FailedWorkerBatch(plan=plan, error=error)
     return None
@@ -74,6 +84,8 @@ async def dispatch_complete_plan(
     plan: WorkerBatchPlan,
     *,
     monotonic_deadline: float,
+    tracer: Tracer | None = None,
+    attempt: int = 1,
 ) -> tuple[torch.Tensor | None, FailedWorkerBatch | None]:
     """Return one complete Worker result without FP32 scatter aggregation."""
 
@@ -82,11 +94,16 @@ async def dispatch_complete_plan(
         raise ValueError("a complete Worker plan must select every source token")
     result = torch.empty_like(batch.hidden_states)
     try:
-        await plan.target.transport.execute(
-            batch,
-            result,
-            monotonic_deadline=monotonic_deadline,
-        )
+        with trace_span(
+            tracer,
+            "frontend.worker_batch",
+            attributes=_plan_attributes(plan, attempt),
+        ):
+            await plan.target.transport.execute(
+                batch,
+                result,
+                monotonic_deadline=monotonic_deadline,
+            )
     except TransportError as error:
         return None, FailedWorkerBatch(plan=plan, error=error)
     return result, None
@@ -98,6 +115,8 @@ async def dispatch_once(
     accumulator: torch.Tensor,
     *,
     monotonic_deadline: float,
+    tracer: Tracer | None = None,
+    attempt: int = 1,
 ) -> tuple[FailedWorkerBatch, ...]:
     """Dispatch every physical batch once and add successes exactly once.
 
@@ -129,9 +148,28 @@ async def dispatch_once(
             pool,
             accumulator,
             monotonic_deadline,
+            tracer=tracer,
+            attempt=attempt,
         )
 
     async with asyncio.TaskGroup() as tasks:
         for index, plan in enumerate(plans):
             tasks.create_task(run(index, plan))
     return tuple(failure for failure in failures if failure is not None)
+
+
+def _plan_attributes(plan: WorkerBatchPlan, attempt: int) -> dict[str, str | int]:
+    batch = plan.batch
+    identity = plan.target.identity
+    return {
+        "expertkit.instance_id": batch.instance_id,
+        "expertkit.layer_id": batch.layer_id,
+        "expertkit.topology_version": batch.topology_version,
+        "expertkit.token_count": batch.token_count,
+        "expertkit.assignment_count": batch.token_count * batch.top_k,
+        "expertkit.expert_ids": ",".join(str(expert_id) for expert_id in batch.distinct_expert_ids),
+        "expertkit.worker_id": identity.worker_id,
+        "expertkit.worker_start_id": identity.start_id,
+        "expertkit.transport": plan.target.transport.transport_name,
+        "expertkit.attempt": attempt,
+    }

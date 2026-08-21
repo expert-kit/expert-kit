@@ -271,7 +271,7 @@ class ExecutionSlot:
         clock: Callable[[], float],
         tracer: Tracer | None,
     ) -> ExecutionResult:
-        with _trace_span(tracer, "worker.input.prepare"):
+        with _trace_span(tracer, "worker.deserialize"):
             batch = self._copy_and_build_batch(
                 received,
                 source,
@@ -282,13 +282,13 @@ class ExecutionSlot:
         rejection = _request_end_error(received, clock)
         if rejection is not None:
             return self._set_result(None, rejection, None)
-        with _trace_span(tracer, "worker.backend.submit"):
+        with _trace_span(tracer, "worker.compute_submit"):
             completion = self._submit(backend, batch, output)
         try:
-            with _trace_span(tracer, "worker.backend.wait"):
+            with _trace_span(tracer, "worker.compute_wait"):
                 self._wait_completion(completion)
             rejection = _request_end_error(received, clock)
-            with _trace_span(tracer, "worker.output.prepare"):
+            with _trace_span(tracer, "worker.serialize"):
                 response_output = (
                     None
                     if rejection is not None
@@ -327,7 +327,7 @@ class ExecutionSlot:
             with torch.cuda.device(self._spec.device), torch.cuda.stream(stream):
                 if timing_events is not None:
                     timing_events[0].record(stream)
-                with _trace_span(tracer, "worker.input.prepare"):
+                with _trace_span(tracer, "worker.deserialize"):
                     batch = self._copy_and_build_batch(
                         received,
                         source,
@@ -339,14 +339,14 @@ class ExecutionSlot:
                     timing_events[1].record(stream)
                 rejection = _request_end_error(received, clock)
                 if rejection is None:
-                    with _trace_span(tracer, "worker.backend.submit"):
+                    with _trace_span(tracer, "worker.compute_submit"):
                         completion = self._submit(backend, batch, output)
                 if timing_events is not None:
                     timing_events[2].record(stream)
                 if completion is not None:
                     rejection = _request_end_error(received, clock)
                     if rejection is None:
-                        with _trace_span(tracer, "worker.output.prepare"):
+                        with _trace_span(tracer, "worker.serialize"):
                             response_output = self._transport_buffers.copy_output(
                                 output,
                                 received.output_destination,
@@ -356,7 +356,7 @@ class ExecutionSlot:
                 event.record(stream)
 
             try:
-                with _trace_span(tracer, "worker.device.wait"):
+                with _trace_span(tracer, "worker.compute_wait"):
                     event.synchronize()
             except torch.OutOfMemoryError as error:
                 raise BackendFatalError(BackendFatalReason.DEVICE_OOM, str(error)) from error
@@ -374,7 +374,7 @@ class ExecutionSlot:
                     input_ms + backend_ms + output_ms,
                 )
             if completion is not None:
-                with _trace_span(tracer, "worker.backend.wait"):
+                with _trace_span(tracer, "worker.compute_wait"):
                     self._wait_completion(completion)
             final_rejection = _request_end_error(received, clock)
             if final_rejection is not None:

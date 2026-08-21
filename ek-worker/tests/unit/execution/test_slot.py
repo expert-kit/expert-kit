@@ -341,7 +341,7 @@ def test_cuda_slot_uses_one_stream_and_reuses_pinned_output() -> None:
         assert isinstance(value, float)
         assert math.isfinite(value)
         assert value >= 0
-    assert "worker.device.wait" in tracer.names
+    assert "worker.compute_wait" in tracer.names
     assert not any(name.startswith("expertkit.cuda.") for name in unsampled_span.attributes)
     second.release()
     assert slot.device_bytes == 112

@@ -1,6 +1,8 @@
 """Tests for bounded concurrent dispatch and FP32 aggregation."""
 
 import asyncio
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
 
 import pytest
 import torch
@@ -16,6 +18,7 @@ from expertkit_transport.routing import (
     dispatch_once,
     group_worker_batches,
 )
+from expertkit_transport.tracing import TraceAttribute, TraceContext, TraceSpan
 from expertkit_transport.transports.base import WorkerTransport
 
 
@@ -53,6 +56,59 @@ class FakeTransport(WorkerTransport):
 
     async def close(self) -> None:
         return None
+
+
+class RecordingSpan:
+    def __init__(
+        self,
+        name: str,
+        attributes: Mapping[str, TraceAttribute] | None,
+    ) -> None:
+        self.name = name
+        self.attributes = dict(attributes or {})
+
+    def is_recording(self) -> bool:
+        return True
+
+    def set_attribute(self, key: str, value: TraceAttribute) -> None:
+        self.attributes[key] = value
+
+    def end(self) -> None:
+        pass
+
+
+class RecordingTracer:
+    def __init__(self) -> None:
+        self.spans: list[RecordingSpan] = []
+
+    def current_span_is_recording(self) -> bool:
+        return True
+
+    def capture_context(self) -> TraceContext:
+        return object()
+
+    def start_span(
+        self,
+        name: str,
+        *,
+        context: TraceContext | None = None,
+        attributes: Mapping[str, TraceAttribute] | None = None,
+    ) -> TraceSpan:
+        del context
+        span = RecordingSpan(name, attributes)
+        self.spans.append(span)
+        return span
+
+    @contextmanager
+    def start_as_current_span(
+        self,
+        name: str,
+        *,
+        context: TraceContext | None = None,
+        attributes: Mapping[str, TraceAttribute] | None = None,
+    ) -> Iterator[TraceSpan]:
+        span = self.start_span(name, context=context, attributes=attributes)
+        yield span
 
 
 def target(name: str, transport: WorkerTransport) -> WorkerConnection:
@@ -104,9 +160,16 @@ def test_dispatches_workers_concurrently_and_aggregates_in_fp32() -> None:
         plans = group_worker_batches(routed_batch(), topology, RoundRobinSelector())
         pools = pools_for((worker_a, worker_b))
         accumulator = torch.zeros((3, 4), dtype=torch.float32)
+        tracer = RecordingTracer()
 
         dispatch = asyncio.create_task(
-            dispatch_once(plans, pools, accumulator, monotonic_deadline=float("inf"))
+            dispatch_once(
+                plans,
+                pools,
+                accumulator,
+                monotonic_deadline=float("inf"),
+                tracer=tracer,
+            )
         )
         await started_a.wait()
         await started_b.wait()
@@ -120,6 +183,14 @@ def test_dispatches_workers_concurrently_and_aggregates_in_fp32() -> None:
                 dtype=torch.float32,
             ),
         )
+        worker_spans = [span for span in tracer.spans if span.name == "frontend.worker_batch"]
+        assert len(worker_spans) == len(plans) == 2
+        assert {span.attributes["expertkit.worker_id"] for span in worker_spans} == {
+            "worker-a",
+            "worker-b",
+        }
+        assert all(span.attributes["expertkit.attempt"] == 1 for span in worker_spans)
+        assert sum(span.name == "frontend.merge" for span in tracer.spans) == len(plans)
         for pool in pools.values():
             await pool.close()
 

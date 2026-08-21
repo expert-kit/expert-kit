@@ -448,7 +448,7 @@ def test_application_pending_limit_returns_busy_and_cancellation_releases_input(
             await server._wait_pending_count(0)
         assert server.pending_retained_bytes == 0
         assert server.admitted_count(2, 0) == 0
-        waiting = [span for span in tracer.spans if span.name == "worker.request.wait"]
+        waiting = [span for span in tracer.spans if span.name == "worker.queue_wait"]
         assert len(waiting) == 1
         assert waiting[0].ended is True
         assert waiting[0].attributes["expertkit.outcome"] == "cancelled"
@@ -511,7 +511,7 @@ def test_receiver_close_clears_pending_retained_bytes() -> None:
         await server.close()
         assert server.pending_count == 0
         assert server.pending_retained_bytes == 0
-        waiting = [span for span in tracer.spans if span.name == "worker.request.wait"]
+        waiting = [span for span in tracer.spans if span.name == "worker.queue_wait"]
         assert len(waiting) == 1
         assert waiting[0].ended is True
         assert waiting[0].attributes["expertkit.outcome"] in {"cancelled", "closed"}

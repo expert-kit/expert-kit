@@ -14,7 +14,10 @@ dependencies = [
 [project.optional-dependencies]
 fused = ["expertkit-worker[fused]==0.1.0"]
 ggml = ["expertkit-worker[ggml]==0.1.0"]
-observability = ["expertkit-worker[observability]==0.1.0"]
+observability = [
+    "expertkit-transport[observability]==0.1.0",
+    "expertkit-worker[observability]==0.1.0",
+]
 vllm = ["expertkit-vllm==0.1.0"]
 
 [dependency-groups]

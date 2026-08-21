@@ -20,6 +20,7 @@ from expertkit_transport.errors import (
     TransportErrorCode,
     TransportProtocolError,
 )
+from expertkit_transport.tracing import current_trace_metadata, get_frontend_tracer, trace_span
 from expertkit_transport.transports.base import WorkerEndpointConfig, WorkerTransport
 from expertkit_transport.transports.shm.client_buffers import (
     ShmTransferBufferPool,
@@ -178,6 +179,10 @@ def _validate_output(
 class ShmWorkerTransport(WorkerTransport):
     """Move Tensor bytes through fixed same-host slots and notify with gRPC."""
 
+    @property
+    def transport_name(self) -> str:
+        return "shm"
+
     def __init__(
         self,
         endpoint: str,
@@ -212,6 +217,7 @@ class ShmWorkerTransport(WorkerTransport):
             capacity=max_in_flight,
             device=self._device,
         )
+        self._tracer = get_frontend_tracer()
         self._semaphore = asyncio.Semaphore(max_in_flight)
         self._executor = ThreadPoolExecutor(
             max_workers=resolved_cpu_workers,
@@ -386,13 +392,14 @@ class ShmWorkerTransport(WorkerTransport):
         _validate_output(output, batch, self._spec, self._device)
         stream = torch.cuda.current_stream(output.device) if output.device.type == "cuda" else None
         try:
-            generation = await self._run_cpu(
-                _copy_request_to_slot,
-                batch,
-                self._spec,
-                buffers,
-                stream,
-            )
+            with trace_span(self._tracer, "frontend.tensor_slice"):
+                generation = await self._run_cpu(
+                    _copy_request_to_slot,
+                    batch,
+                    self._spec,
+                    buffers,
+                    stream,
+                )
         except TransportProtocolError as error:
             raise TransportError(
                 TransportErrorCode.INVALID_REQUEST,
@@ -408,49 +415,61 @@ class ShmWorkerTransport(WorkerTransport):
             if math.isinf(remaining)
             else max(1, min(_UINT64_MAX, math.ceil(remaining * 1_000_000)))
         )
-        request = encode_execute_request(
-            ExecuteSlot(
-                session_id=self._buffers.session_id,
-                slot_index=slot.index,
-                generation=generation,
-                layer_id=batch.layer_id,
-                topology_version=batch.topology_version,
-                token_count=batch.token_count,
-                timeout_micros=timeout_micros,
+        with trace_span(self._tracer, "frontend.serialize"):
+            request = encode_execute_request(
+                ExecuteSlot(
+                    session_id=self._buffers.session_id,
+                    slot_index=slot.index,
+                    generation=generation,
+                    layer_id=batch.layer_id,
+                    topology_version=batch.topology_version,
+                    token_count=batch.token_count,
+                    timeout_micros=timeout_micros,
+                )
             )
-        )
-        call = self._execute(
-            request,
-            timeout=None,
-            wait_for_ready=False,
-        )
+        call: Any | None = None
         try:
-            if math.isinf(remaining):
-                response = await asyncio.shield(call)
-            else:
-                try:
-                    async with asyncio.timeout(remaining):
-                        response = await asyncio.shield(call)
-                except TimeoutError as error:
-                    with suppress(BaseException):
-                        await call
-                    raise _deadline_error("the Worker shared-memory deadline expired") from error
+            with trace_span(
+                self._tracer,
+                "frontend.send_worker",
+                attributes={"expertkit.transport": self.transport_name},
+            ):
+                call = self._execute(
+                    request,
+                    timeout=None,
+                    wait_for_ready=False,
+                    metadata=current_trace_metadata(),
+                )
+                if math.isinf(remaining):
+                    response = await asyncio.shield(call)
+                else:
+                    try:
+                        async with asyncio.timeout(remaining):
+                            response = await asyncio.shield(call)
+                    except TimeoutError as error:
+                        with suppress(BaseException):
+                            await call
+                        raise _deadline_error(
+                            "the Worker shared-memory deadline expired"
+                        ) from error
         except asyncio.CancelledError:
-            with suppress(BaseException):
-                await call
+            if call is not None:
+                with suppress(BaseException):
+                    await call
             raise
         except grpc.aio.AioRpcError as error:
             raise _rpc_error(error) from error
 
         try:
-            decode_execute_response(response, generation, self._spec)
-            await self._run_cpu(
-                _copy_slot_to_output,
-                batch.token_count,
-                buffers,
-                output,
-                stream,
-            )
+            with trace_span(self._tracer, "frontend.deserialize"):
+                decode_execute_response(response, generation, self._spec)
+                await self._run_cpu(
+                    _copy_slot_to_output,
+                    batch.token_count,
+                    buffers,
+                    output,
+                    stream,
+                )
         except TransportProtocolError as error:
             raise TransportError(
                 TransportErrorCode.PROTOCOL,

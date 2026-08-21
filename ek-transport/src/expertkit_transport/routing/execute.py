@@ -27,6 +27,7 @@ from expertkit_transport.routing.topology import (
     TopologyProvider,
     WorkerIdentity,
 )
+from expertkit_transport.tracing import Tracer, trace_span
 
 _DEFAULT_SAME_WORKER_RETRY_DELAY_SECONDS = 0.001
 
@@ -142,6 +143,7 @@ async def execute_routed_layer(
     same_worker_retry_delay_seconds: float = _DEFAULT_SAME_WORKER_RETRY_DELAY_SECONDS,
     clock: Callable[[], float] = time.monotonic,
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+    tracer: Tracer | None = None,
 ) -> torch.Tensor:
     """Return one aggregated Routed-MoE layer result.
 
@@ -181,8 +183,18 @@ async def execute_routed_layer(
     if monotonic_deadline - clock() <= 0:
         raise _deadline_error("the Routed layer deadline expired before dispatch")
 
-    snapshot = topology.current(batch.instance_id)
-    plans = group_worker_batches(batch, snapshot, selector)
+    with trace_span(
+        tracer,
+        "frontend.route",
+        attributes={
+            "expertkit.instance_id": batch.instance_id,
+            "expertkit.layer_id": batch.layer_id,
+            "expertkit.token_count": batch.token_count,
+            "expertkit.assignment_count": batch.token_count * batch.top_k,
+        },
+    ):
+        snapshot = topology.current(batch.instance_id)
+        plans = group_worker_batches(batch, snapshot, selector)
     if not plans:
         return torch.zeros_like(batch.hidden_states)
 
@@ -191,6 +203,8 @@ async def execute_routed_layer(
         direct_result, direct_failure = await dispatch_complete_plan(
             plans[0],
             monotonic_deadline=monotonic_deadline,
+            tracer=tracer,
+            attempt=1,
         )
         if direct_failure is None:
             assert direct_result is not None
@@ -207,6 +221,8 @@ async def execute_routed_layer(
             pools,
             accumulator,
             monotonic_deadline=monotonic_deadline,
+            tracer=tracer,
+            attempt=1,
         )
     if not failures:
         assert accumulator is not None
@@ -259,6 +275,8 @@ async def execute_routed_layer(
         pools,
         accumulator,
         monotonic_deadline=monotonic_deadline,
+        tracer=tracer,
+        attempt=2,
     )
     if retry_failures:
         raise retry_failures[-1].error

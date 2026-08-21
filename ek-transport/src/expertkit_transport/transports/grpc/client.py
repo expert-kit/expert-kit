@@ -20,6 +20,7 @@ from expertkit_transport.errors import (
     TransportErrorCode,
     TransportProtocolError,
 )
+from expertkit_transport.tracing import current_trace_metadata, get_frontend_tracer, trace_span
 from expertkit_transport.transports.base import WorkerEndpointConfig, WorkerTransport
 from expertkit_transport.transports.grpc.client_buffers import (
     GrpcTransferBufferPool,
@@ -96,12 +97,12 @@ def _selected_hidden_states(batch: WorkerBatch) -> torch.Tensor:
         raise TransportProtocolError("Worker batch token indices are invalid") from error
 
 
-def _encode_with_staging(
+def _stage_request(
     batch: WorkerBatch,
     spec: WorkerEndpointConfig,
     buffers: GrpcTransferBuffers,
     stream: torch.cuda.Stream | None,
-) -> bytes:
+) -> None:
     validate_worker_batch(batch, spec)
     token_count = batch.token_count
     with torch.inference_mode():
@@ -130,6 +131,14 @@ def _encode_with_staging(
                 buffers.request_copy_recorded = True
             buffers.request_copy_event.synchronize()
 
+
+
+def _serialize_staged_request(
+    batch: WorkerBatch,
+    spec: WorkerEndpointConfig,
+    buffers: GrpcTransferBuffers,
+) -> bytes:
+    token_count = batch.token_count
     return _serialize_host_request(
         batch,
         spec,
@@ -185,6 +194,10 @@ def _validate_output(
 class GrpcWorkerTransport(WorkerTransport):
     """Send bounded asynchronous unary calls to one plaintext Worker endpoint."""
 
+    @property
+    def transport_name(self) -> str:
+        return "grpc"
+
     def __init__(
         self,
         endpoint: str,
@@ -218,6 +231,7 @@ class GrpcWorkerTransport(WorkerTransport):
             device=self._device,
             capacity=max_in_flight,
         )
+        self._tracer = get_frontend_tracer()
         self._semaphore = asyncio.Semaphore(max_in_flight)
         self._executor = ThreadPoolExecutor(
             max_workers=resolved_cpu_workers,
@@ -337,13 +351,21 @@ class GrpcWorkerTransport(WorkerTransport):
         _validate_output(output, batch, self._spec, self._device)
         stream = torch.cuda.current_stream(output.device) if output.device.type == "cuda" else None
         try:
-            request = await self._run_cpu(
-                _encode_with_staging,
-                batch,
-                self._spec,
-                buffers,
-                stream,
-            )
+            with trace_span(self._tracer, "frontend.tensor_slice"):
+                await self._run_cpu(
+                    _stage_request,
+                    batch,
+                    self._spec,
+                    buffers,
+                    stream,
+                )
+            with trace_span(self._tracer, "frontend.serialize"):
+                request = await self._run_cpu(
+                    _serialize_staged_request,
+                    batch,
+                    self._spec,
+                    buffers,
+                )
         except TransportProtocolError as error:
             raise TransportError(
                 TransportErrorCode.INVALID_REQUEST,
@@ -354,31 +376,40 @@ class GrpcWorkerTransport(WorkerTransport):
         remaining = monotonic_deadline - self._clock()
         if remaining <= 0:
             raise _deadline_error("deadline expired before the Worker gRPC call")
-        call = self._execute(
-            request,
-            timeout=None if math.isinf(remaining) else remaining,
-            wait_for_ready=False,
-        )
+        call: Any | None = None
         try:
-            response = await call
+            with trace_span(
+                self._tracer,
+                "frontend.send_worker",
+                attributes={"expertkit.transport": self.transport_name},
+            ):
+                call = self._execute(
+                    request,
+                    timeout=None if math.isinf(remaining) else remaining,
+                    wait_for_ready=False,
+                    metadata=current_trace_metadata(),
+                )
+                response = await call
         except asyncio.CancelledError:
-            call.cancel()
-            with suppress(BaseException):
-                await call
+            if call is not None:
+                call.cancel()
+                with suppress(BaseException):
+                    await call
             raise
         except grpc.aio.AioRpcError as error:
             raise _rpc_error(error) from error
 
         try:
-            await self._run_cpu(
-                _decode_into_output,
-                response,
-                batch.token_count,
-                self._spec,
-                buffers,
-                output,
-                stream,
-            )
+            with trace_span(self._tracer, "frontend.deserialize"):
+                await self._run_cpu(
+                    _decode_into_output,
+                    response,
+                    batch.token_count,
+                    self._spec,
+                    buffers,
+                    output,
+                    stream,
+                )
         except TransportProtocolError as error:
             raise TransportError(
                 TransportErrorCode.PROTOCOL,

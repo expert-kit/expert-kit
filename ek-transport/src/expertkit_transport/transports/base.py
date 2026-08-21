@@ -24,6 +24,12 @@ def _require_positive_unsigned(name: str, value: int, maximum: int) -> None:
 class WorkerTransport(ABC):
     """Submit Worker batches to one remote Worker."""
 
+    @property
+    def transport_name(self) -> str:
+        """Return the stable transport name used by observability attributes."""
+
+        return type(self).__name__
+
     @abstractmethod
     async def start(self) -> None:
         """Create Transport resources on the current event loop."""
@@ -141,6 +147,12 @@ class WorkerBatchBuffers(ABC):
 
 class ReceivedBatch(ABC):
     """Represent one admitted batch until computation and response finish."""
+
+    @property
+    def transport_name(self) -> str:
+        """Return the stable transport name used by observability attributes."""
+
+        return type(self).__name__
 
     @property
     @abstractmethod

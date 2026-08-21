@@ -15,6 +15,12 @@ dependencies = [
     "torch==2.11.0",
 ]
 
+[project.optional-dependencies]
+observability = [
+    "opentelemetry-exporter-otlp-proto-grpc==1.39.1",
+    "opentelemetry-sdk==1.39.1",
+]
+
 [tool.uv.sources]
 expertkit-proto = { workspace = true }
 

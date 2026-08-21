@@ -30,7 +30,7 @@ from expertkit_worker.control import (
     HeartbeatSender,
     WeightControlSession,
     WorkerRegistration,
-    new_start_id,
+    new_worker_runtime_identity,
 )
 from expertkit_worker.execution import WorkerExecutor
 from expertkit_worker.observability import configure_logging, create_observability
@@ -139,6 +139,7 @@ async def _run(args: argparse.Namespace) -> None:
     _install_weight(args.cache_root)
     args.active_marker.unlink(missing_ok=True)
     args.pending_marker.unlink(missing_ok=True)
+    identity = new_worker_runtime_identity(args.worker_id)
 
     adapter = TorchWeightAdapter(
         hidden_dim=_HIDDEN_DIM,
@@ -195,6 +196,7 @@ async def _run(args: argparse.Namespace) -> None:
         receiver,
         backend,
         instance_id=_INSTANCE_ID,
+        identity=identity,
         buffer_config=BatchBufferConfig(
             max_batch_tokens=_MAX_BATCH_TOKENS,
             hidden_dim=_HIDDEN_DIM,
@@ -258,16 +260,15 @@ async def _run(args: argparse.Namespace) -> None:
         loader=loader,
     )
 
-    start_id = new_start_id()
     connection = ControllerConnection(args.controller)
     heartbeat = HeartbeatSender(
-        worker_id=args.worker_id,
-        start_id=start_id,
+        worker_id=identity.worker_id,
+        start_id=identity.start_id,
         interval_secs=0.05,
     )
     weights = WeightControlSession(
-        worker_id=args.worker_id,
-        start_id=start_id,
+        worker_id=identity.worker_id,
+        start_id=identity.start_id,
         max_experts=1,
         shutdown_grace_secs=5.0,
         manager=manager,
@@ -275,8 +276,8 @@ async def _run(args: argparse.Namespace) -> None:
         receiver=receiver,
     )
     registration = WorkerRegistration(
-        worker_id=args.worker_id,
-        start_id=start_id,
+        worker_id=identity.worker_id,
+        start_id=identity.start_id,
         instance_id=_INSTANCE_ID,
         computation_endpoint=args.computation_listen,
         peer_weight_endpoint="http://127.0.0.1:1",
@@ -299,7 +300,7 @@ async def _run(args: argparse.Namespace) -> None:
         retry_max_secs=0.2,
         stable_stream_secs=0.2,
     )
-    observability = create_observability(ObservabilityConfig(), worker_id=args.worker_id)
+    observability = create_observability(ObservabilityConfig(), identity=identity)
     application = WorkerApplication(
         transfer=transfer,
         manager=manager,

@@ -28,6 +28,7 @@ from expertkit_worker.backends import (
     CompletedSubmission,
     ComputeBackend,
 )
+from expertkit_worker.control import WorkerRuntimeIdentity
 from expertkit_worker.execution import WorkerExecutor
 from expertkit_worker.observability.api import WorkerMetrics
 
@@ -175,6 +176,7 @@ async def start_stack(
         server,
         backend,
         instance_id=7,
+        identity=WorkerRuntimeIdentity("worker-test", "worker-test-start"),
         buffer_config=buffer_config(),
         slot_count=active,
         metrics=metrics,

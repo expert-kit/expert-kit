@@ -39,6 +39,24 @@ def new_start_id() -> str:
     return str(uuid4())
 
 
+@dataclass(frozen=True, slots=True)
+class WorkerRuntimeIdentity:
+    """Identify one logical Worker and one concrete process lifetime."""
+
+    worker_id: str
+    start_id: str
+
+    def __post_init__(self) -> None:
+        _require_text("worker_id", self.worker_id)
+        _require_text("start_id", self.start_id)
+
+
+def new_worker_runtime_identity(worker_id: str) -> WorkerRuntimeIdentity:
+    """Create the single identity shared by all components in one Worker process."""
+
+    return WorkerRuntimeIdentity(worker_id=worker_id, start_id=new_start_id())
+
+
 def _require_text(name: str, value: str) -> None:
     if not isinstance(value, str) or not value.strip():
         raise ValueError(f"{name} must not be empty")

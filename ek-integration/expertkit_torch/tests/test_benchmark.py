@@ -8,6 +8,7 @@ from typing import Any
 import pytest
 import torch
 
+from expertkit_torch.benchmark import runner
 from expertkit_torch.benchmark.runner import (
     BatchBenchmark,
     RunMetrics,
@@ -97,6 +98,49 @@ def test_benchmark_runs_prefill_and_cached_decode_for_each_batch() -> None:
     assert first.output_tps == 2
     assert first.generated_token_ids == ((0, 0, 0, 0),)
     assert first.generated_text == ("0 0 0 0",)
+
+
+def test_each_generation_has_one_request_root(monkeypatch) -> None:
+    roots: list[dict[str, int]] = []
+
+    class RequestSpan:
+        def __init__(self, attributes: dict[str, int]) -> None:
+            self.attributes = attributes
+
+        def __enter__(self) -> None:
+            roots.append(self.attributes)
+
+        def __exit__(self, *_: object) -> None:
+            return None
+
+    monkeypatch.setattr(
+        runner,
+        "frontend_request_span",
+        lambda *, attributes: RequestSpan(dict(attributes)),
+    )
+
+    run_benchmark(
+        FakeModel(),
+        FakeTokenizer(),
+        model_type="qwen3_moe",
+        mode="expertkit",
+        batch_sizes=(2,),
+        input_length=3,
+        output_length=2,
+        warmup_runs=1,
+        measured_runs=2,
+        device="cpu",
+        clock=IncrementingClock(),
+        synchronize=lambda _: None,
+    )
+
+    assert roots == [
+        {
+            "expertkit.batch_size": 2,
+            "expertkit.input_length": 3,
+            "expertkit.output_length": 2,
+        }
+    ] * 3
 
 
 def test_output_length_one_has_no_decode_phase() -> None:
