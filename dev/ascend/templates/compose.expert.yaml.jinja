@@ -1,14 +1,9 @@
+name: {{ project_name }}
+
 services:
-  worker-base:
-    image: ek-worker-ascend-runtime:a3
-    build:
-      context: ../..
-      dockerfile: container/Dockerfile.npu
-      target: ek-worker-ascend-runtime
-      args:
-        CANN_IMAGE: "m.daocloud.io/quay.io/ascend/cann:9.0.1-a3-ubuntu22.04-py3.12"
-        UV_IMAGE: "ghcr.nju.edu.cn/astral-sh/uv:0.11.30"
-        UV_DEFAULT_INDEX: "https://mirror.nju.edu.cn/pypi/web/simple"
+{% for worker in workers %}
+  {{ worker.id }}:
+    image: {{ images.expert }}
     entrypoint:
       - uv
       - run
@@ -22,6 +17,7 @@ services:
     restart: unless-stopped
     stop_grace_period: 60s
     volumes:
+      - ./workers/{{ worker.id }}.yaml:/etc/expert-kit/worker.yaml:ro
       - worker-cache:/ek/worker_cache
       - /usr/local/Ascend/driver:/usr/local/Ascend/driver:ro
       - /usr/local/Ascend/firmware:/usr/local/Ascend/firmware:ro
@@ -33,4 +29,11 @@ services:
       RUST_LOG: info
     networks:
       - expert-kit-network
+{% endfor %}
 
+networks:
+  expert-kit-network:
+    driver: bridge
+
+volumes:
+  worker-cache:

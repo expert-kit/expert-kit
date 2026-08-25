@@ -1,4 +1,4 @@
-"""Fixed-length prefill and decode benchmarking for supported Torch models."""
+"""Dataset-driven prefill and decode benchmarking for supported Torch models."""
 
 from expertkit_torch.benchmark.runner import (
     BatchBenchmark,

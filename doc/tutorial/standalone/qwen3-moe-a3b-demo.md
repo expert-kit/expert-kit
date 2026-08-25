@@ -193,23 +193,24 @@ uv run --package expertkit-torch ek-torch-benchmark \
   --model-path "$QWEN_ROOT" \
   --mode expertkit \
   --controller-endpoint 127.0.0.1:5002 \
+  --dataset-path /datasets/ShareGPT.json \
+  --num-prompts 16 \
   --batch-sizes 1 \
-  --input-length 128 \
   --output-length 20 \
-  --warmup-runs 1 \
-  --runs 5
+  --warmup-runs 1
 ```
 
-The command resolves the configured `qwen3-demo` instance, performs exact
-fixed-length prefill and decode work, then prints median prefill, decode, and
-complete output throughput. The benchmark ignores EOS so every measured run
-executes 20 output-token steps.
+The command resolves the configured `qwen3-demo` instance, selects ShareGPT
+prompts deterministically, then prints median prefill, decode, and complete
+output throughput. The benchmark ignores EOS so every prompt executes 20
+output-token steps.
 
 The same path is exposed as an environment-gated test:
 
 ```bash
 EK_QWEN_MODEL_PATH="$QWEN_ROOT" \
 EK_QWEN_CONTROLLER_ENDPOINT=127.0.0.1:5002 \
+EK_BENCHMARK_DATASET_PATH=/datasets/ShareGPT.json \
 uv run --package expertkit-torch pytest \
   ek-integration/expertkit_torch/tests/test_deployment_benchmark.py -m qwen
 ```

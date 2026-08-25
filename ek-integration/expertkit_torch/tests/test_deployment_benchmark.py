@@ -38,6 +38,9 @@ def test_model_benchmark_runs_through_expert_kit(
     model_path = os.environ.get(model_path_variable)
     if not model_path:
         pytest.skip(f"{model_path_variable} is not configured")
+    dataset_path = os.environ.get("EK_BENCHMARK_DATASET_PATH")
+    if not dataset_path:
+        pytest.skip("EK_BENCHMARK_DATASET_PATH is not configured")
 
     endpoint = os.environ.get(endpoint_variable, "127.0.0.1:5002")
     command = [
@@ -50,14 +53,14 @@ def test_model_benchmark_runs_through_expert_kit(
         endpoint,
         "--batch-sizes",
         "1",
-        "--input-length",
-        "32",
+        "--dataset-path",
+        str(Path(dataset_path).resolve()),
+        "--num-prompts",
+        "1",
         "--output-length",
         "20",
         "--warmup-runs",
         "0",
-        "--runs",
-        "1",
     ]
     if instance_id := os.environ.get(instance_variable):
         command.extend(("--instance-id", instance_id))

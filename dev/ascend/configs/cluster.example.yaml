@@ -1,0 +1,63 @@
+project_name: expert-kit-ascend
+
+inference:
+  instance_name: expert-kit-ascend
+
+images:
+  postgres: docker.m.daocloud.io/library/postgres:17@sha256:a426e44bac0b759c95894d68e1a0ac03ecc20b619f498a91aae373bf06d8508d
+  control: ek-runtime:dev
+  attention: ek-vllm-ascend-runtime:dev
+  expert: ek-worker-ascend-runtime:dev
+
+roles:
+  attention:
+    node: attention-node
+    vllm_port: 18000
+    devices: [0, 2, 4, 6, 8, 10, 12, 14]
+
+  control:
+    node: attention-node
+    postgres_port: 15432
+    worker_control_port: 15001
+    frontend_control_port: 15002
+    weight_server_port: 16543
+    database:
+      user: dev
+      password: dev
+      name: dev
+      max_connections: 32
+    fault_detection:
+      heartbeat_timeout_secs: 10
+      node_active_threshold_secs: 60
+      poller_interval_secs: 5
+
+  expert:
+    node: expert-node
+    workers:
+      devices: [0, 1, 2, 3, 4, 5, 6, 7,
+                8, 9, 10, 11, 12, 13, 14, 15]
+      start_worker_port: 53234
+      start_peer_port: 54234
+      runtime:
+        max_batch_tokens: 4096
+        max_active_batches_per_device: 1
+        device_memory_limit: 20GiB
+        shutdown_grace_secs: 30
+        max_pending_batches_per_device: 1
+        heartbeat_interval_secs: 3
+        heartbeat_timeout_secs: 10
+        max_concurrent_loads: 64
+
+nodes:
+  attention-node:
+    address: "<ATTENTION_HOST_IP>"
+  expert-node:
+    address: "<EXPERT_HOST_IP>"
+
+paths:
+  models:
+    qwen3-30b-a3b: "<HOST_QWEN_CHECKPOINT_DIRECTORY>"
+  datasets:
+    sharegpt: "<HOST_SHAREGPT_DIRECTORY>"
+    code-agent: "<HOST_CODE_AGENT_DIRECTORY>"
+  results: ../results

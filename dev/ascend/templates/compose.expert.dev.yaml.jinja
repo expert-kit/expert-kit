@@ -1,0 +1,9 @@
+services:
+{% for worker in workers %}
+  {{ worker.id }}:
+    ports:
+      - "{{ expert.address }}:{{ worker.port }}:51234"
+      - "{{ expert.address }}:{{ worker.peer_port }}:52234"
+
+{% endfor %}
+

@@ -16,6 +16,7 @@ fused = ["expertkit-worker[fused]==0.1.0"]
 ggml = ["expertkit-worker[ggml]==0.1.0"]
 observability = ["expertkit-worker[observability]==0.1.0"]
 npu = [
+    "expertkit-torch[npu]==0.1.0",
     "expertkit-worker[npu]==0.1.0",
 ]
 vllm = ["expertkit-vllm==0.1.0"]
@@ -23,10 +24,12 @@ vllm = ["expertkit-vllm==0.1.0"]
 [dependency-groups]
 dev = [
     "grpcio-tools==1.71.0",
+    "jinja2>=3.1.6",
     "pydantic-settings>=2.14.2",
     "pytest>=8.3,<9",
     "ruff>=0.11,<1",
     "safetensors>=0.5.3,<1",
+    "typer>=0.21,<1",
 ]
 ops = [
     "ansible>=11.5,<12",

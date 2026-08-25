@@ -292,11 +292,11 @@ CUDA_VISIBLE_DEVICES=0 \
   --model-path "$DEEPSEEK_ROOT" \
   --mode expertkit \
   --controller-endpoint 127.0.0.1:5002 \
+  --dataset-path /datasets/ShareGPT.json \
+  --num-prompts 3 \
   --batch-sizes 1 \
-  --input-length 16 \
   --output-length 16 \
   --warmup-runs 1 \
-  --runs 3 \
   --device cuda:0 \
   --dtype bfloat16 \
   --json-output "$EK_RUN/expertkit.json"
@@ -306,28 +306,28 @@ The command prints Prefill, Decode, end-to-end latency, and output throughput.
 Its JSON output also records generated token IDs and decoded text.
 
 For a native Transformers reference on the same GPU, stop the Worker to release
-its expert weights, then run the same model, dtype, batch size, lengths, warmup,
-and measured-run count with local experts:
+its expert weights, then run the same model, dataset, dtype, batch size, output
+length, and warmup count with local experts:
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 \
   uv run --package expertkit-torch ek-torch-benchmark \
   --model-path "$DEEPSEEK_ROOT" \
   --mode local \
+  --dataset-path /datasets/ShareGPT.json \
+  --num-prompts 3 \
   --batch-sizes 1 \
-  --input-length 16 \
   --output-length 16 \
   --warmup-runs 1 \
-  --runs 3 \
   --device cuda:0 \
   --dtype bfloat16 \
   --json-output "$EK_RUN/native.json"
 ```
 
-Compare the `batches[].runs[].generated_token_ids` and `generated_text` fields
-between the two files. Report native and Expert Kit latency and aggregate
-throughput side by side; do not infer native prefill or decode values if the
-native tool does not provide them.
+Compare the `batches[].measurements[].generated_token_ids` and `generated_text`
+fields between the two files. Report native and Expert Kit latency and
+aggregate throughput side by side; do not infer native prefill or decode values
+if the native tool does not provide them.
 
 ## Test with the vLLM 0.25.1 Frontend
 

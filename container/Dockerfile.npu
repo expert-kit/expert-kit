@@ -52,6 +52,7 @@ COPY dist/attention-wheels/ /tmp/ek-wheels/
 RUN python3 -m pip install \
       --no-cache-dir \
       --no-deps \
-      /tmp/ek-wheels/*.whl
+      /tmp/ek-wheels/*.whl \
+      "pyyaml==6.0.2"
 
 ENV EK_ENABLE=1

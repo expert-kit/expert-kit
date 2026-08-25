@@ -873,6 +873,7 @@ ggml = [
     { name = "expertkit-worker", extra = ["ggml"] },
 ]
 npu = [
+    { name = "expertkit-torch", extra = ["npu"] },
     { name = "expertkit-worker", extra = ["npu"] },
 ]
 observability = [
@@ -885,10 +886,12 @@ vllm = [
 [package.dev-dependencies]
 dev = [
     { name = "grpcio-tools" },
+    { name = "jinja2" },
     { name = "pydantic-settings" },
     { name = "pytest" },
     { name = "ruff" },
     { name = "safetensors" },
+    { name = "typer" },
 ]
 ops = [
     { name = "ansible" },
@@ -899,6 +902,7 @@ ops = [
 requires-dist = [
     { name = "expertkit-proto", editable = "ek-proto" },
     { name = "expertkit-torch", editable = "ek-integration/expertkit_torch" },
+    { name = "expertkit-torch", extras = ["npu"], marker = "extra == 'npu'", editable = "ek-integration/expertkit_torch" },
     { name = "expertkit-transport", editable = "ek-transport" },
     { name = "expertkit-vllm", marker = "extra == 'vllm'", editable = "ek-integration/expertkit_vllm" },
     { name = "expertkit-worker", editable = "ek-worker" },
@@ -912,10 +916,12 @@ provides-extras = ["fused", "ggml", "observability", "npu", "vllm"]
 [package.metadata.requires-dev]
 dev = [
     { name = "grpcio-tools", specifier = "==1.71.0" },
+    { name = "jinja2", specifier = ">=3.1.6" },
     { name = "pydantic-settings", specifier = ">=2.14.2" },
     { name = "pytest", specifier = ">=8.3,<9" },
     { name = "ruff", specifier = ">=0.11,<1" },
     { name = "safetensors", specifier = ">=0.5.3,<1" },
+    { name = "typer", specifier = ">=0.21,<1" },
 ]
 ops = [
     { name = "ansible", specifier = ">=11.5,<12" },
@@ -943,18 +949,27 @@ version = "0.1.0"
 source = { editable = "ek-integration/expertkit_torch" }
 dependencies = [
     { name = "expertkit-transport" },
+    { name = "pydantic" },
     { name = "torch", version = "2.11.0", source = { registry = "https://pypi.org/simple" }, marker = "platform_machine != 'aarch64' or sys_platform != 'linux'" },
     { name = "torch", version = "2.11.0+cpu", source = { registry = "https://download.pytorch.org/whl/cpu" }, marker = "platform_machine == 'aarch64' and sys_platform == 'linux'" },
     { name = "transformers" },
 ]
 
+[package.optional-dependencies]
+npu = [
+    { name = "torch-npu" },
+]
+
 [package.metadata]
 requires-dist = [
     { name = "expertkit-transport", editable = "ek-transport" },
+    { name = "pydantic", specifier = ">=2.12,<3" },
     { name = "torch", marker = "platform_machine != 'aarch64' or sys_platform != 'linux'", specifier = "==2.11.0" },
     { name = "torch", marker = "platform_machine == 'aarch64' and sys_platform == 'linux'", specifier = "==2.11.0", index = "https://download.pytorch.org/whl/cpu" },
+    { name = "torch-npu", marker = "extra == 'npu'", specifier = "==2.11.0rc1" },
     { name = "transformers", specifier = "==5.5.3" },
 ]
+provides-extras = ["npu"]
 
 [[package]]
 name = "expertkit-transport"

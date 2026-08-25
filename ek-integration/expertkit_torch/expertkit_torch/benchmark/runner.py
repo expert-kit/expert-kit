@@ -1,4 +1,4 @@
-"""Measure fixed-length prefill and cached greedy decode."""
+"""Measure dataset-driven prefill and cached greedy decode."""
 
 from __future__ import annotations
 
@@ -10,15 +10,16 @@ from typing import Any
 
 import torch
 
-_FIXED_INPUT_TEXT = "Expert Kit routed mixture of experts benchmark input"
+from expertkit_torch.benchmark.datasets import BenchmarkDataset
 
 
 @dataclass(frozen=True)
 class RunMetrics:
-    """Timing and throughput from one measured generation."""
+    """Timing and throughput from one measured model-input batch."""
 
     batch_size: int
-    input_length: int
+    input_tokens: int
+    padded_input_length: int
     output_length: int
     prefill_seconds: float
     decode_seconds: float
@@ -33,9 +34,9 @@ class RunMetrics:
 
     @property
     def prefill_tps(self) -> float:
-        """Return aggregate input tokens processed per second."""
+        """Return non-padding input tokens processed per second."""
 
-        return self.batch_size * self.input_length / self.prefill_seconds
+        return self.input_tokens / self.prefill_seconds
 
     @property
     def decode_tps(self) -> float | None:
@@ -76,87 +77,86 @@ class RunMetrics:
 
 @dataclass(frozen=True)
 class BatchBenchmark:
-    """Raw runs and median metrics for one batch size."""
+    """Measurements collected for one configured static batch size."""
 
     batch_size: int
-    runs: tuple[RunMetrics, ...]
+    measurements: tuple[RunMetrics, ...]
 
     def median(self) -> dict[str, int | float | None]:
         """Return the median of every reported timing and throughput."""
 
-        first = self.runs[0]
-        decode_tps = [value for run in self.runs if (value := run.decode_tps) is not None]
-        decode_step_ms = [value for run in self.runs if (value := run.decode_step_ms) is not None]
+        first = self.measurements[0]
+        decode_tps = [
+            value
+            for measurement in self.measurements
+            if (value := measurement.decode_tps) is not None
+        ]
+        decode_step_ms = [
+            value
+            for measurement in self.measurements
+            if (value := measurement.decode_step_ms) is not None
+        ]
         return {
             "batch_size": self.batch_size,
-            "input_length": first.input_length,
+            "input_tokens": statistics.median(
+                measurement.input_tokens for measurement in self.measurements
+            ),
+            "padded_input_length": statistics.median(
+                measurement.padded_input_length for measurement in self.measurements
+            ),
             "output_length": first.output_length,
-            "prefill_seconds": statistics.median(run.prefill_seconds for run in self.runs),
-            "decode_seconds": statistics.median(run.decode_seconds for run in self.runs),
-            "total_seconds": statistics.median(run.total_seconds for run in self.runs),
-            "prefill_tps": statistics.median(run.prefill_tps for run in self.runs),
+            "prefill_seconds": statistics.median(
+                measurement.prefill_seconds for measurement in self.measurements
+            ),
+            "decode_seconds": statistics.median(
+                measurement.decode_seconds for measurement in self.measurements
+            ),
+            "total_seconds": statistics.median(
+                measurement.total_seconds for measurement in self.measurements
+            ),
+            "prefill_tps": statistics.median(
+                measurement.prefill_tps for measurement in self.measurements
+            ),
             "decode_tps": statistics.median(decode_tps) if decode_tps else None,
-            "decode_step_ms": statistics.median(decode_step_ms) if decode_step_ms else None,
-            "output_tps": statistics.median(run.output_tps for run in self.runs),
+            "decode_step_ms": (statistics.median(decode_step_ms) if decode_step_ms else None),
+            "output_tps": statistics.median(
+                measurement.output_tps for measurement in self.measurements
+            ),
         }
 
     def as_dict(self) -> dict[str, object]:
-        """Return JSON-compatible raw runs and their summary."""
+        """Return JSON-compatible measurements and their summary."""
 
         return {
             "batch_size": self.batch_size,
-            "runs": [run.as_dict() for run in self.runs],
+            "measurements": [measurement.as_dict() for measurement in self.measurements],
             "median": self.median(),
         }
 
 
 @dataclass(frozen=True)
 class BenchmarkReport:
-    """Complete benchmark result for one loaded model."""
+    """Complete benchmark result for one loaded model and dataset."""
 
     model_type: str
     mode: str
-    input_length: int
+    num_prompts: int
     output_length: int
     warmup_runs: int
-    measured_runs: int
     batches: tuple[BatchBenchmark, ...]
 
     def as_dict(self) -> dict[str, object]:
         """Return a stable JSON-compatible benchmark report."""
 
         return {
-            "schema_version": 1,
+            "schema_version": 2,
             "model_type": self.model_type,
             "mode": self.mode,
-            "input_length": self.input_length,
+            "num_prompts": self.num_prompts,
             "output_length": self.output_length,
             "warmup_runs": self.warmup_runs,
-            "measured_runs": self.measured_runs,
             "batches": [batch.as_dict() for batch in self.batches],
         }
-
-
-def build_fixed_input(
-    tokenizer: Any,
-    *,
-    batch_size: int,
-    input_length: int,
-    device: torch.device,
-) -> torch.Tensor:
-    """Build equal, deterministic token rows with exactly the requested length."""
-
-    token_ids = tokenizer.encode(_FIXED_INPUT_TEXT, add_special_tokens=False)
-    if not token_ids:
-        fallback_id = tokenizer.bos_token_id
-        if fallback_id is None:
-            fallback_id = tokenizer.eos_token_id
-        if fallback_id is None:
-            raise ValueError("tokenizer produced no tokens and has no BOS or EOS token")
-        token_ids = [fallback_id]
-    repeated = (token_ids * ((input_length + len(token_ids) - 1) // len(token_ids)))[:input_length]
-    row = torch.tensor(repeated, dtype=torch.long, device=device)
-    return row.unsqueeze(0).repeat(batch_size, 1)
 
 
 def _synchronize(device: torch.device) -> None:
@@ -164,6 +164,8 @@ def _synchronize(device: torch.device) -> None:
         torch.cuda.synchronize(device)
     elif device.type == "mps":
         torch.mps.synchronize()
+    elif device.type == "npu":
+        torch.npu.synchronize()
 
 
 def _measure_generation(
@@ -171,12 +173,13 @@ def _measure_generation(
     tokenizer: Any,
     input_ids: torch.Tensor,
     *,
+    attention_mask: torch.Tensor,
     output_length: int,
     clock: Callable[[], float],
     synchronize: Callable[[torch.device], None],
 ) -> RunMetrics:
     device = input_ids.device
-    attention_mask = torch.ones_like(input_ids)
+    input_tokens = int(attention_mask.sum().item())
 
     synchronize(device)
     prefill_start = clock()
@@ -203,11 +206,7 @@ def _measure_generation(
             attention_mask = torch.cat(
                 (
                     attention_mask,
-                    torch.ones(
-                        (input_ids.shape[0], 1),
-                        dtype=attention_mask.dtype,
-                        device=device,
-                    ),
+                    attention_mask.new_ones((attention_mask.shape[0], 1)),
                 ),
                 dim=1,
             )
@@ -237,7 +236,8 @@ def _measure_generation(
     )
     return RunMetrics(
         batch_size=input_ids.shape[0],
-        input_length=input_ids.shape[1],
+        input_tokens=input_tokens,
+        padded_input_length=input_ids.shape[1],
         output_length=output_length,
         prefill_seconds=prefill_seconds,
         decode_seconds=decode_seconds,
@@ -249,86 +249,95 @@ def _measure_generation(
 def _validate_benchmark_arguments(
     *,
     batch_sizes: Sequence[int],
-    input_length: int,
+    num_prompts: int,
     output_length: int,
     warmup_runs: int,
-    measured_runs: int,
 ) -> None:
     if not batch_sizes:
         raise ValueError("batch_sizes must not be empty")
     if any(isinstance(value, bool) or value <= 0 for value in batch_sizes):
         raise ValueError("every batch size must be positive")
-    if isinstance(input_length, bool) or input_length <= 0:
-        raise ValueError("input_length must be positive")
+    if isinstance(num_prompts, bool) or num_prompts <= 0:
+        raise ValueError("num_prompts must be positive")
+    if any(num_prompts % batch_size != 0 for batch_size in batch_sizes):
+        raise ValueError("num_prompts must be divisible by every batch size")
     if isinstance(output_length, bool) or output_length <= 0:
         raise ValueError("output_length must be positive")
     if isinstance(warmup_runs, bool) or warmup_runs < 0:
         raise ValueError("warmup_runs must not be negative")
-    if isinstance(measured_runs, bool) or measured_runs <= 0:
-        raise ValueError("measured_runs must be positive")
 
 
 def run_benchmark(
     model: Any,
     tokenizer: Any,
+    dataset: BenchmarkDataset,
     *,
     model_type: str,
     mode: str,
     batch_sizes: Sequence[int],
-    input_length: int,
+    num_prompts: int,
     output_length: int,
     warmup_runs: int,
-    measured_runs: int,
     device: str | torch.device,
     clock: Callable[[], float] = time.perf_counter,
     synchronize: Callable[[torch.device], None] = _synchronize,
 ) -> BenchmarkReport:
-    """Run fixed-length generations and summarize phase-level performance."""
+    """Measure each selected dataset prompt once for every static batch size."""
 
     _validate_benchmark_arguments(
         batch_sizes=batch_sizes,
-        input_length=input_length,
+        num_prompts=num_prompts,
         output_length=output_length,
         warmup_runs=warmup_runs,
-        measured_runs=measured_runs,
     )
     resolved_device = torch.device(device)
-    batches: list[BatchBenchmark] = []
+    batch_results: list[BatchBenchmark] = []
+
     with torch.inference_mode():
         for batch_size in batch_sizes:
-            input_ids = build_fixed_input(
-                tokenizer,
-                batch_size=batch_size,
-                input_length=input_length,
-                device=resolved_device,
+            model_inputs = tuple(
+                dataset.iter_batches(
+                    tokenizer,
+                    batch_size=batch_size,
+                    num_prompts=num_prompts,
+                    output_length=output_length,
+                    device=resolved_device,
+                )
             )
+            if not model_inputs:
+                raise ValueError("dataset produced no model-input batches")
+
+            warmup_input = model_inputs[0]
             for _ in range(warmup_runs):
                 _measure_generation(
                     model,
                     tokenizer,
-                    input_ids,
+                    warmup_input.input_ids,
+                    attention_mask=warmup_input.attention_mask,
                     output_length=output_length,
                     clock=clock,
                     synchronize=synchronize,
                 )
-            runs = tuple(
+
+            measurements = tuple(
                 _measure_generation(
                     model,
                     tokenizer,
-                    input_ids,
+                    model_input.input_ids,
+                    attention_mask=model_input.attention_mask,
                     output_length=output_length,
                     clock=clock,
                     synchronize=synchronize,
                 )
-                for _ in range(measured_runs)
+                for model_input in model_inputs
             )
-            batches.append(BatchBenchmark(batch_size, runs))
+            batch_results.append(BatchBenchmark(batch_size, measurements))
+
     return BenchmarkReport(
         model_type=model_type,
         mode=mode,
-        input_length=input_length,
+        num_prompts=num_prompts,
         output_length=output_length,
         warmup_runs=warmup_runs,
-        measured_runs=measured_runs,
-        batches=tuple(batches),
+        batches=tuple(batch_results),
     )

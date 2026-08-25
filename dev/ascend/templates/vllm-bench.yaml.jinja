@@ -1,0 +1,21 @@
+backend: vllm
+model: {{ model.name }}
+tokenizer: /model/{{ model.name }}
+endpoint: /v1/completions
+base-url: http://attention:8000
+num-prompts: {{ run.num_prompts }}
+{% if dataset.type == "random" %}
+input-len: {{ run.input_len }}
+output-len: {{ run.output_len }}
+{% else %}
+dataset-name: {{ dataset.type }}
+dataset-path: {{ dataset.mounted_path }}/{{ dataset.file }}
+output-len: {{ run.output_len }}
+{% endif %}
+num-warmups: {{ run.num_warmups }}
+max-concurrency: {{ run.max_concurrency }}
+ignore-eos: {{ run.ignore_eos | lower }}
+temperature: {{ run.temperature }}
+save-result: {{ run.save_result | lower }}
+result-dir: /results
+label: {{ label }}
