@@ -47,15 +47,20 @@ def test_model_benchmark_runs_through_expert_kit(
         sys.executable,
         "-m",
         "expertkit_torch.benchmark.cli",
+        "run",
         "--model-path",
         str(Path(model_path).resolve()),
         "--controller-endpoint",
         endpoint,
-        "--batch-sizes",
-        "1",
         "--dataset-path",
         str(Path(dataset_path).resolve()),
+        "--device-platform",
+        "npu",
+        "--device-ids",
+        "0",
         "--num-prompts",
+        "1",
+        "--max-concurrency",
         "1",
         "--output-length",
         "20",
@@ -74,4 +79,4 @@ def test_model_benchmark_runs_through_expert_kit(
 
     assert completed.returncode == 0, completed.stderr
     assert f"Model: {model_name}" in completed.stdout
-    assert "Output tok/s" in completed.stdout
+    assert "Output throughput (tok/s):" in completed.stdout

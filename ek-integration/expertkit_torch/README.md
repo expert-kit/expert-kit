@@ -67,21 +67,33 @@ shuffle. Each static Torch batch is left-padded, performs one prefill call, and
 then runs greedy one-token decode calls that reuse the attention key/value
 cache. EOS does not stop the run, so every prompt generates the configured
 number of tokens.
+The CLI also displays one prompt-level progress bar; each completed forward
+batch advances it by the batch's actual size, including a smaller final batch.
 
 ```bash
-uv run --package expertkit-torch ek-torch-benchmark \
+uv run --package expertkit-torch ek-torch-benchmark run \
   --model-path /models/DeepSeek-V2-Lite-Chat \
   --mode expertkit \
   --controller-endpoint 10.0.0.10:5002 \
   --dataset-path /datasets/ShareGPT.json \
+  --device-platform cuda \
+  --device-ids 0 \
   --seed 0 \
   --num-prompts 16 \
-  --batch-sizes 1 \
+  --max-concurrency 1 \
   --output-length 128 \
   --warmup-runs 1 \
-  --device cuda:0 \
   --dtype auto \
   --json-output /tmp/deepseek-v2-benchmark.json
+```
+
+For generated Ascend inputs, pass the flat YAML as optional defaults. Explicit
+`run` options override the corresponding file values:
+
+```bash
+uv run --package expertkit-torch ek-torch-benchmark \
+  --config dev/ascend/generated/torch-bench.yaml run \
+  --device-ids 0 --max-concurrency 4
 ```
 
 The Frontend does not select a Transport on the command line. Each Worker
@@ -91,8 +103,10 @@ Frontend must share the same OS shared-memory namespace and Unix user. SHM does
 not work across machines and does not remove GPU-to-Host or Host-to-GPU
 transfers.
 
-The command reports medians across the selected static input batches. The
-prompt count must be divisible by every requested batch size:
+The command reports one measured static batch per rank. Global maximum
+concurrency must be divisible by the selected rank count; each rank receives
+`max_concurrency / rank_count` requests. Multi-device runs spawn one process
+per device without DDP or HCCL:
 
 - `Prefill ms` is the first full-input model call.
 - `Prefill tok/s` is aggregate input tokens divided by prefill time.
@@ -116,12 +130,14 @@ identical local and Expert Kit runs when qualifying a dependency upgrade.
 Run the same workload locally by changing only the mode:
 
 ```bash
-uv run --package expertkit-torch ek-torch-benchmark \
+uv run --package expertkit-torch ek-torch-benchmark run \
   --model-path /models/DeepSeek-V2-Lite-Chat \
   --mode local \
   --dataset-path /datasets/ShareGPT.json \
   --num-prompts 16 \
-  --batch-sizes 1 \
+  --device-platform cuda \
+  --device-ids 0 \
+  --max-concurrency 1 \
   --output-length 20
 ```
 

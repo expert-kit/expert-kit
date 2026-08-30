@@ -60,4 +60,4 @@ paths:
   datasets:
     sharegpt: "<HOST_SHAREGPT_DIRECTORY>"
     code-agent: "<HOST_CODE_AGENT_DIRECTORY>"
-  results: ../results
+  results: "<HOST_RESULTS_DIRECTORY>"

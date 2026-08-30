@@ -1,195 +1,157 @@
-# Ascend deployment configuration prototype
+# Ascend deployment configuration
 
-`dev/ascend` replaces deployment `.env` files with two human-readable YAML
-inputs. Pydantic validates them, resolves logical references, and gives one
-flattened `GenerationContext` to Jinja. Jinja writes concrete runtime and
-Compose YAML below the project-local, ignored `generated/` directory.
+`dev/ascend` turns two human-readable YAML files into concrete Compose and
+runtime configuration for an EK deployment. Pydantic validates the inputs,
+resolves logical references, and passes one `GenerationContext` to strict Jinja
+templates. Generated files stay project-local and are never author inputs.
 
-This is a prototype. `main.py generate` is the narrow configuration CLI; Host
-preflight, deployment locks, distribution, and service lifecycle commands are
-deferred until hardware qualification succeeds.
+For the complete two-Host 910C procedure, see the
+[Ascend deployment tutorial](../../doc/tutorial/ascend/README.md).
 
-## File ownership
+## Inputs and ownership
 
-| File | Owner | Lifecycle |
+| File | Owns | Lifecycle |
 | --- | --- | --- |
-| `configs/cluster.example.yaml` | repository | Checked-in schema example with placeholders |
-| `configs/experiment.example.yaml` | repository | Checked-in model, dataset, and benchmark example |
-| `configs/cluster.yaml` | deployment operator | Ignored; real addresses, devices, ports, and Host paths |
-| `configs/experiment.yaml` | deployment operator | Ignored; selected model, dataset, and benchmark settings |
-| `templates/*.jinja` | repository | Checked-in output templates |
-| `compose/compose.build.yaml` | repository | Standalone definitions for building the three runtime images |
-| `generated/` | renderer | Ignored; never hand-edited or used as author input |
-| `results/` | benchmark | Ignored benchmark output |
+| `configs/cluster.example.yaml` | Documented cluster example | Checked in |
+| `configs/experiment.example.yaml` | Documented experiment example | Checked in |
+| `configs/cluster.yaml` | Host addresses, devices, ports, images, and paths | Host-local and ignored |
+| `configs/experiment.yaml` | Model, dataset adapter, serving, and benchmark settings | Host-local and ignored |
+| `templates/*.jinja` | Runtime and Compose output shapes | Checked in |
+| `generated/` | Rendered Compose and runtime YAML | Generated and ignored |
 
-All Host-side files stay inside the EK checkout under the operator's home
-directory. Paths such as `/etc/expert-kit` are container targets only.
+All Host-side files remain inside the EK checkout under the operator's home
+directory. Paths such as `/etc/expert-kit` are container-side mount targets.
+The generator does not use deployment `.env` files.
+
+### `cluster.yaml`
+
+`cluster.yaml` describes where the deployment runs:
+
+- the stable Docker Compose `project_name`;
+- attention, control, and expert role placement;
+- physical NPU IDs and published Host ports;
+- runtime image references and Worker limits;
+- model, dataset, and result path registries.
+
+`project_name` is the Compose resource namespace. It is separate from
+`inference.instance_name`, which identifies the EK runtime instance.
+
+### `experiment.yaml`
+
+`experiment.yaml` describes what to run:
+
+- model identity, shape, and `path_ref`;
+- dataset parser and optional `path_ref`;
+- vLLM serving limits;
+- prompt count, concurrency, output length, warmups, and sampling settings.
+
+`model.path_ref` indexes `cluster.paths.models`. A file-backed dataset's
+`dataset.path_ref` indexes `cluster.paths.datasets`.
+
+| Dataset type | Required path fields | Prompt length |
+| --- | --- | --- |
+| `random` | None | `run.input_len` is required |
+| `sharegpt` | `path_ref`, `mounted_path`, `file` | Read from the dataset; omit `run.input_len` |
+| `custom` | `path_ref`, `mounted_path`, `file` | Read from the dataset; omit `run.input_len` |
+
+`dataset.name` is a human-readable result-label component. `dataset.type`
+selects the vLLM parser.
 
 ## File tree
 
 ```text
 dev/ascend/
 ├── README.md
-├── .gitignore
-├── main.py                         # typed generate CLI
+├── main.py                         # Typer generate command
 ├── renderer.py                     # StrictUndefined Jinja renderer
-├── bench_launcher.py               # maps benchmark YAML to vllm bench argv
-├── run-compose.sh                  # selects one generated Host-role bundle
-├── schemas/
-│   ├── config.py                   # strict immutable Pydantic base
-│   ├── cluster.py                  # nodes, roles, devices, ports, path registries
-│   ├── experiment.py               # model, dataset, and benchmark settings
-│   └── context.py                  # ref resolution and GenerationContext
+├── bench_launcher.py               # vLLM benchmark YAML adapter
+├── run-compose.sh                  # selects one generated role bundle
+├── schemas/                        # input and generation-context models
 ├── configs/
-│   ├── cluster.example.yaml        # checked in
-│   ├── experiment.example.yaml     # checked in
-│   ├── cluster.yaml                # ignored Host-local input
-│   └── experiment.yaml             # ignored run-local input
+│   ├── cluster.example.yaml
+│   ├── experiment.example.yaml
+│   ├── cluster.yaml                    # ignored
+│   └── experiment.yaml                 # ignored
 ├── compose/
-│   └── compose.build.yaml          # standalone image builds
+│   └── compose.build.yaml              # image builds
 ├── templates/
-│   ├── compose.attention.yaml.jinja
-│   ├── compose.attention.dev.yaml.jinja
-│   ├── compose.expert.yaml.jinja
-│   ├── compose.expert.dev.yaml.jinja
+│   ├── compose.attention*.yaml.jinja
+│   ├── compose.expert*.yaml.jinja
 │   ├── controller.yaml.jinja
 │   ├── worker.yaml.jinja
 │   ├── vllm-serve.yaml.jinja
-│   └── vllm-bench.yaml.jinja
-├── generated/                      # ignored
-│   ├── compose.attention.yaml
-│   ├── compose.attention.dev.yaml
-│   ├── compose.expert.yaml
-│   ├── compose.expert.dev.yaml
-│   ├── controller.yaml
-│   ├── vllm-serve.yaml
-│   ├── vllm-bench.yaml
-│   └── workers/worker-NN.yaml
-└── results/                        # ignored
+│   ├── vllm-bench.yaml.jinja
+│   └── torch-bench.yaml.jinja
+└── generated/                      # ignored
+    ├── compose.attention*.yaml
+    ├── compose.expert*.yaml
+    ├── controller.yaml
+    ├── vllm-serve.yaml
+    ├── vllm-bench.yaml
+    ├── torch-bench.yaml            # ShareGPT only
+    └── workers/worker-NN.yaml
 ```
 
 ## Data flow
 
 ```mermaid
 flowchart LR
-    subgraph authored["Author inputs"]
-        cluster["cluster.yaml<br/>nodes · roles · devices<br/>ports · path registries"]
-        experiment["experiment.yaml<br/>model · dataset · run"]
+    subgraph inputs["Host-local inputs"]
+        cluster["cluster.yaml<br/>placement · devices · ports · paths"]
+        experiment["experiment.yaml<br/>model · dataset · serve · run"]
     end
 
-    cluster --> parse["Strict Pydantic models<br/>extra fields forbidden"]
-    experiment --> parse
-    parse --> resolve["resolve_ref()<br/>node · model path · dataset path"]
-    resolve --> context["GenerationContext<br/>RoleContext + ArtifactContext<br/>derived workers + label"]
-    context --> singleton["Singleton rendering<br/>Compose · Controller<br/>vLLM serve · benchmark"]
-    context --> workers["Worker expansion<br/>one device → one Worker YAML"]
-    singleton --> generated["generated/<br/>project-local · ignored"]
+    cluster --> validation["Strict Pydantic validation"]
+    experiment --> validation
+    validation --> resolution["Resolve node and artifact references"]
+    resolution --> context["GenerationContext<br/>derived DP, Workers, and label"]
+    context --> singleton["Compose, Controller, vLLM, benchmark YAML"]
+    context --> workers["One Worker YAML per expert device"]
+    singleton --> generated["generated/"]
     workers --> generated
-    generated --> attention["run-compose.sh attention"]
-    generated --> expert["run-compose.sh expert"]
+    generated --> attention["attention role bundle"]
+    generated --> expert["expert role bundle"]
+    generated --> torch["Host-native Torch ablation"]
 ```
 
-`resolve_ref()` is the common lookup primitive. A role context wraps its
-configuration with a resolved node. An artifact context wraps a model or
-dataset configuration with its resolved Host path. Their Pydantic serializers
-flatten those nested values for Jinja, so templates use fields such as
-`attention.address`, `model.path`, and `dataset.mounted_path` directly.
+Role and artifact contexts retain their source configuration together with the
+resolved node or path. Their serializers flatten that structure for templates,
+so Jinja uses values such as `attention.address`, `model.path`, and
+`dataset.mounted_path` directly.
 
-## Create local inputs
+## Generate and validate
+
+Create the ignored local inputs once:
 
 ```bash
-cp dev/ascend/configs/cluster.example.yaml \
-  dev/ascend/configs/cluster.yaml
-cp dev/ascend/configs/experiment.example.yaml \
-  dev/ascend/configs/experiment.yaml
+cp dev/ascend/configs/cluster.example.yaml dev/ascend/configs/cluster.yaml
+cp dev/ascend/configs/experiment.example.yaml dev/ascend/configs/experiment.yaml
 ```
 
-Replace every placeholder in `cluster.yaml`. Registry keys connect the two
-files: `model.path_ref` indexes `cluster.paths.models`, and a file-backed
-`dataset.path_ref` indexes `cluster.paths.datasets`.
-
-`cluster.project_name` is the stable Docker Compose namespace. It prefixes
-runtime containers, networks, and named volumes and is independent of
-`inference.instance_name`, which identifies the EK runtime instance. Use the
-same project name when generating the attention and expert role files.
-
-Dataset fields have these meanings:
-
-| Field | Meaning |
-| --- | --- |
-| `type` | vLLM parser: `random`, `sharegpt`, or `custom` |
-| `name` | Human-readable dataset identity used in result labels |
-| `path_ref` | Logical key for a Host dataset directory; omitted for `random` |
-| `mounted_path` | Dataset directory inside the benchmark container |
-| `file` | Dataset filename inside that directory |
-
-Random datasets must omit all three path fields. ShareGPT and custom datasets
-must provide all three.
-
-`cluster.yaml` also owns exact runtime image references, the project-local
-result path, Controller database/liveness values, and shared Worker limits.
-`experiment.yaml` owns vLLM serving limits and benchmark request/generation
-options. Stable container service names, internal ports, and mount targets stay
-in the templates because they are runtime interfaces, not Host choices.
-`run.input_len` is required for random data and forbidden for ShareGPT/custom,
-whose files supply the prompt lengths.
-
-## Generate files
-
-From the repository root:
+Replace every placeholder, then generate from the repository root:
 
 ```bash
-uv run python dev/ascend/main.py generate
+uv run dev/ascend/main.py generate
 ```
 
-Alternate project-local inputs and output directories can be selected
-explicitly:
+Explicit paths are available for automation:
 
 ```bash
-uv run python dev/ascend/main.py generate \
+uv run dev/ascend/main.py generate \
   --cluster dev/ascend/configs/cluster.yaml \
   --experiment dev/ascend/configs/experiment.yaml \
   --output dev/ascend/generated
 ```
 
-Generation rejects unknown YAML fields, missing references, invalid dataset
-path combinations, and undefined Jinja variables before writing a complete
-runtime configuration.
-
-## Build images
-
-`compose/compose.build.yaml` is independent of the generated runtime Compose
-files:
-
-```bash
-docker compose -f dev/ascend/compose/compose.build.yaml build
-```
-
-It builds and tags `ek-runtime`, `ek-worker-ascend-runtime`, and
-`ek-vllm-ascend-runtime`. The attention image expects the EK attention wheels
-under `dist/attention-wheels/` as required by `container/Dockerfile.npu`.
-
-## Validate and run Compose
-
-Validate each Host role after generation:
+Generation rejects unknown fields, unresolved references, invalid dataset/run
+combinations, and undefined template variables. Validate both generated
+Compose role bundles before deployment:
 
 ```bash
 dev/ascend/run-compose.sh attention config -q
 dev/ascend/run-compose.sh expert config -q
 ```
 
-Start services on the corresponding Host:
-
-```bash
-dev/ascend/run-compose.sh attention up -d
-dev/ascend/run-compose.sh expert up -d
-```
-
-Run the optional benchmark on the attention Host:
-
-```bash
-dev/ascend/run-compose.sh attention run --rm benchmark
-```
-
-`run-compose.sh` selects only the attention or expert generated pair. It does
-not read `.env`, build images, or reinterpret configuration values.
+`main.py` currently generates configuration only. Host preflight, deployment
+locks, artifact distribution, and service lifecycle commands remain outside
+this prototype.

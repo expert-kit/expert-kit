@@ -259,8 +259,6 @@ def _validate_benchmark_arguments(
         raise ValueError("every batch size must be positive")
     if isinstance(num_prompts, bool) or num_prompts <= 0:
         raise ValueError("num_prompts must be positive")
-    if any(num_prompts % batch_size != 0 for batch_size in batch_sizes):
-        raise ValueError("num_prompts must be divisible by every batch size")
     if isinstance(output_length, bool) or output_length <= 0:
         raise ValueError("output_length must be positive")
     if isinstance(warmup_runs, bool) or warmup_runs < 0:
@@ -281,6 +279,8 @@ def run_benchmark(
     device: str | torch.device,
     clock: Callable[[], float] = time.perf_counter,
     synchronize: Callable[[torch.device], None] = _synchronize,
+    before_measurement: Callable[[], None] | None = None,
+    on_progress: Callable[[int], None] | None = None,
 ) -> BenchmarkReport:
     """Measure each selected dataset prompt once for every static batch size."""
 
@@ -319,8 +319,12 @@ def run_benchmark(
                     synchronize=synchronize,
                 )
 
-            measurements = tuple(
-                _measure_generation(
+            if before_measurement is not None:
+                before_measurement()
+
+            measurements: list[RunMetrics] = []
+            for model_input in model_inputs:
+                measurement = _measure_generation(
                     model,
                     tokenizer,
                     model_input.input_ids,
@@ -329,9 +333,10 @@ def run_benchmark(
                     clock=clock,
                     synchronize=synchronize,
                 )
-                for model_input in model_inputs
-            )
-            batch_results.append(BatchBenchmark(batch_size, measurements))
+                measurements.append(measurement)
+                if on_progress is not None:
+                    on_progress(measurement.batch_size)
+            batch_results.append(BatchBenchmark(batch_size, tuple(measurements)))
 
     return BenchmarkReport(
         model_type=model_type,

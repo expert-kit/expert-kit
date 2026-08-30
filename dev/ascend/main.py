@@ -9,7 +9,7 @@ import typer
 from renderer import Renderer
 from schemas.cluster import ClusterConfig, WorkerConfig
 from schemas.context import GenerationContext
-from schemas.experiment import ExperimentConfig
+from schemas.experiment import DatasetType, ExperimentConfig
 from utils import long_banner
 
 ASCEND_DIR = Path(__file__).resolve().parent
@@ -38,6 +38,7 @@ class Templates:
     COMPOSE_EXPERT = "compose.expert.yaml.jinja"
     VLLM_SERVE = "vllm-serve.yaml.jinja"
     VLLM_BENCH = "vllm-bench.yaml.jinja"
+    TORCH_BENCH = "torch-bench.yaml.jinja"
     CONTROLLER = "controller.yaml.jinja"
     WORKER = "worker.yaml.jinja"
 
@@ -71,6 +72,12 @@ def generate_singleton_yamls(
     template_context = context.model_dump(mode="json")
     for output_file, template_name in paths.singleton_outputs():
         renderer.render_to_file(output_file, template_name, **template_context)
+    if context.dataset.config.type is DatasetType.SHAREGPT:
+        renderer.render_to_file(
+            paths.root / "torch-bench.yaml",
+            Templates.TORCH_BENCH,
+            **template_context,
+        )
 
 
 def generate_worker_yamls(

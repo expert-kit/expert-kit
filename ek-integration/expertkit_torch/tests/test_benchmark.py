@@ -184,6 +184,30 @@ def test_warmups_are_excluded_from_measurements() -> None:
     assert len(report.batches[0].measurements) == 1
 
 
+def test_progress_reports_measured_batch_sizes_but_not_warmups() -> None:
+    progress: list[int] = []
+    report = run_benchmark(
+        FakeModel(),
+        FakeTokenizer(),
+        FakeDataset(
+            _model_input([[4, 5], [6, 7]], [[1, 1], [1, 1]]),
+            _model_input([[8, 9, 10]], [[1, 1, 1]]),
+        ),
+        model_type="qwen3_moe",
+        mode="local",
+        batch_sizes=(2,),
+        num_prompts=3,
+        output_length=1,
+        warmup_runs=1,
+        device="cpu",
+        synchronize=lambda _: None,
+        on_progress=progress.append,
+    )
+
+    assert progress == [2, 1]
+    assert sum(progress) == report.num_prompts
+
+
 def test_batch_summary_uses_medians_and_keeps_raw_measurements() -> None:
     batch = BatchBenchmark(
         2,
@@ -210,7 +234,6 @@ def test_batch_summary_uses_medians_and_keeps_raw_measurements() -> None:
         ({"batch_sizes": ()}, "batch_sizes"),
         ({"batch_sizes": (0,)}, "batch size"),
         ({"num_prompts": 0}, "num_prompts"),
-        ({"batch_sizes": (2,), "num_prompts": 1}, "divisible"),
         ({"output_length": 0}, "output_length"),
         ({"warmup_runs": -1}, "warmup_runs"),
     ],

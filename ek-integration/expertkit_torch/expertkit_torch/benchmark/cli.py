@@ -1,135 +1,146 @@
-"""Command-line entry point for the shared Torch model benchmark."""
+"""Typer entry point for the shared Torch model benchmark."""
 
 from __future__ import annotations
 
-import argparse
 import json
 from collections.abc import Sequence
 from pathlib import Path
+from typing import Annotated
 
-from expertkit_torch.benchmark.datasets import ShareGPTDataset
-from expertkit_torch.benchmark.runner import BenchmarkReport, run_benchmark
-from expertkit_torch.models import load_model
+import typer
 
+from expertkit_torch.benchmark.config import (
+    BenchmarkConfig,
+    BenchmarkDtype,
+    BenchmarkMode,
+    DatasetName,
+    DevicePlatform,
+    LauncherKind,
+)
+from expertkit_torch.benchmark.launcher import GlobalBenchmarkReport, select_launcher
 
-def _positive_int(value: str) -> int:
-    parsed = int(value)
-    if parsed <= 0:
-        raise argparse.ArgumentTypeError("value must be positive")
-    return parsed
-
-
-def _nonnegative_int(value: str) -> int:
-    parsed = int(value)
-    if parsed < 0:
-        raise argparse.ArgumentTypeError("value must not be negative")
-    return parsed
-
-
-def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="ek-torch-benchmark")
-    parser.add_argument("--model-path", required=True)
-    parser.add_argument("--mode", choices=("expertkit", "local"), default="expertkit")
-    parser.add_argument("--controller-endpoint", default="127.0.0.1:5002")
-    parser.add_argument("--instance-id", type=_positive_int)
-    parser.add_argument("--batch-sizes", nargs="+", type=_positive_int, default=[1])
-    parser.add_argument("--dataset-name", choices=("sharegpt",), default="sharegpt")
-    parser.add_argument("--dataset-path", type=Path, required=True)
-    parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--num-prompts", type=_positive_int, default=16)
-    parser.add_argument("--output-length", type=_positive_int, default=20)
-    parser.add_argument("--warmup-runs", type=_nonnegative_int, default=1)
-    parser.add_argument("--device", default="cuda:0")
-    parser.add_argument(
-        "--dtype",
-        choices=("auto", "float16", "bfloat16", "float32"),
-        default="auto",
-    )
-    parser.add_argument("--json-output", type=Path)
-    return parser
+app = typer.Typer(
+    help="Run Expert Kit Torch frontend benchmarks.",
+    no_args_is_help=True,
+    pretty_exceptions_show_locals=False,
+)
 
 
-def _format_optional(value: object, format_spec: str) -> str:
-    if value is None:
-        return "-"
-    return format(value, format_spec)
+@app.callback()
+def _configure(
+    context: typer.Context,
+    config: Annotated[
+        Path | None,
+        typer.Option(
+            "--config",
+            "-c",
+            exists=True,
+            dir_okay=False,
+            readable=True,
+            help="Generated Torch benchmark YAML used as run defaults.",
+        ),
+    ] = None,
+) -> None:
+    """Load an optional config before the run command parses its options."""
+
+    if config is not None:
+        loaded = BenchmarkConfig.from_yaml(config)
+        context.default_map = {
+            "run": loaded.model_dump(mode="python", by_alias=False),
+        }
 
 
-def format_report(report: BenchmarkReport) -> str:
-    """Format median benchmark results as a compact table."""
+@app.command("run")
+def run(
+    model_path: Annotated[Path, typer.Option(help="Host model checkpoint directory.")],
+    dataset_path: Annotated[Path, typer.Option(help="Host ShareGPT JSON path.")],
+    device_platform: Annotated[
+        DevicePlatform,
+        typer.Option(help="Torch device platform."),
+    ],
+    device_ids: Annotated[
+        list[int],
+        typer.Option(help="One or more device IDs, in rank order."),
+    ],
+    num_prompts: Annotated[int, typer.Option(min=1)],
+    max_concurrency: Annotated[int, typer.Option(min=1)],
+    output_length: Annotated[int, typer.Option(min=1)],
+    mode: BenchmarkMode = BenchmarkMode.EXPERTKIT,
+    controller_endpoint: str | None = None,
+    instance_id: int | None = None,
+    launcher: LauncherKind = LauncherKind.AUTO,
+    dtype: BenchmarkDtype = BenchmarkDtype.AUTO,
+    dataset_name: DatasetName = DatasetName.SHAREGPT,
+    seed: int = 0,
+    warmup_runs: Annotated[int, typer.Option(min=0)] = 1,
+    json_output: Path | None = None,
+) -> None:
+    """Run one inline or multi-device Torch benchmark."""
+
+    config = BenchmarkConfig(
+        mode=mode,
+        controller_endpoint=controller_endpoint,
+        instance_id=instance_id,
+        launcher=launcher,
+        device_platform=device_platform,
+        device_ids=tuple(device_ids),
+        model_path=model_path,
+        dtype=dtype,
+        dataset_name=dataset_name,
+        dataset_path=dataset_path,
+        seed=seed,
+        num_prompts=num_prompts,
+        max_concurrency=max_concurrency,
+        output_length=output_length,
+        warmup_runs=warmup_runs,
+        json_output=json_output,
+    ).resolve_paths(Path.cwd())
+
+    report = select_launcher(config).launch(config)
+    typer.echo(format_report(report))
+    if config.json_output is not None:
+        config.json_output.parent.mkdir(parents=True, exist_ok=True)
+        config.json_output.write_text(
+            json.dumps(
+                report.as_dict(configuration=config.model_dump(mode="json", by_alias=False)),
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+
+def format_report(report: GlobalBenchmarkReport) -> str:
+    """Format global and per-rank throughput results."""
 
     lines = [
         f"Model: {report.model_type}  Mode: {report.mode}",
-        (
-            "Batch  Input tok  Pad len  Output  Prefill ms  Prefill tok/s  "
-            "Decode ms  Decode tok/s  Decode ms/step  Total ms  Output tok/s"
-        ),
+        f"Ranks: {len(report.rank_reports)}  Prompts: {report.num_prompts}",
+        f"Benchmark duration (s): {report.duration_seconds:.2f}",
+        f"Input tokens: {report.input_tokens}",
+        f"Output tokens: {report.output_tokens}",
+        f"Request throughput (req/s): {report.request_throughput:.2f}",
+        f"Output throughput (tok/s): {report.output_throughput:.2f}",
+        f"Total throughput (tok/s): {report.total_throughput:.2f}",
+        "Rank  Device  Prompts  Batch/rank  Duration (s)",
     ]
-    for batch in report.batches:
-        result = batch.median()
-        lines.append(
-            f"{result['batch_size']:>5}  "
-            f"{result['input_tokens']:>9.0f}  "
-            f"{result['padded_input_length']:>7.0f}  "
-            f"{result['output_length']:>6}  "
-            f"{result['prefill_seconds'] * 1000:>10.2f}  "
-            f"{result['prefill_tps']:>13.2f}  "
-            f"{result['decode_seconds'] * 1000:>9.2f}  "
-            f"{_format_optional(result['decode_tps'], '>12.2f')}  "
-            f"{_format_optional(result['decode_step_ms'], '>14.2f')}  "
-            f"{result['total_seconds'] * 1000:>8.2f}  "
-            f"{result['output_tps']:>12.2f}"
-        )
+    lines.extend(
+        f"{rank.assignment.rank:>4}  "
+        f"{rank.assignment.device_id:>6}  "
+        f"{rank.benchmark.num_prompts:>7}  "
+        f"{rank.benchmark.batches[0].batch_size:>10}  "
+        f"{rank.duration:>12.2f}"
+        for rank in report.rank_reports
+    )
     return "\n".join(lines)
 
 
-def main(argv: Sequence[str] | None = None) -> int:
-    """Load a supported model, run the benchmark, and print median results."""
+def main(args: Sequence[str] | None = None) -> None:
+    """Console-script entry point."""
 
-    arguments = _parser().parse_args(argv)
-    dataset = ShareGPTDataset(arguments.dataset_path, seed=arguments.seed)
-    with load_model(
-        arguments.model_path,
-        mode=arguments.mode,
-        controller_endpoint=arguments.controller_endpoint,
-        instance_id=arguments.instance_id,
-        device=arguments.device,
-        dtype=arguments.dtype,
-    ) as loaded:
-        report = run_benchmark(
-            loaded.model,
-            loaded.tokenizer,
-            dataset,
-            model_type=loaded.model_type,
-            mode=arguments.mode,
-            batch_sizes=arguments.batch_sizes,
-            num_prompts=arguments.num_prompts,
-            output_length=arguments.output_length,
-            warmup_runs=arguments.warmup_runs,
-            device=arguments.device,
-        )
-    print(format_report(report))
-    if arguments.json_output is not None:
-        payload = report.as_dict()
-        payload["configuration"] = {
-            "model_path": arguments.model_path,
-            "dataset_name": arguments.dataset_name,
-            "dataset_path": str(arguments.dataset_path),
-            "seed": arguments.seed,
-            "device": arguments.device,
-            "requested_dtype": arguments.dtype,
-            "controller_endpoint": (
-                arguments.controller_endpoint if arguments.mode == "expertkit" else None
-            ),
-            "instance_id": arguments.instance_id if arguments.mode == "expertkit" else None,
-        }
-        arguments.json_output.parent.mkdir(parents=True, exist_ok=True)
-        arguments.json_output.write_text(
-            json.dumps(payload, indent=2, sort_keys=True) + "\n",
-            encoding="utf-8",
-        )
-    return 0
+    app(args=args)
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    main()
