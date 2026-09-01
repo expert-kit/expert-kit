@@ -1,8 +1,11 @@
 from __future__ import annotations
-import yaml
-from typing import Self
-from pydantic import Field, IPvAnyAddress, computed_field
+
 from pathlib import Path
+from typing import Self
+
+import yaml
+from pydantic import Field, IPvAnyAddress, computed_field, model_validator
+
 from .config import ConfigModel
 
 
@@ -13,7 +16,10 @@ class ClusterConfig(ConfigModel):
     )
     inference: Inference
     images: ImageConfig
-    roles: RolesConfig
+    attention: AttentionConfig
+    control: ControlConfig
+    expert: ExpertConfig
+    pools: list[PoolConfig]
     nodes: dict[str, NodeConfig]
     paths: PathConfig
 
@@ -22,22 +28,29 @@ class ClusterConfig(ConfigModel):
         data = yaml.safe_load(file.read_text())
         return cls.model_validate(data)
 
+    @model_validator(mode="after")
+    def validate_unValueErrorique_pool_ids(self) -> Self:
+        allocated_ids = set()
+        for pool in self.pools:
+            if pool.id in allocated_ids:
+                raise ValueError(f"Pool IDs must be unique: {pool.id}")
+            allocated_ids.add(pool.id)
+        return self
+
 
 class Inference(ConfigModel):
     instance_name: str
 
 
 class ImageConfig(ConfigModel):
+    rust: str
+    uv: str
+    control_base: str
+    vllm_ascend: str
     postgres: str
     control: str
     attention: str
     expert: str
-
-
-class RolesConfig(ConfigModel):
-    attention: AttentionConfig
-    control: ControlConfig
-    expert: ExpertConfig
 
 
 class NodeConfig(ConfigModel):
@@ -59,6 +72,12 @@ class AttentionConfig(ConfigModel):
     def dp_size(self) -> int:
         return len(self.devices)
 
+    @property
+    def allocated_ports(self) -> set[int]:
+        return {
+            self.vllm_port,
+        }
+
 
 class ControlConfig(ConfigModel):
     node: str
@@ -68,6 +87,15 @@ class ControlConfig(ConfigModel):
     weight_server_port: int
     database: DatabaseConfig
     fault_detection: FaultDetectionConfig
+
+    @property
+    def allocated_ports(self) -> set[int]:
+        return {
+            self.postgres_port,
+            self.worker_control_port,
+            self.frontend_control_port,
+            self.weight_server_port,
+        }
 
 
 class DatabaseConfig(ConfigModel):
@@ -84,17 +112,37 @@ class FaultDetectionConfig(ConfigModel):
 
 
 class ExpertConfig(ConfigModel):
+    runtime: ExpertRuntimeConfig
+
+
+class ExpertRuntimeConfig(ConfigModel):
+    max_batch_tokens: int
+    max_active_batches_per_device: int
+    device_memory_limit: str
+    shutdown_grace_secs: int
+    max_pending_batches_per_device: int
+    heartbeat_interval_secs: int
+    heartbeat_timeout_secs: int
+    max_concurrent_loads: int
+
+
+class PoolConfig(ConfigModel):
+    id: str = Field(
+        min_length=1,
+        pattern=r"^[a-z0-9][a-z0-9_-]*$",
+    )
     node: str
-    workers: WorkersMeta
-
-
-class WorkersMeta(ConfigModel):
     devices: list[int]
     start_worker_port: int
     start_peer_port: int
-    runtime: WorkerRuntimeConfig
 
-    def generate_workers(self) -> list[WorkerConfig]:
+    @property
+    def worker_count(self) -> int:
+        return len(self.devices)
+
+    @computed_field
+    @property
+    def workers(self) -> list[WorkerConfig]:
         workers: list[WorkerConfig] = []
         for idx, device in enumerate(self.devices):
             workers.append(
@@ -107,16 +155,14 @@ class WorkersMeta(ConfigModel):
             )
         return workers
 
+    @property
+    def allocated_ports(self) -> set[int]:
+        ports = set()
+        for worker in self.workers:
+            ports.add(worker.port)
+            ports.add(worker.peer_port)
 
-class WorkerRuntimeConfig(ConfigModel):
-    max_batch_tokens: int
-    max_active_batches_per_device: int
-    device_memory_limit: str
-    shutdown_grace_secs: int
-    max_pending_batches_per_device: int
-    heartbeat_interval_secs: int
-    heartbeat_timeout_secs: int
-    max_concurrent_loads: int
+        return ports
 
 
 class WorkerConfig(ConfigModel):

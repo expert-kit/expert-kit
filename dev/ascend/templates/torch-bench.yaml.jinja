@@ -4,7 +4,7 @@ launcher: auto
 device-platform: npu
 device-ids: {{ attention.devices }}
 model-path: "{{ model.path }}"
-dtype: {{ model.dtype }}
+dtype: {{ model.activation_dtype }}
 dataset-name: {{ dataset.type }}
 dataset-path: "{{ dataset.path }}/{{ dataset.file }}"
 seed: 0

@@ -21,8 +21,9 @@ def _inputs(tmp_path: Path, *, dataset_type: str = "sharegpt") -> tuple[Path, Pa
     shutil.copy(ASCEND / "configs" / "experiment.example.yaml", experiment)
 
     cluster_data = yaml.safe_load(cluster.read_text(encoding="utf-8"))
-    cluster_data["nodes"]["attention-node"]["address"] = "192.0.2.10"
-    cluster_data["nodes"]["expert-node"]["address"] = "192.0.2.11"
+    cluster_data["nodes"]["node-a"]["address"] = "192.0.2.10"
+    cluster_data["nodes"]["node-b"]["address"] = "192.0.2.11"
+    cluster_data["nodes"]["node-c"]["address"] = "192.0.2.12"
     cluster.write_text(yaml.safe_dump(cluster_data), encoding="utf-8")
 
     data = yaml.safe_load(experiment.read_text(encoding="utf-8"))
@@ -49,7 +50,7 @@ def _generate(cluster: Path, experiment: Path, output: Path) -> None:
     completed = subprocess.run(
         [
             sys.executable,
-            str(ASCEND / "main.py"),
+            str(ASCEND / "cli.py"),
             "generate",
             "--cluster",
             str(cluster),
@@ -75,11 +76,15 @@ def test_sharegpt_generation_emits_host_native_torch_config(tmp_path: Path) -> N
 
     assert config["controller-endpoint"] == "192.0.2.10:15002"
     assert config["device-platform"] == "npu"
-    assert config["device-ids"] == [0, 2, 4, 6, 8, 10, 12, 14]
+    assert config["device-ids"] == [0, 1, 2, 3, 4, 5, 6, 7]
     assert config["num-prompts"] == 16
     assert config["max-concurrency"] == 1
-    assert config["dataset-path"] == "<HOST_SHAREGPT_DIRECTORY>/ShareGPT.json"
-    assert config["model-path"] == "<HOST_QWEN_CHECKPOINT_DIRECTORY>"
+    assert config["dataset-path"] == (
+        "/home/<USER>/expert-kit/local/datasets/sharegpt/ShareGPT.json"
+    )
+    assert config["model-path"] == (
+        "/home/<USER>/expert-kit/local/models/Qwen3-30B-A3B"
+    )
 
 
 def test_non_sharegpt_generation_does_not_emit_torch_config(tmp_path: Path) -> None:

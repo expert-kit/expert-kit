@@ -2,29 +2,64 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+GENERATED_DIR="$SCRIPT_DIR/generated"
+
+usage() {
+  echo "usage: $0 attention <compose-args...>" >&2
+  echo "       $0 expert <pool-id> <compose-args...>" >&2
+  echo "       $0 image <compose-args...>" >&2
+}
+
+if (( $# < 1 )); then
+  usage
+  exit 2
+fi
 
 role="$1"
 shift
 
-GENERATED_DIR=$SCRIPT_DIR/generated
-STATIC_DIR=$SCRIPT_DIR/compose
-
 case "$role" in
   attention)
     files=(
-      -f $GENERATED_DIR/compose.attention.dev.yaml
-      -f $GENERATED_DIR/compose.attention.yaml
+      -f "$GENERATED_DIR/compose.attention.dev.yaml"
+      -f "$GENERATED_DIR/compose.attention.yaml"
     )
     ;;
   expert)
+    if (( $# < 1 )); then
+      echo "missing expert pool ID" >&2
+      usage
+      exit 2
+    fi
+
+    pool="$1"
+    shift
+
+    if [[ ! "$pool" =~ ^[a-z0-9][a-z0-9_-]*$ ]]; then
+      echo "invalid expert pool ID: $pool" >&2
+      exit 2
+    fi
+
+    pool_dir="$GENERATED_DIR/$pool"
+    if [[ ! -d "$pool_dir" ]]; then
+      echo "unknown expert pool: $pool" >&2
+      exit 2
+    fi
+
     files=(
-      -f $GENERATED_DIR/compose.expert.dev.yaml
-      -f $GENERATED_DIR/compose.expert.yaml
+      -f "$pool_dir/compose.expert.dev.yaml"
+      -f "$pool_dir/compose.expert.yaml"
+    )
+    ;;
+  image)
+    files=(
+      -f "$GENERATED_DIR/compose.build.yaml"
     )
     ;;
   *)
     echo "unknown role: $role" >&2
-    exit 1
+    usage
+    exit 2
     ;;
 esac
 

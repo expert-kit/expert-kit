@@ -17,6 +17,9 @@ class DatasetType(StrEnum):
 class Dtype(StrEnum):
     FP16 = "fp16"
     BF16 = "bf16"
+    # TODO: Add support for fp4 / fp8 later
+    FP8 = "fp8"
+    FP4 = "fp4"
 
 
 class ExperimentConfig(ConfigModel):
@@ -52,7 +55,8 @@ class ModelConfig(ConfigModel):
     hidden_dim: int
     intermediate_dim: int
     topk: int
-    dtype: Dtype
+    weight_dtype: Dtype
+    activation_dtype: Dtype
 
 
 class DatasetConfig(ConfigModel):

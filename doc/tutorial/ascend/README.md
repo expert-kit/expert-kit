@@ -1,109 +1,113 @@
-# Run Expert Kit on two Ascend 910C Hosts
+# Ascend deployment tutorials
 
-This tutorial runs Qwen3-30B-A3B with the control and attention services on one
-Host and 16 expert Workers on another. It covers the vLLM online benchmark and
-the optional Host-native Torch ablation.
+These tutorials use the Host-local configuration generator in
+[`dev/ascend`](../../../dev/ascend/README.md). The deployment lifecycle is the
+same for each model; checkpoint format, model geometry, memory budget, and
+qualification status differ.
 
-The configuration model and generated-file reference live in
-[`dev/ascend/README.md`](../../../dev/ascend/README.md).
+| Model | Status | Guide |
+| --- | --- | --- |
+| Qwen3-30B-A3B | Qualified with the current BF16 Worker and vLLM-Ascend path | [Deploy Qwen3-30B-A3B](qwen3-30b-a3b.md) |
+| DeepSeek-V3 | BF16 qualification path; vLLM integration still needs an end-to-end hardware run | [Qualify DeepSeek-V3](deepseek-v3.md) |
 
-## Before you start
+Both guides keep authored configuration, generated YAML, caches, and results
+inside the EK checkout under the operator's home directory. Container paths
+such as `/etc/expert-kit` remain container-local mount targets.
 
-Use these placeholders throughout the tutorial:
+## Common deployment workflow
+
+Complete the selected model tutorial's checkpoint and configuration steps,
+then use this workflow to generate and run the deployment.
+
+### Before you start
+
+Use the same EK revision and absolute `<PROJECT_ROOT>` on every Host. Every
+Host needs Docker Compose v2 with Buildx, access to its assigned NPU devices,
+and permission to use Docker. Keep Host-local configuration, generated YAML,
+caches, and results inside `<PROJECT_ROOT>`.
+
+The shared commands use these placeholders:
 
 | Placeholder | Meaning |
 | --- | --- |
-| `<PROJECT_ROOT>` | EK checkout on each Host |
+| `<PROJECT_ROOT>` | EK checkout at the same absolute path on every Host |
+| `<RESULTS_DIR>` | Writable result directory inside `<PROJECT_ROOT>` |
 | `<ATTENTION_HOST_IP>` | Routable address of the attention Host |
-| `<EXPERT_HOST_IP>` | Routable address of the expert Host |
-| `<MODEL_DIR>` | Host directory containing Qwen3-30B-A3B |
-| `<DATASET_DIR>` | Host directory containing the ShareGPT file |
-| `<RESULTS_DIR>` | Writable Host result directory inside the checkout |
+| `<SERVED_MODEL_NAME>` | Exact `model.name` value from `experiment.yaml` |
 
-Both Hosts need the same EK revision, Docker Compose v2 with Buildx, access to
-the NPU devices, and permission to use Docker. Keep local configuration,
-generated YAML, caches, and results inside `<PROJECT_ROOT>`.
+The examples use this placement:
 
-If the Hosts require a Python mirror, prefix each package-resolving command.
-The inline variable is inherited by that command and its child processes without
-changing later commands in the shell:
+| Logical node | Services |
+| --- | --- |
+| `node-a` | PostgreSQL, migrations, Controller, Weight Server, attention frontend, and benchmark |
+| `node-b` | `worker-pool1` |
+| `node-c` | `worker-pool2` |
+
+Replace the example node names and pool IDs when `cluster.yaml` uses different
+values. The model checkpoint is mounted only on the attention Host. Expert
+Hosts receive assigned expert blobs from the Weight Server.
+
+If a Host requires a Python mirror, prefix commands that resolve packages:
 
 ```bash
 UV_DEFAULT_INDEX=https://mirror.nju.edu.cn/pypi/web/simple \
-  uv sync --locked
+  uv sync
 ```
 
-## 1. Prepare the checkpoint and dataset
+### 1. Create the Host-local inputs
 
-On the attention Host, install the ModelScope CLI if it is unavailable, then
-download the model:
-
-```bash
-python3 -m pip install \
-  --index-url https://mirror.nju.edu.cn/pypi/web/simple \
-  modelscope
-
-modelscope download \
-  --model Qwen/Qwen3-30B-A3B \
-  --local_dir <MODEL_DIR>
-```
-
-Download ShareGPT on the attention Host and convert the JSONL file into the
-JSON array expected by both benchmark frontends:
-
-```bash
-mkdir -p <DATASET_DIR>
-
-modelscope download \
-  --dataset AI-ModelScope/sharegpt_gpt4 \
-  sharegpt_gpt4.jsonl \
-  --local_dir <DATASET_DIR>
-
-jq -s '.' \
-  <DATASET_DIR>/sharegpt_gpt4.jsonl \
-  > <DATASET_DIR>/sharegpt_gpt4.json
-```
-
-## 2. Create the Host-local configuration
-
-From `<PROJECT_ROOT>`:
+Create the ignored Host-local inputs once:
 
 ```bash
 cp dev/ascend/configs/cluster.example.yaml dev/ascend/configs/cluster.yaml
 cp dev/ascend/configs/experiment.example.yaml dev/ascend/configs/experiment.yaml
 ```
 
-In `cluster.yaml`, set:
-
-- both node addresses and their physical NPU lists;
-- the control, attention, and expert image references;
-- `paths.models.qwen3-30b-a3b` to `<MODEL_DIR>`;
-- `paths.datasets.sharegpt` to `<DATASET_DIR>`;
-- `paths.results` to `<RESULTS_DIR>`.
-
-Use an absolute, project-local result path and create it before running a
-container as the Host user:
+Replace the RFC 5737 documentation addresses and `/home/<USER>` paths, then
+set the model, dataset, and runtime fields described by the selected tutorial.
+Create the result directory as the Host user before a benchmark container
+writes to it:
 
 ```bash
 mkdir -p <RESULTS_DIR>
 ```
 
-Select ShareGPT in `experiment.yaml`:
+Copy the same Host-local inputs to every participating Host. Generate the same
+output on every Host, or generate it once and distribute the complete
+`dev/ascend/generated/` directory.
 
-```yaml
-dataset:
-  type: sharegpt
-  name: ShareGPT
-  path_ref: sharegpt
-  mounted_path: /dataset/sharegpt
-  file: sharegpt_gpt4.json
+### 2. Generate and validate
+
+Generate from the repository root:
+
+```bash
+uv run python dev/ascend/cli.py generate
 ```
 
-Remove `run.input_len`; file-backed datasets determine their prompt lengths
-from the file. Keep the same `project_name`, inputs, and generated files on both
-Hosts.
+Explicit paths are available for automation:
 
-## 3. Build the images
+```bash
+uv run python dev/ascend/cli.py generate \
+  --cluster dev/ascend/configs/cluster.yaml \
+  --experiment dev/ascend/configs/experiment.yaml \
+  --output dev/ascend/generated
+```
+
+The default output directory is replaced on every generation. A custom output
+directory must be nonexistent, empty, or contain the generated
+`.expert-kit-generated` marker.
+
+Validate the image definition, attention bundle, and every expert pool before
+deployment:
+
+```bash
+dev/ascend/run-compose.sh image config -q
+dev/ascend/run-compose.sh attention config -q
+dev/ascend/run-compose.sh expert worker-pool1 config -q
+dev/ascend/run-compose.sh expert worker-pool2 config -q
+```
+
+### 3. Build the images
 
 The attention image installs local EK wheels. Build them before building that
 image:
@@ -111,105 +115,97 @@ image:
 ```bash
 mkdir -p dist/attention-wheels
 
-UV_DEFAULT_INDEX=https://mirror.nju.edu.cn/pypi/web/simple \
-  uv build --wheel --package expertkit-proto \
-    --out-dir dist/attention-wheels
-UV_DEFAULT_INDEX=https://mirror.nju.edu.cn/pypi/web/simple \
-  uv build --wheel --package expertkit-transport \
-    --out-dir dist/attention-wheels
-UV_DEFAULT_INDEX=https://mirror.nju.edu.cn/pypi/web/simple \
-  uv build --wheel --package expertkit-vllm \
-    --out-dir dist/attention-wheels
+uv build --wheel --package expertkit-proto \
+  --out-dir dist/attention-wheels
+uv build --wheel --package expertkit-transport \
+  --out-dir dist/attention-wheels
+uv build --wheel --package expertkit-vllm \
+  --out-dir dist/attention-wheels
 ```
 
-On the attention Host:
+Build only the targets required by the current Host:
 
 ```bash
-docker compose \
-  -f dev/ascend/compose/compose.build.yaml \
-  build control-image attention-image
+# node-a
+dev/ascend/run-compose.sh image build control-image attention-image
+
+# node-b and node-c
+dev/ascend/run-compose.sh image build worker-image
 ```
 
-On the expert Host:
+`run-compose.sh image` reads `generated/compose.build.yaml`; the image and base
+image references therefore come from `cluster.yaml`.
 
-```bash
-docker compose \
-  -f dev/ascend/compose/compose.build.yaml \
-  build worker-image
-```
+### 4. Start the deployment
 
-## 4. Generate and validate the runtime files
-
-Generate once and copy the complete `dev/ascend/generated/` directory to the
-other Host together with the matching checkout:
-
-```bash
-UV_DEFAULT_INDEX=https://mirror.nju.edu.cn/pypi/web/simple \
-  uv run dev/ascend/main.py generate
-```
-
-Validate the role bundle on each Host:
-
-```bash
-# Attention Host
-dev/ascend/run-compose.sh attention config -q
-
-# Expert Host
-dev/ascend/run-compose.sh expert config -q
-```
-
-## 5. Start EK
-
-Start the Controller on the attention Host. Compose also starts PostgreSQL,
-migrations, model initialization, and the Weight Server:
+On `node-a`, start the control stack. The `controller` dependency chain also
+starts PostgreSQL, migrations, model initialization, and the Weight Server:
 
 ```bash
 dev/ascend/run-compose.sh attention up -d controller
 dev/ascend/run-compose.sh attention ps
 ```
 
-Start one Worker on the expert Host and inspect it before starting the rest:
+Start one Worker on each expert Host and inspect its logs before scaling out:
 
 ```bash
-dev/ascend/run-compose.sh expert up -d worker-00
-dev/ascend/run-compose.sh expert logs --tail=100 worker-00
+# node-b
+dev/ascend/run-compose.sh expert worker-pool1 up -d worker-00
+dev/ascend/run-compose.sh expert worker-pool1 logs --tail=100 worker-00
 
-dev/ascend/run-compose.sh expert up -d
-dev/ascend/run-compose.sh expert ps
+# node-c
+dev/ascend/run-compose.sh expert worker-pool2 up -d worker-00
+dev/ascend/run-compose.sh expert worker-pool2 logs --tail=100 worker-00
 ```
 
-Once the Workers have registered and loaded their assigned experts, rebalance
-placement from the attention Host:
+If both Workers pass their model-specific checks, start the complete pools:
+
+```bash
+# node-b
+dev/ascend/run-compose.sh expert worker-pool1 up -d
+
+# node-c
+dev/ascend/run-compose.sh expert worker-pool2 up -d
+```
+
+After every Worker has registered, rebalance placement from `node-a` and start
+the attention frontend:
 
 ```bash
 dev/ascend/run-compose.sh attention run --rm admin \
   ek-cli schedule rebalance
-```
 
-Start vLLM after the Controller and Workers are ready:
-
-```bash
 dev/ascend/run-compose.sh attention up -d attention
 dev/ascend/run-compose.sh attention ps
 ```
 
-Check the OpenAI-compatible endpoint:
+Compose `depends_on` supplies startup ordering inside one bundle. It does not
+restart an already-running dependency unless its configuration or container
+state requires recreation.
+
+### 5. Verify one request
+
+Use the model name from `experiment.yaml` and the attention address and port
+from `cluster.yaml`:
 
 ```bash
 curl -fsS http://<ATTENTION_HOST_IP>:18000/v1/chat/completions \
   -H 'Content-Type: application/json' \
   -d '{
-    "model": "Qwen3-30B-A3B",
+    "model": "<SERVED_MODEL_NAME>",
     "messages": [{"role": "user", "content": "Reply with exactly: OK"}],
     "temperature": 0,
-    "max_tokens": 16
+    "max_tokens": 1
   }'
 ```
 
-## 6. Run the vLLM online benchmark
+A healthy HTTP response is not sufficient for first-time model qualification.
+Confirm that every Worker registered, the Weight Server served routed-expert
+blobs, and Worker logs show expert loading and computation.
 
-The generated benchmark config targets the attention service over the Compose
-network. Run the one-shot benchmark container with the Host UID/GID so result
+### 6. Run the benchmark
+
+Run the one-shot vLLM benchmark container with the Host UID/GID so result
 files remain writable outside Docker:
 
 ```bash
@@ -218,41 +214,46 @@ dev/ascend/run-compose.sh attention run --rm \
   benchmark
 ```
 
-Inspect status or logs without changing the deployment:
+Inspect logs without changing the deployment:
 
 ```bash
-dev/ascend/run-compose.sh attention ps
 dev/ascend/run-compose.sh attention logs --tail=100 attention controller
-dev/ascend/run-compose.sh expert logs --tail=100
+dev/ascend/run-compose.sh expert worker-pool1 logs --tail=100
+dev/ascend/run-compose.sh expert worker-pool2 logs --tail=100
 ```
 
-## 7. Optional: run the Torch offline ablation
-
-For ShareGPT, generation also writes `generated/torch-bench.yaml`. The Torch
-frontend runs directly on the attention Host and connects to the same
-Controller and Workers; it does not use the vLLM or benchmark containers.
-
-Prepare the Host environment once:
+For a ShareGPT experiment, generation also writes `torch-bench.yaml`. The
+optional Torch frontend runs directly on the attention Host and connects to
+the same Controller and Workers:
 
 ```bash
-UV_DEFAULT_INDEX=https://mirror.nju.edu.cn/pypi/web/simple \
-  uv sync --package expertkit-torch --no-dev --extra npu
-```
+uv sync --package expertkit-torch --no-dev --extra npu
 
-Run without another dependency sync:
-
-```bash
 uv run --no-sync --package expertkit-torch \
   ek-torch-benchmark \
   --config dev/ascend/generated/torch-bench.yaml \
   run
 ```
 
-The vLLM benchmark measures online HTTP serving, while the Torch benchmark uses
-fixed offline batches. Match the dataset, prompt count, output length, and
-concurrency, but report the two execution modes explicitly.
+The vLLM benchmark measures online HTTP serving. The Torch benchmark uses
+fixed offline batches; report the two execution modes separately.
 
-## Version matrix
+### 7. Stop the deployment
+
+Stop containers without deleting named volumes:
+
+```bash
+# node-a
+dev/ascend/run-compose.sh attention down
+
+# node-b
+dev/ascend/run-compose.sh expert worker-pool1 down
+
+# node-c
+dev/ascend/run-compose.sh expert worker-pool2 down
+```
+
+### Runtime version boundaries
 
 | Role | Python | PyTorch | torch-npu | CANN | vLLM / vLLM-Ascend |
 | --- | ---: | ---: | ---: | ---: | --- |
@@ -260,19 +261,5 @@ concurrency, but report the two execution modes explicitly.
 | Torch ablation | `>=3.12` | `2.11.0` | `2.11.0rc1` | Host installation | Not installed |
 | Attention image | Image-owned | Image-owned Torch 2.10 profile | Image-owned | `9.0.1` profile | vLLM `0.25.1`; selected vLLM-Ascend `main-a3` snapshot |
 
-The exact attention image is pinned by digest in
-[`compose.build.yaml`](../../../dev/ascend/compose/compose.build.yaml). Do not
-synchronize the root uv environment over that image's accelerator stack.
-
-The Worker and Torch ablation currently pair Torch 2.11 with torch-npu
-2.11.0rc1 against CANN 9.0.1. Treat that combination as an EK qualification
-profile rather than a general compatibility claim.
-
-## Stop the deployment
-
-Stop containers without deleting named volumes:
-
-```bash
-dev/ascend/run-compose.sh attention down
-dev/ascend/run-compose.sh expert down
-```
+Do not synchronize the root uv environment over the attention image's
+accelerator stack.

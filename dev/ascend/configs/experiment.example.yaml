@@ -7,7 +7,8 @@ model:
   hidden_dim: 2048
   intermediate_dim: 768
   topk: 8
-  dtype: bf16
+  weight_dtype: bf16
+  activation_dtype: bf16
 
 # Random needs no path fields. For a file-backed dataset, replace this block
 # with one of the ShareGPT or custom examples below.

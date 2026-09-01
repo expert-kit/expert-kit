@@ -29,7 +29,8 @@ Here are some tutorials to help you quickly start with Expert Kit.
 
 1. [Qwen3-30B-A3B](./doc/tutorial/standalone/qwen3-moe-a3b-demo.md): A demo for running the Qwen3-30B-A3B model with Expert Kit, showcasing the framework's capabilities in handling real-world MoE models.
 2. [DeepSeek-V2-Lite](./doc/tutorial/standalone/deepseek-v2-lite.md): A complete Python Worker and Torch Frontend deployment using the official DeepSeek-V2-Lite checkpoint.
-3. [Two-Host Ascend 910C](./doc/tutorial/ascend/README.md): Deploy the Controller, vLLM attention frontend, and expert Workers, then run online and offline benchmarks.
+3. [Qwen3-30B-A3B on Ascend 910C](./doc/tutorial/ascend/qwen3-30b-a3b.md): Deploy the Controller, vLLM attention frontend, and two expert pools, then run online and offline benchmarks.
+4. [DeepSeek-V3 on Ascend 910C](./doc/tutorial/ascend/deepseek-v3.md): Configure and qualify the BF16 remote-expert path.
 
 ## Python Workspace
 
@@ -54,7 +55,7 @@ uv sync --locked --extra npu
 The root `npu` extra enables the Worker and Host-native `expertkit_torch`
 frontend with Torch 2.11 and torch-npu 2.11.0rc1. The separately pinned
 vLLM-Ascend attention image keeps its own accelerator stack; see the
-[Ascend tutorial](./doc/tutorial/ascend/README.md).
+[Ascend tutorials](./doc/tutorial/ascend/README.md).
 
 Run package checks through the shared environment, for example:
 

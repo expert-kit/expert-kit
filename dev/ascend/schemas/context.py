@@ -1,14 +1,14 @@
 from __future__ import annotations
 from typing import Any, Self
-from pydantic import BaseModel, computed_field, model_serializer
+from pydantic import BaseModel, computed_field, model_serializer, model_validator
 from .cluster import (
     ClusterConfig,
     AttentionConfig,
-    WorkerConfig,
     ControlConfig,
     ImageConfig,
     Inference,
-    ExpertConfig,
+    ExpertRuntimeConfig,
+    PoolConfig,
     NodeConfig,
 )
 from pathlib import Path
@@ -21,37 +21,42 @@ from .experiment import (
 )
 
 
-class GenerationContext(BaseModel):
+class DuplicateDeviceError(ValueError): ...
+
+
+class DuplicatePortError(ValueError): ...
+
+
+class TemplateContext(BaseModel):
     project_name: str
     inference: Inference
     images: ImageConfig
-    attention: RoleContext[AttentionConfig]
-    control: RoleContext[ControlConfig]
-    expert: RoleContext[ExpertConfig]
+    attention: NodeBindingContext[AttentionConfig]
+    control: NodeBindingContext[ControlConfig]
+    expert: ExpertContext
     model: ArtifactContext[ModelConfig]
     dataset: ArtifactContext[DatasetConfig]
     serve: ServeConfig
     run: RunConfig
-    workers: list[WorkerConfig]
     results_path: Path
 
     @classmethod
     def from_config(cls, cluster: ClusterConfig, experiment: ExperimentConfig) -> Self:
         nodes = cluster.nodes
 
-        attention = RoleContext[AttentionConfig].resolve(
-            config=cluster.roles.attention,
+        attention = NodeBindingContext[AttentionConfig].resolve(
+            config=cluster.attention,
             nodes=nodes,
         )
-        control = RoleContext[ControlConfig].resolve(
-            config=cluster.roles.control,
+        control = NodeBindingContext[ControlConfig].resolve(
+            config=cluster.control,
             nodes=nodes,
         )
-        expert = RoleContext[ExpertConfig].resolve(
-            config=cluster.roles.expert,
+        expert = ExpertContext.resolve(
+            pools=cluster.pools,
             nodes=nodes,
+            runtime=cluster.expert.runtime,
         )
-        workers = cluster.roles.expert.workers.generate_workers()
         paths = cluster.paths
 
         model = ArtifactContext[ModelConfig].resolve(
@@ -77,15 +82,52 @@ class GenerationContext(BaseModel):
             dataset=dataset,
             serve=experiment.serve,
             run=run,
-            workers=workers,
             results_path=cluster.paths.results,
         )
+
+    @model_validator(mode="after")
+    def validate_device_placement(self) -> Self:
+        node = self.attention.config.node
+        pool = self.expert.get_pool_by_node(node)
+
+        if pool is None:
+            return self
+
+        # Expert and attention are on a same node
+        attention_devices = set(self.attention.config.devices)
+        pool_devices = set(pool.devices)
+        duplicates = attention_devices & pool_devices
+        if duplicates:
+            raise DuplicateDeviceError(f"Devices {duplicates} have been used.")
+        return self
+
+    @model_validator(mode="after")
+    def validate_port_placement(self) -> Self:
+        def check_duplicate_ports(p1: set[int], p2: set[int]) -> None:
+            duplicates = p1 & p2
+            if duplicates:
+                raise DuplicatePortError(f"Ports {duplicates} have been used.")
+
+        node = self.attention.config.node
+        attention_ports = self.attention.config.allocated_ports
+        control_ports = self.control.config.allocated_ports
+        check_duplicate_ports(attention_ports, control_ports)
+
+        pool = self.expert.get_pool_by_node(node)
+        if pool is None:
+            return self
+
+        # Expert and attention are on a same node
+        pool_ports = pool.allocated_ports
+        check_duplicate_ports(attention_ports, pool_ports)
+        check_duplicate_ports(control_ports, pool_ports)
+        return self
 
     @computed_field
     @property
     def label(self) -> str:
         num_attention = len(self.attention.config.devices)
-        num_workers = len(self.workers)
+        num_workers = self.expert.total_workers
         placement = f"{num_attention}A{num_workers}E"
         dataset_name = self.dataset.config.name
 
@@ -96,7 +138,40 @@ class GenerationContext(BaseModel):
         return label
 
 
-class RoleContext[T: AttentionConfig | ControlConfig | ExpertConfig](BaseModel):
+class ExpertContext(BaseModel):
+    pools: list[NodeBindingContext[PoolConfig]]
+    runtime: ExpertRuntimeConfig
+
+    @property
+    def total_workers(self) -> int:
+        return sum(pool.config.worker_count for pool in self.pools)
+
+    @classmethod
+    def resolve(
+        cls,
+        pools: list[PoolConfig],
+        nodes: dict[str, NodeConfig],
+        runtime: ExpertRuntimeConfig,
+    ) -> Self:
+        resolved_pools = [
+            NodeBindingContext[PoolConfig].resolve(
+                config=pool,
+                nodes=nodes,
+            )
+            for pool in pools
+        ]
+
+        return cls(pools=resolved_pools, runtime=runtime)
+
+    def get_pool_by_node(self, node: str) -> PoolConfig | None:
+        for pool in self.pools:
+            if pool.config.node != node:
+                continue
+            return pool.config
+        return None
+
+
+class NodeBindingContext[T: AttentionConfig | ControlConfig | PoolConfig](BaseModel):
     node: NodeConfig
     config: T
 

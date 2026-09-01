@@ -1,7 +1,7 @@
-name: {{ project_name }}
+name: {{ project_name }}-{{ pool.id }}
 
 services:
-{% for worker in workers %}
+{% for worker in pool.workers %}
   {{ worker.id }}:
     image: {{ images.expert }}
     entrypoint:

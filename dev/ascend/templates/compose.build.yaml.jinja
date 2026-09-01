@@ -1,0 +1,32 @@
+services:
+  control-image:
+    image: {{ images.control }}
+    build:
+      context: ../../..
+      dockerfile: container/Dockerfile.cpu
+      target: ek-runtime
+      args:
+        RUST_IMAGE: {{ images.rust }}
+        RUNTIME_IMAGE: {{ images.control_base }}
+        UV_IMAGE: {{ images.uv }}
+
+  worker-image:
+    image: {{ images.expert }}
+    build:
+      context: ../../..
+      dockerfile: container/Dockerfile.npu
+      target: ek-worker-ascend-runtime
+      args:
+        UV_IMAGE: {{ images.uv }}
+        UV_DEFAULT_INDEX: https://mirror.nju.edu.cn/pypi/web/simple
+
+  attention-image:
+    image: {{ images.attention }}
+    build:
+      context: ../../..
+      dockerfile: container/Dockerfile.npu
+      target: ek-vllm-ascend-runtime
+      args:
+        # NJU mirror of the selected nightly-main-a3 digest.
+        VLLM_ASCEND_IMAGE: {{ images.vllm_ascend }}
+        UV_DEFAULT_INDEX: https://mirror.nju.edu.cn/pypi/web/simple
