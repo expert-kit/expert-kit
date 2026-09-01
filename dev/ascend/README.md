@@ -14,8 +14,8 @@ memory, and qualification requirements.
 
 | File | Owns | Lifecycle |
 | --- | --- | --- |
-| `configs/cluster.example.yaml` | Documented multi-pool cluster example | Checked in |
-| `configs/experiment.example.yaml` | Documented experiment example | Checked in |
+| `configs/qwen3-30b-a3b/*.example.yaml` | Qwen3 cluster and experiment pair | Checked in |
+| `configs/deepseek-v3/*.example.yaml` | DeepSeek-V3 BF16 cluster and experiment pair | Checked in |
 | `configs/cluster.yaml` | Host addresses, placement, devices, ports, images, and paths | Host-local and ignored |
 | `configs/experiment.yaml` | Model, dataset adapter, serving, and benchmark settings | Host-local and ignored |
 | `templates/*.jinja` | Runtime and Compose output shapes | Checked in |
@@ -106,8 +106,12 @@ dev/ascend/
 ├── run-compose.sh                  # selects image, attention, or pool Compose
 ├── schemas/                        # input and template-context models
 ├── configs/
-│   ├── cluster.example.yaml
-│   ├── experiment.example.yaml
+│   ├── qwen3-30b-a3b/
+│   │   ├── cluster.example.yaml
+│   │   └── experiment.example.yaml
+│   ├── deepseek-v3/
+│   │   ├── cluster.example.yaml
+│   │   └── experiment.example.yaml
 │   ├── cluster.yaml                # ignored Host-local input
 │   └── experiment.yaml             # ignored Host-local input
 ├── compose/
