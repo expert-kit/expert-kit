@@ -32,8 +32,8 @@ controller:
 weight_manager:
   max_concurrent_loads: {{ expert.runtime.max_concurrent_loads }}
   disk_cache:
-    path: /ek/worker_cache/{{ worker.id }}
-    writeback: true
+    path: /ek/worker_cache
+    writeback: false
   peer:
     listen: 0.0.0.0:52234
     advertise: http://{{ pool.address }}:{{ worker.peer_port }}
