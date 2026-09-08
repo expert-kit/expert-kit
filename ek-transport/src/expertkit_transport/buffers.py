@@ -10,6 +10,7 @@ from types import TracebackType
 
 import torch
 
+from expertkit_transport._accelerator import TorchAccelerator, accelerator_for
 from expertkit_transport.batches import ACTIVATION_DTYPES
 from expertkit_transport.errors import TransportError, TransportErrorCode
 
@@ -25,7 +26,7 @@ def _deadline_error() -> TransportError:
 @dataclass(slots=True)
 class _TensorSlot:
     tensor: torch.Tensor
-    reuse_event: torch.cuda.Event | None = None
+    reuse_event: torch.Event | None = None
 
 
 class OutputLease:
@@ -107,6 +108,7 @@ class OutputPool:
         self.hidden_dim = hidden_dim
         self.dtype = dtype
         self.device = torch.device(device)
+        self._accelerator: TorchAccelerator | None = accelerator_for(self.device)
         self.capacity = capacity
         self._clock = clock
         self._condition = asyncio.Condition()
@@ -162,7 +164,8 @@ class OutputPool:
 
         try:
             if slot.reuse_event is not None:
-                torch.cuda.current_stream(slot.tensor.device).wait_event(slot.reuse_event)
+                assert self._accelerator is not None
+                self._accelerator.current_stream().wait_event(slot.reuse_event)
         except BaseException:
             async with self._condition:
                 self._available.append(slot)
@@ -175,11 +178,11 @@ class OutputPool:
     async def _return(self, lease: OutputLease) -> None:
         completion_error: BaseException | None = None
         slot = lease._slot
-        if lease._consumed and slot.tensor.device.type == "cuda":
+        if lease._consumed and self._accelerator is not None:
             try:
                 if slot.reuse_event is None:
-                    slot.reuse_event = torch.cuda.Event(enable_timing=False, blocking=False)
-                slot.reuse_event.record(torch.cuda.current_stream(slot.tensor.device))
+                    slot.reuse_event = self._accelerator.create_event()
+                slot.reuse_event.record(self._accelerator.current_stream())
             except BaseException as error:
                 completion_error = error
 

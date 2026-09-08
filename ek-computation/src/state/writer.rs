@@ -18,10 +18,14 @@ use super::{
     models::{self, NewExpert, NewInstance, NewModel, NewNode},
 };
 use diesel::{ExpressionMethods, QueryDsl, SelectableHelper, upsert::excluded};
-use diesel_async::{AsyncConnection, RunQueryDsl};
+use diesel_async::{AsyncConnection, AsyncPgConnection, RunQueryDsl};
 use ek_base::error::{EKError, EKResult};
 use models::{Expert, Instance, Model, Node};
 use tokio::sync::RwLock;
+
+// Each NewExpert row binds five values, so 5,000 rows remain below the
+// PostgreSQL driver's 32,767-parameter encoding limit.
+const EXPERT_CHUNK_SIZE: usize = 5_000;
 
 pub struct StateWriterImpl {}
 
@@ -187,13 +191,18 @@ impl StateWriterImpl {
                 diesel::delete(schema::expert::table.filter(dsl::instance_id.eq(instance_id)))
                     .execute(conn)
                     .await?;
+
                 if experts.is_empty() {
                     return Ok(0);
                 }
-                let inserted = diesel::insert_into(schema::expert::table)
-                    .values(&experts)
-                    .execute(conn)
-                    .await?;
+
+                // Bound each insert to stay below PostgreSQL's bind-parameter limit.
+                let mut inserted: usize = 0;
+
+                for chunk in experts.chunks(EXPERT_CHUNK_SIZE) {
+                    inserted += StateWriterImpl::insert_expert_chunk(conn, chunk).await?;
+                }
+
                 Ok(inserted)
             })
         })
@@ -276,16 +285,36 @@ impl StateWriterImpl {
         Ok(())
     }
 
-    /// Batch upsert multiple expert assignments in a single query.
-    /// Used by recovery to insert thousands of experts at once instead of
-    /// one-by-one, reducing DB round-trips from O(n) to O(1).
+    /// Atomically upsert expert assignments in bounded batches.
+    /// Used by recovery to avoid row-at-a-time writes without exceeding
+    /// PostgreSQL's bind-parameter limit.
     pub async fn expert_upsert_batch(&self, experts: Vec<NewExpert>) -> EKResult<usize> {
         if experts.is_empty() {
             return Ok(0);
         }
+
         let mut conn = POOL.get().await?;
+        // Commit the complete batch or roll back every chunk.
+        conn.transaction::<_, EKError, _>(|conn| {
+            Box::pin(async move {
+                let mut count: usize = 0;
+
+                for chunk in experts.chunks(EXPERT_CHUNK_SIZE) {
+                    count += StateWriterImpl::upsert_expert_chunk(conn, chunk).await?;
+                }
+
+                Ok(count)
+            })
+        })
+        .await
+    }
+
+    async fn upsert_expert_chunk(
+        conn: &mut AsyncPgConnection,
+        chunk: &[NewExpert],
+    ) -> EKResult<usize> {
         let count = diesel::insert_into(schema::expert::table)
-            .values(&experts)
+            .values(chunk)
             .on_conflict((
                 schema::expert::node_id,
                 schema::expert::instance_id,
@@ -293,7 +322,18 @@ impl StateWriterImpl {
             ))
             .do_update()
             .set(schema::expert::expert_id.eq(excluded(schema::expert::expert_id)))
-            .execute(&mut conn)
+            .execute(conn)
+            .await?;
+        Ok(count)
+    }
+
+    async fn insert_expert_chunk(
+        conn: &mut AsyncPgConnection,
+        chunk: &[NewExpert],
+    ) -> EKResult<usize> {
+        let count = diesel::insert_into(schema::expert::table)
+            .values(chunk)
+            .execute(conn)
             .await?;
         Ok(count)
     }

@@ -16,6 +16,8 @@ from expertkit_worker.backends import (
     InvalidBackendInput,
 )
 from expertkit_worker.backends.torch import TorchBackend, TorchExpertWeights
+from expertkit_worker.device import CpuWorkerRuntime, CudaWorkerRuntime
+from expertkit_worker.device.runtime import DeviceWork
 from expertkit_worker.weights import ReadyWeightTable
 
 _HIDDEN_DIM = 4
@@ -116,7 +118,7 @@ def make_backend(
         intermediate_dim=_INTERMEDIATE_DIM,
         top_k=_TOP_K,
         dtype=dtype,
-        device=device,
+        runtime=(CpuWorkerRuntime(device) if device.type == "cpu" else CudaWorkerRuntime(device)),
         acquire_many=table.acquire_many,
     )
 
@@ -169,7 +171,7 @@ def test_torch_backend_acquires_all_experts_once() -> None:
         intermediate_dim=_INTERMEDIATE_DIM,
         top_k=_TOP_K,
         dtype=torch.float32,
-        device=device,
+        runtime=CpuWorkerRuntime(device),
         acquire_many=acquire,
     )
     completion = backend.submit(batch, torch.empty_like(batch.hidden_states))
@@ -177,6 +179,52 @@ def test_torch_backend_acquires_all_experts_once() -> None:
     completion.close()
 
     assert calls == [(0, (0, 1, 2))]
+
+
+class _RecordingWork:
+    def __init__(self) -> None:
+        self.wait_count = 0
+
+    def wait_host(self) -> None:
+        self.wait_count += 1
+
+
+class _RecordingRuntime:
+    def __init__(self, device: torch.device, work: DeviceWork) -> None:
+        self.device = device
+        self.work = work
+        self.capture_count = 0
+
+    def capture_current_work(self) -> DeviceWork:
+        self.capture_count += 1
+        return self.work
+
+
+def test_torch_completion_retains_weights_until_device_work_finishes() -> None:
+    device = torch.device("cpu")
+    batch, weights = make_case(torch.float32, device)
+    table: ReadyWeightTable[TorchExpertWeights] = ReadyWeightTable(1, 3)
+    for expert_id, weight in weights.items():
+        table.publish(0, expert_id, weight)
+    work = _RecordingWork()
+    runtime = _RecordingRuntime(device, work)
+    backend = TorchBackend(
+        hidden_dim=_HIDDEN_DIM,
+        intermediate_dim=_INTERMEDIATE_DIM,
+        top_k=_TOP_K,
+        dtype=torch.float32,
+        runtime=runtime,  # type: ignore[arg-type]
+        acquire_many=table.acquire_many,
+    )
+
+    completion = backend.submit(batch, torch.empty_like(batch.hidden_states))
+
+    assert runtime.capture_count == 1
+    assert work.wait_count == 0
+    assert [table.usage_count(0, expert_id) for expert_id in range(3)] == [1, 1, 1]
+    completion.close()
+    assert work.wait_count == 1
+    assert [table.usage_count(0, expert_id) for expert_id in range(3)] == [0, 0, 0]
 
 
 def test_torch_backend_reports_missing_ready_weights_without_partial_retention() -> None:
@@ -254,7 +302,7 @@ def test_torch_backend_rejects_wrong_prepared_output_before_weight_acquisition()
         intermediate_dim=_INTERMEDIATE_DIM,
         top_k=_TOP_K,
         dtype=torch.float32,
-        device=device,
+        runtime=CpuWorkerRuntime(device),
         acquire_many=acquire,  # type: ignore[arg-type]
     )
 

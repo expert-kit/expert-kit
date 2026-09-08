@@ -89,7 +89,7 @@ class BatchBufferConfig:
     hidden_dim: int
     top_k: int
     dtype: torch.dtype
-    device: torch.device | str
+    device: torch.device
 
     def __post_init__(self) -> None:
         for name in ("max_batch_tokens", "hidden_dim", "top_k"):
@@ -98,17 +98,17 @@ class BatchBufferConfig:
                 raise ValueError(f"{name} must be a positive integer")
         if self.dtype not in (torch.float16, torch.bfloat16, torch.float32):
             raise ValueError("dtype must be FP16, BF16, or FP32")
-        device = torch.device(self.device)
-        if device.type not in {"cpu", "cuda"}:
-            raise ValueError("batch buffer device must be CPU or CUDA")
-        object.__setattr__(self, "device", device)
+        if not isinstance(self.device, torch.device):
+            raise TypeError("batch buffer device must be a torch.device")
+        if self.device.type not in {"cpu", "cuda", "npu"}:
+            raise ValueError("batch buffer device must be CPU, CUDA, or NPU")
 
 
 class WorkerBatchBuffers(ABC):
     """Perform Transport-specific copies for one fixed execution slot.
 
-    The methods run in the Worker's bounded execution thread. For CUDA, the
-    Worker selects the current stream before calling them.
+    The methods run in the Worker's bounded execution thread. For accelerators,
+    the Worker selects the current stream before calling them.
     """
 
     @property

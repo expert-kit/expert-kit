@@ -11,6 +11,7 @@ from expertkit_transport.transports.shm import ShmWorkerBatchReceiver, ShmWorker
 
 from expertkit_worker.backends.torch import TorchBackend, TorchExpertWeights
 from expertkit_worker.execution import WorkerExecutor
+from expertkit_worker.factory import _create_device_wiring
 from expertkit_worker.weights import ReadyWeightTable
 
 _HIDDEN_DIM = 4
@@ -52,6 +53,7 @@ def _reference(
 
 def test_worker_execution_uses_shared_input_and_output_destinations() -> None:
     async def scenario() -> None:
+        device_wiring = _create_device_wiring("cpu")
         batch_spec = WorkerEndpointConfig(7, 1, 2, 4, _HIDDEN_DIM, 2, torch.float32)
         weights = {0: _weight(11), 1: _weight(29)}
         ready: ReadyWeightTable[TorchExpertWeights] = ReadyWeightTable(1, 2)
@@ -68,14 +70,21 @@ def test_worker_execution_uses_shared_input_and_output_destinations() -> None:
             intermediate_dim=_INTERMEDIATE_DIM,
             top_k=2,
             dtype=torch.float32,
-            device="cpu",
+            runtime=device_wiring.runtime,
             acquire_many=ready.acquire_many,
         )
         execution = WorkerExecutor(
             server,
             backend,
+            create_slot=device_wiring.create_slot,
             instance_id=7,
-            buffer_config=BatchBufferConfig(4, _HIDDEN_DIM, 2, torch.float32, "cpu"),
+            buffer_config=BatchBufferConfig(
+                4,
+                _HIDDEN_DIM,
+                2,
+                torch.float32,
+                torch.device("cpu"),
+            ),
             slot_count=1,
         )
         await execution.start()

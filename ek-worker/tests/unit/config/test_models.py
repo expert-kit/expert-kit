@@ -99,6 +99,39 @@ def test_device_memory_limit_must_be_positive(tmp_path: Path) -> None:
         WorkerConfig.model_validate(raw)
 
 
+def test_torch_backend_accepts_indexed_npu_device(tmp_path: Path) -> None:
+    config = WorkerConfig.model_validate(_config(tmp_path, backend="torch", device="npu:0"))
+
+    assert config.worker.device == "npu:0"
+
+
+@pytest.mark.parametrize("device", ["npu", "npu:x", "cuda", "cuda:x"])
+def test_torch_backend_rejects_unindexed_or_invalid_accelerator(
+    tmp_path: Path,
+    device: str,
+) -> None:
+    with pytest.raises(ValidationError, match=r"cpu, cuda:<id> or npu:<id>"):
+        WorkerConfig.model_validate(_config(tmp_path, backend="torch", device=device))
+
+
+def test_fused_backend_remains_cuda_only(tmp_path: Path) -> None:
+    with pytest.raises(ValidationError, match=r"requires cuda:<id>"):
+        WorkerConfig.model_validate(_config(tmp_path, backend="fused", device="npu:0"))
+
+
+def test_npu_worker_rejects_shm_transport(tmp_path: Path) -> None:
+    raw = _config(tmp_path, backend="torch", device="npu:0")
+    raw["transport"] = {
+        "type": "shm",
+        "rpc_listen": "127.0.0.1:50051",
+        "rpc_advertise": "worker:50051",
+        "shared_memory_dir": "/dev/shm",
+    }
+
+    with pytest.raises(ValidationError, match="NPU workers currently require the gRPC transport"):
+        WorkerConfig.model_validate(raw)
+
+
 def test_shm_transport_uses_only_notification_rpc_fields(tmp_path: Path) -> None:
     raw = _config(tmp_path, backend="torch", device="cuda:0")
     raw["transport"] = {

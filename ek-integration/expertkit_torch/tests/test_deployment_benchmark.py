@@ -38,26 +38,34 @@ def test_model_benchmark_runs_through_expert_kit(
     model_path = os.environ.get(model_path_variable)
     if not model_path:
         pytest.skip(f"{model_path_variable} is not configured")
+    dataset_path = os.environ.get("EK_BENCHMARK_DATASET_PATH")
+    if not dataset_path:
+        pytest.skip("EK_BENCHMARK_DATASET_PATH is not configured")
 
     endpoint = os.environ.get(endpoint_variable, "127.0.0.1:5002")
     command = [
         sys.executable,
         "-m",
         "expertkit_torch.benchmark.cli",
+        "run",
         "--model-path",
         str(Path(model_path).resolve()),
         "--controller-endpoint",
         endpoint,
-        "--batch-sizes",
+        "--dataset-path",
+        str(Path(dataset_path).resolve()),
+        "--device-platform",
+        "npu",
+        "--device-ids",
+        "0",
+        "--num-prompts",
         "1",
-        "--input-length",
-        "32",
+        "--max-concurrency",
+        "1",
         "--output-length",
         "20",
         "--warmup-runs",
         "0",
-        "--runs",
-        "1",
     ]
     if instance_id := os.environ.get(instance_variable):
         command.extend(("--instance-id", instance_id))
@@ -71,4 +79,4 @@ def test_model_benchmark_runs_through_expert_kit(
 
     assert completed.returncode == 0, completed.stderr
     assert f"Model: {model_name}" in completed.stdout
-    assert "Output tok/s" in completed.stdout
+    assert "Output throughput (tok/s):" in completed.stdout

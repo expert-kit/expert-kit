@@ -1,0 +1,81 @@
+name: {{ project_name }}-attention
+
+x-model-mount: &model-mount
+  type: bind
+  source: {{ model.path }}
+  target: /model/{{ model.name }}
+  read_only: true
+
+services:
+  attention:
+    image: {{ images.attention }}
+    privileged: true
+    ipc: host
+    shm_size: 16g
+    healthcheck:
+      test:
+        - CMD
+        - python3
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2)"
+      interval: 10s
+      timeout: 3s
+      retries: 12
+      start_period: 10m
+    volumes:
+      - *model-mount
+      - ./vllm-serve.yaml:/configs/vllm-serve.yaml:ro
+      - /usr/local/Ascend/driver:/usr/local/Ascend/driver:ro
+      - /usr/local/Ascend/firmware:/usr/local/Ascend/firmware:ro
+      - /etc/ascend_install.info:/etc/ascend_install.info:ro
+      - /usr/local/bin/npu-smi:/usr/local/bin/npu-smi:ro
+      - /usr/local/dcmi:/usr/local/dcmi:ro
+      - /dev/devmm_svm:/dev/devmm_svm
+    entrypoint: ["vllm"]
+    command:
+      - serve
+      - --config
+      - /configs/vllm-serve.yaml
+    environment:
+      EK_ENABLE: "1"
+      EK_ADDR: {{ control.address }}:{{ control.frontend_control_port }}
+      ASCEND_RT_VISIBLE_DEVICES: {{ attention.visible_devices }}
+    networks:
+      - expert-kit-network
+
+  benchmark:
+    image: {{ images.attention }}
+    depends_on:
+      attention:
+        condition: service_healthy
+    volumes:
+      - *model-mount
+{% if dataset.type != "random" %}
+      - {{ dataset.path }}:{{ dataset.mounted_path }}:ro
+{% endif %}
+      - ./vllm-bench.yaml:/configs/vllm-bench.yaml:ro
+      - /usr/local/Ascend/driver:/usr/local/Ascend/driver:ro
+      - /usr/local/Ascend/firmware:/usr/local/Ascend/firmware:ro
+      - /etc/ascend_install.info:/etc/ascend_install.info:ro
+      - /usr/local/bin/npu-smi:/usr/local/bin/npu-smi:ro
+      - /usr/local/dcmi:/usr/local/dcmi:ro
+      - /dev/devmm_svm:/dev/devmm_svm
+      - type: bind
+        source: {{ results_path }}
+        target: /results
+      - ../bench_launcher.py:/bench_launcher.py:ro
+    entrypoint: ["python3"]
+    command:
+      - /bench_launcher.py
+      - --config
+      - /configs/vllm-bench.yaml
+    environment:
+      EK_ENABLE: "0"
+      TORCH_DEVICE_BACKEND_AUTOLOAD: "0"
+      VLLM_PLUGINS: ""
+    networks:
+      - expert-kit-network
+
+networks:
+  expert-kit-network:
+    driver: bridge

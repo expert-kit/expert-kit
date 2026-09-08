@@ -8,6 +8,8 @@ from safetensors.torch import load as official_load
 from safetensors.torch import save as official_save
 
 from expertkit_worker.backends.torch import TorchWeightAdapter
+from expertkit_worker.device import CpuWorkerRuntime, CudaWorkerRuntime
+from expertkit_worker.device.runtime import DeviceWork
 from expertkit_worker.weights import (
     WeightPlacementFatalError,
     WeightPlacementFatalReason,
@@ -41,12 +43,17 @@ def make_adapter(
 ) -> TorchWeightAdapter:
     """Return the configured Torch fixture adapter."""
 
+    resolved_device = torch.device(device)
     return TorchWeightAdapter(
         hidden_dim=_HIDDEN_DIM,
         intermediate_dim=_INTERMEDIATE_DIM,
         source_dtype=source_dtype,
         compute_dtype=compute_dtype,
-        device=device,
+        runtime=(
+            CpuWorkerRuntime(resolved_device)
+            if resolved_device.type == "cpu"
+            else CudaWorkerRuntime(resolved_device)
+        ),
     )
 
 
@@ -93,6 +100,44 @@ def test_torch_adapter_converts_only_during_ready_weight_creation() -> None:
     assert adapter.ready_weight_bytes() == expected_bytes
 
 
+def test_torch_adapter_waits_for_runtime_work_before_publishing() -> None:
+    class RecordingWork:
+        wait_count = 0
+
+        def wait_host(self) -> None:
+            self.wait_count += 1
+
+    class RecordingRuntime:
+        device = torch.device("cpu")
+
+        def __init__(self) -> None:
+            self.work = RecordingWork()
+            self.capture_count = 0
+
+        def capture_current_work(self) -> DeviceWork:
+            self.capture_count += 1
+            return self.work
+
+    runtime = RecordingRuntime()
+    adapter = TorchWeightAdapter(
+        hidden_dim=_HIDDEN_DIM,
+        intermediate_dim=_INTERMEDIATE_DIM,
+        source_dtype=torch.float32,
+        compute_dtype=torch.float32,
+        runtime=runtime,  # type: ignore[arg-type]
+    )
+    owned, _ = make_source(torch.float32)
+
+    adapter.make_ready_weight(
+        adapter.make_cpu_weight(parse_safetensors(owned)),
+        layer_id=0,
+        expert_id=0,
+    )
+
+    assert runtime.capture_count == 1
+    assert runtime.work.wait_count == 1
+
+
 def test_torch_adapter_rejects_wrong_source_metadata() -> None:
     owned, _ = make_source(torch.float16)
     parsed = parse_safetensors(owned)
@@ -112,19 +157,33 @@ def test_torch_adapter_classifies_cuda_placement_failures_as_fatal(
     device_error: RuntimeError,
     expected_reason: WeightPlacementFatalReason,
 ) -> None:
-    class FailingTensor:
-        def to(self, **_options: object) -> torch.Tensor:
-            raise device_error
-
     class FailingWeight:
         device = torch.device("cpu")
         dtype = torch.float32
-        gate_proj = FailingTensor()
 
-    adapter = make_adapter(torch.float32, torch.float32, "cuda:0")
+        def to(self, **_options: object) -> torch.Tensor:
+            raise device_error
+
+    class FakeCudaRuntime:
+        device = torch.device("cuda:0")
+
+        def capture_current_work(self) -> DeviceWork:
+            raise AssertionError("failed placement must not capture device work")
+
+    adapter = TorchWeightAdapter(
+        hidden_dim=_HIDDEN_DIM,
+        intermediate_dim=_INTERMEDIATE_DIM,
+        source_dtype=torch.float32,
+        compute_dtype=torch.float32,
+        runtime=FakeCudaRuntime(),  # type: ignore[arg-type]
+    )
 
     with pytest.raises(WeightPlacementFatalError) as caught:
-        adapter.make_ready_weight(FailingWeight(), layer_id=0, expert_id=0)
+        adapter.make_ready_weight(  # type: ignore[arg-type]
+            FailingWeight(),
+            layer_id=0,
+            expert_id=0,
+        )
 
     assert caught.value.reason is expected_reason
 

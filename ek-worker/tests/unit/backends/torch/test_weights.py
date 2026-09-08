@@ -28,6 +28,18 @@ def test_ready_weights_expose_shape_dtype_device_and_storage() -> None:
     assert weights.storage_bytes == (5 * 3 + 5 * 3 + 3 * 5) * 2
 
 
+def test_weights_to_converts_the_projection_bundle() -> None:
+    weights = make_weights(torch.float32)
+
+    converted = weights.to(dtype=torch.bfloat16, copy=True)
+
+    assert converted.dtype is torch.bfloat16
+    assert converted.device == torch.device("cpu")
+    assert converted.gate_proj.data_ptr() != weights.gate_proj.data_ptr()
+    assert converted.up_proj.data_ptr() != weights.up_proj.data_ptr()
+    assert converted.down_proj.data_ptr() != weights.down_proj.data_ptr()
+
+
 @pytest.mark.parametrize(
     ("field", "value", "match"),
     [

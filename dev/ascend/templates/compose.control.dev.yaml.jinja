@@ -1,0 +1,13 @@
+services:
+  postgres:
+    ports:
+      - "127.0.0.1:{{ control.postgres_port }}:5432"
+
+  weight-server:
+    ports:
+      - "{{ control.address }}:{{ control.weight_server_port }}:6543"
+
+  controller:
+    ports:
+      - "{{ control.address }}:{{ control.worker_control_port }}:5001"
+      - "{{ control.address }}:{{ control.frontend_control_port }}:5002"

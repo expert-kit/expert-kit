@@ -51,7 +51,9 @@ async def start_pair() -> tuple[ShmWorkerBatchReceiver, ShmWorkerTransport]:
         max_active_batches=1,
         max_pending_batches=1,
     )
-    buffers = server.create_batch_buffers(BatchBufferConfig(4, 3, 2, torch.float32, "cpu"))
+    buffers = server.create_batch_buffers(
+        BatchBufferConfig(4, 3, 2, torch.float32, torch.device("cpu"))
+    )
     buffers.close()
     await server.start()
     client = ShmWorkerTransport(
@@ -211,7 +213,9 @@ def test_shm_receiver_does_not_expose_grpc_tensor_execute() -> None:
             max_active_batches=1,
             max_pending_batches=1,
         )
-        buffers = server.create_batch_buffers(BatchBufferConfig(4, 3, 2, torch.float32, "cpu"))
+        buffers = server.create_batch_buffers(
+            BatchBufferConfig(4, 3, 2, torch.float32, torch.device("cpu"))
+        )
         buffers.close()
         await server.start()
         channel = grpc.aio.insecure_channel(f"127.0.0.1:{server.bound_port}")

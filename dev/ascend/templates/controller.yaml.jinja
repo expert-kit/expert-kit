@@ -1,0 +1,27 @@
+inference:
+  hidden_dim: {{ model.hidden_dim }}
+  intermediate_dim: {{ model.intermediate_dim }}
+  instance_name: {{ inference.instance_name }}
+  model_name: {{ model.name }}
+
+db:
+  db_dsn: postgres://{{ control.database.user }}:{{ control.database.password }}@postgres:5432/{{ control.database.name }}
+  max_conn_size: {{ control.database.max_connections }}
+
+weight:
+  server:
+    addr: http://weight-server:6543
+  cache:
+    Fs:
+      path: /var/cache/expert-kit/weight-cache
+
+controller:
+  listen: 0.0.0.0
+  broadcast: controller
+  ports:
+    intra: 5001
+    inter: 5002
+  fault_detection:
+    heartbeat_timeout_secs: {{ control.fault_detection.heartbeat_timeout_secs }}
+    node_active_threshold_secs: {{ control.fault_detection.node_active_threshold_secs }}
+    poller_interval_secs: {{ control.fault_detection.poller_interval_secs }}

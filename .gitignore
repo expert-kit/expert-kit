@@ -1,10 +1,12 @@
 # Build files
 target/
 build/
+dist/
 
 # Envs
 .vscode/
 .venv
+dev/atlas-a3/.env
 
 # Static files
 vendor
@@ -23,3 +25,7 @@ output/
 
 # others
 experiments/
+.rsyncignore
+AGENTS.md
+.polaris/
+dev/atlas-a3/generated/

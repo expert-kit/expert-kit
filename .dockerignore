@@ -1,7 +1,8 @@
 target
 data
 docker
-container
+container/*
+!container/cargo-config.cn.toml
 .vscode
 dev
 doc

@@ -15,6 +15,7 @@ except PackageNotFoundError:
 from expertkit_worker.backends import BackendBatch, BackendWeightUnavailable, InvalidBackendInput
 from expertkit_worker.backends.ggml import GgmlBackend, GgmlExpertWeights
 from expertkit_worker.backends.torch import TorchBackend, TorchExpertWeights
+from expertkit_worker.device import CpuWorkerRuntime
 from expertkit_worker.weights import ReadyWeightTable
 
 _HIDDEN_DIM = 4
@@ -92,7 +93,7 @@ def test_ggml_backend_matches_torch_for_weighted_worker_batch(
         intermediate_dim=_INTERMEDIATE_DIM,
         top_k=_TOP_K,
         dtype=dtype,
-        device="cpu",
+        runtime=CpuWorkerRuntime(torch.device("cpu")),
         acquire_many=torch_table.acquire_many,
     )
     ggml_backend = GgmlBackend(

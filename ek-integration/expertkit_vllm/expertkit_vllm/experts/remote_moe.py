@@ -6,22 +6,29 @@ import atexit
 import logging
 import re
 import threading
+import weakref
 from collections.abc import Callable, Iterable
-from typing import TYPE_CHECKING, Any
+from functools import wraps
+from typing import TYPE_CHECKING, Any, cast
 
 import torch
 from expertkit_transport import BlockingRoutedMoEClient, validate_and_convert_routing
 from torch import nn
 from vllm.config import CUDAGraphMode, get_current_vllm_config
+from vllm.config.parallel import ExpertPlacementStrategy
 from vllm.forward_context import get_forward_context
+from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
+from vllm.model_executor.layers.fused_moe.fused_moe_method_base import (
+    FusedMoEMethodBase,
+)
 from vllm.model_executor.layers.fused_moe.router.fused_moe_router import (
     FusedMoERouter,
 )
-from vllm.model_executor.layers.fused_moe.router.router_factory import (
-    create_fused_moe_router,
+from vllm.model_executor.layers.fused_moe.runner.moe_runner_interface import (
+    MoERunnerInterface,
 )
-from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.models.utils import PPMissingLayer
+from vllm.model_executor.layers.fused_moe.runner.shared_experts import SharedExperts
 from vllm.utils.torch_utils import (
     LayerName,
     LayerNameType,
@@ -30,6 +37,8 @@ from vllm.utils.torch_utils import (
     direct_register_custom_op,
 )
 
+from expertkit_vllm.experts.remote_routed_experts import RemoteRoutedExperts
+from expertkit_vllm.experts.selector import ExpertSelector, create_expert_selector
 from expertkit_vllm.utils.config import collect_ek_client_config
 
 logger = logging.getLogger(__name__)
@@ -37,6 +46,7 @@ logger = logging.getLogger(__name__)
 _LAYER_PATTERN = re.compile(r"(?:^|\.)layers\.(\d+)(?:\.|$)")
 _CLIENTS: dict[tuple[object, ...], BlockingRoutedMoEClient] = {}
 _CLIENTS_LOCK = threading.Lock()
+_WRAPPED_FACTORIES: weakref.WeakSet[object] = weakref.WeakSet()
 
 if TYPE_CHECKING:
     from typing import TypeAlias
@@ -150,46 +160,60 @@ def close_clients() -> None:
 atexit.register(close_clients)
 
 
-class RemoteMoERunner(nn.Module):
+class RemoteMoERunner(MoERunnerInterface):
     """Preserve vLLM routing and shared experts while offloading routed FFNs."""
 
     def __init__(
         self,
-        *,
-        num_experts: int,
-        top_k: int,
-        hidden_size: int,
-        prefix: str,
+        layer_name: str,
+        moe_config: FusedMoEConfig,
         router: FusedMoERouter,
-        gate: nn.Module | None,
-        shared_experts: nn.Module | None,
-        apply_routed_scale_to_output: bool,
-        routed_scaling_factor: float,
+        routed_experts: RemoteRoutedExperts,
+        enable_dbo: bool = False,
+        gate: nn.Module | None = None,
+        shared_experts: nn.Module | None = None,
+        shared_expert_gate: nn.Module | None = None,
+        routed_input_transform: nn.Module | None = None,
+        routed_output_transform: nn.Module | None = None,
+        routed_scaling_factor: float = 1.0,
+        tid2eid: torch.Tensor | None = None,
     ) -> None:
         super().__init__()
+        unsupported = {
+            "dbo": enable_dbo,
+            "separate_shared_expert_gate": shared_expert_gate is not None,
+            "routed_input_transform": routed_input_transform is not None,
+            "routed_output_transform": routed_output_transform is not None,
+        }
+        enabled = sorted(name for name, value in unsupported.items() if value)
+        if enabled:
+            raise ValueError(f"Expert Kit remote MoE does not support: {', '.join(enabled)}")
+
         vllm_config = get_current_vllm_config()
-        self.num_experts = num_experts
+        self.moe_config = moe_config
+        self.num_experts = moe_config.num_logical_experts
         self.num_layers = _num_layers(vllm_config)
-        self.top_k = top_k
-        self.hidden_size = hidden_size
-        self.layer_name = prefix
-        self.layer_id = _layer_id(prefix)
+        self.top_k = moe_config.experts_per_token
+        self.hidden_size = moe_config.hidden_dim
+        self.layer_name = layer_name
+        self._layer_id = _layer_id(layer_name)
         self.router = router
-        # DeepSeek maps per-expert checkpoint keys to this packed subpath before
-        # parameter lookup. Mark only routed weights missing so the local gate
-        # and shared expert remain loadable.
-        self.routed_experts = PPMissingLayer()
+        self.routed_experts = routed_experts
         self.gate = gate
-        self.shared_experts = shared_experts
-        self.apply_routed_scale_to_output = apply_routed_scale_to_output
+        self._shared_experts_module = shared_experts
         self.routed_scaling_factor = routed_scaling_factor
+        self.expert_selector: ExpertSelector = create_expert_selector(
+            router,
+            routed_experts,
+            tid2eid=tid2eid,
+        )
         self.client_config = collect_ek_client_config()
 
         compilation = vllm_config.compilation_config
-        if prefix in compilation.static_forward_context:
-            raise ValueError(f"duplicate Expert Kit MoE layer prefix {prefix!r}")
-        compilation.static_forward_context[prefix] = self
-        compilation.static_all_moe_layers.append(prefix)
+        if layer_name in compilation.static_forward_context:
+            raise ValueError(f"duplicate Expert Kit MoE layer prefix {layer_name!r}")
+        compilation.static_forward_context[layer_name] = self
+        compilation.static_all_moe_layers.append(layer_name)
         if compilation.splitting_ops is None:
             compilation.splitting_ops = []
         op_name = "vllm::expertkit_remote_moe"
@@ -197,13 +221,86 @@ class RemoteMoERunner(nn.Module):
             compilation.splitting_ops.append(op_name)
         if compilation.cudagraph_mode.has_full_cudagraphs():
             compilation.cudagraph_mode = CUDAGraphMode.PIECEWISE
-            logger.info("disabled full CUDA Graph capture around remote MoE execution")
+            logger.info("disabled full graph capture around remote MoE execution")
 
     @property
     def is_internal_router(self) -> bool:
         """Return whether this runner owns the model gate."""
 
         return self.gate is not None
+
+    @property
+    def shared_experts(self) -> SharedExperts | None:
+        """Expose the vLLM compatibility property without wrapping local experts."""
+
+        return cast(SharedExperts | None, self._shared_experts_module)
+
+    @property
+    def _quant_method(self) -> FusedMoEMethodBase:
+        raise RuntimeError("remote routed experts do not have a local quantization method")
+
+    def _replace_quant_method(self, quant_method: FusedMoEMethodBase) -> None:
+        raise RuntimeError("remote routed experts do not have a local quantization method")
+
+    def maybe_init_modular_kernel(self) -> None:
+        """No local expert kernel exists in the attention process."""
+
+    @property
+    def layer_id(self) -> int:
+        return self._layer_id
+
+    @property
+    def is_monolithic(self) -> bool:
+        return False
+
+    @property
+    def activation(self) -> MoEActivation:
+        return self.moe_config.activation
+
+    @property
+    def expert_placement_strategy(self) -> ExpertPlacementStrategy:
+        return self.routed_experts.expert_map_manager.placement_strategy
+
+    @property
+    def expert_global_to_physical(self) -> torch.Tensor | None:
+        return None
+
+    @property
+    def expert_physical_to_global(self) -> torch.Tensor | None:
+        return None
+
+    @property
+    def expert_local_to_global(self) -> torch.Tensor | None:
+        return None
+
+    @property
+    def expert_map(self) -> torch.Tensor | None:
+        return None
+
+    def _expert_routing_tables(
+        self,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None:
+        return None
+
+    def update_expert_map(self) -> None:
+        """Reject vLLM EPLB because Controller owns Expert Kit placement."""
+
+        raise RuntimeError("vLLM EPLB is not supported by Expert Kit remote MoE")
+
+    def _map_global_expert_id_to_local_expert_id(self, expert_id: int) -> int:
+        return expert_id
+
+    def get_expert_weights(self) -> Iterable[torch.Tensor]:
+        return ()
+
+    def set_eplb_state(
+        self,
+        moe_layer_idx: int,
+        expert_load_view: torch.Tensor,
+        logical_to_physical_map: torch.Tensor,
+        logical_replica_count: torch.Tensor,
+    ) -> None:
+        raise RuntimeError("vLLM EPLB is not supported by Expert Kit remote MoE")
 
     def forward(
         self,
@@ -228,10 +325,11 @@ class RemoteMoERunner(nn.Module):
     ) -> torch.Tensor:
         if self.gate is not None:
             router_logits = _unwrap_tensor(self.gate(hidden_states))
-        routing_weights, expert_ids = self.router.select_experts(
+        # Expert selector (in vLLM or vLLM-Ascend) will select experts
+        # under different platform and runtime
+        routing_weights, expert_ids = self.expert_selector.select_experts(
             hidden_states,
             router_logits,
-            topk_indices_dtype=torch.int32,
             input_ids=input_ids,
         )
         expert_ids, routing_weights, distinct_expert_ids = validate_and_convert_routing(
@@ -249,9 +347,9 @@ class RemoteMoERunner(nn.Module):
         )
 
         shared_output: torch.Tensor | None = None
-        if self.shared_experts is not None:
-            shared_output = _unwrap_tensor(self.shared_experts(hidden_states))
-        if self.apply_routed_scale_to_output and self.routed_scaling_factor != 1.0:
+        if self._shared_experts_module is not None:
+            shared_output = _unwrap_tensor(self._shared_experts_module(hidden_states))
+        if self.routed_scaling_factor != 1.0:
             if routed_output.dtype != torch.float16 or shared_output is None:
                 routed_output = routed_output * self.routed_scaling_factor
             else:
@@ -261,119 +359,51 @@ class RemoteMoERunner(nn.Module):
         return routed_output
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        """Consume remote expert checkpoint entries without retaining local weights."""
-
-        return {name for name, _ in weights}
-
-    def update_expert_map(self) -> None:
-        """Reject vLLM EPLB because Controller owns Expert Kit placement."""
-
-        raise RuntimeError("vLLM EPLB is not supported by Expert Kit remote MoE")
+        return {f"routed_experts.{name}" for name in self.routed_experts.load_weights(weights)}
 
 
-def remote_fused_moe(
-    num_experts: int,
-    top_k: int,
-    hidden_size: int,
-    intermediate_size: int,
-    intermediate_pad: int | None = None,
-    params_dtype: torch.dtype | None = None,
-    renormalize: bool = True,
-    use_grouped_topk: bool = False,
-    num_expert_group: int | None = None,
-    topk_group: int | None = None,
-    quant_config: QuantizationConfig | None = None,
-    tp_size: int | None = None,
-    dp_size: int | None = None,
-    pcp_size: int | None = None,
-    prefix: str = "",
-    custom_routing_function: Callable | None = None,
-    router: FusedMoERouter | None = None,
-    scoring_func: str = "softmax",
-    routed_scaling_factor: float = 1.0,
-    swiglu_limit: float | None = None,
-    swiglu_alpha: float | None = None,
-    swiglu_beta: float | None = None,
-    e_score_correction_bias: torch.Tensor | None = None,
-    apply_router_weight_on_input: bool = False,
-    activation: str = "silu",
-    enable_eplb: bool = False,
-    num_redundant_experts: int = 0,
-    has_bias: bool = False,
-    is_sequence_parallel: bool = False,
-    reduce_results: bool = True,
-    ckpt_names: tuple[str, str, str] = ("gate_proj", "down_proj", "up_proj"),
-    n_shared_experts: int | None = None,
-    router_logits_dtype: torch.dtype | None = None,
-    gate: nn.Module | None = None,
-    shared_experts: nn.Module | None = None,
-    shared_expert_gate: nn.Module | None = None,
-    routed_input_transform: nn.Module | None = None,
-    routed_output_transform: nn.Module | None = None,
-    apply_routed_scale_to_output: bool = False,
-    zero_expert_type: str | None = None,
-    hash_indices_table: torch.Tensor | None = None,
-    runner_cls: type[Any] | None = None,
-    runner_args: dict[str, Any] | None = None,
-    routed_experts_cls: type[Any] | None = None,
-    routed_experts_args: dict[str, Any] | None = None,
-) -> RemoteMoERunner:
-    """Match the vLLM 0.25.1 `FusedMoE` factory for the supported subset."""
+def is_expertkit_fused_moe_factory(factory: object) -> bool:
+    try:
+        return factory in _WRAPPED_FACTORIES
+    except TypeError:
+        return False
 
-    config = get_current_vllm_config()
-    unsupported = {
-        "quant_config": quant_config is not None,
-        "tensor_parallel": config.parallel_config.tensor_parallel_size != 1
-        or tp_size not in (None, 1),
-        "prefill_context_parallel": config.parallel_config.prefill_context_parallel_size != 1
-        or pcp_size not in (None, 1),
-        "expert_parallel": config.parallel_config.enable_expert_parallel,
-        "sequence_parallel": is_sequence_parallel,
-        "eplb": enable_eplb or num_redundant_experts != 0,
-        "expert_bias": has_bias,
-        "fused_shared_experts": n_shared_experts not in (None, 0),
-        "separate_shared_expert_gate": shared_expert_gate is not None,
-        "custom_swiglu": any(
-            value is not None for value in (swiglu_limit, swiglu_alpha, swiglu_beta)
-        ),
-        "router_weight_on_input": apply_router_weight_on_input,
-        "routed_input_transform": routed_input_transform is not None,
-        "routed_output_transform": routed_output_transform is not None,
-        "zero_expert": zero_expert_type is not None,
-        "hash_routing": hash_indices_table is not None,
-        "custom_runner": runner_cls is not None or runner_args is not None,
-        "custom_experts": routed_experts_cls is not None or routed_experts_args is not None,
-    }
-    enabled = sorted(name for name, value in unsupported.items() if value)
-    if enabled:
-        raise ValueError(f"Expert Kit remote MoE does not support: {', '.join(enabled)}")
-    if not reduce_results:
-        raise ValueError("Expert Kit remote MoE requires reduce_results=True")
-    if activation != "silu":
-        raise ValueError("Expert Kit remote MoE initially supports only SiLU experts")
 
-    if router is None:
-        router = create_fused_moe_router(
-            top_k=top_k,
-            global_num_experts=num_experts,
-            renormalize=renormalize,
-            use_grouped_topk=use_grouped_topk,
-            num_expert_group=num_expert_group,
-            topk_group=topk_group,
-            scoring_func=scoring_func,
-            routed_scaling_factor=(1.0 if apply_routed_scale_to_output else routed_scaling_factor),
-            e_score_correction_bias=e_score_correction_bias,
-            custom_routing_function=custom_routing_function,
-        )
+def wrap_fused_moe_factory[**P](
+    platform_factory: Callable[P, MoERunnerInterface],
+) -> Callable[P, MoERunnerInterface]:
+    """Inject remote classes while preserving the active platform wrapper."""
 
-    return RemoteMoERunner(
-        num_experts=num_experts,
-        top_k=top_k,
-        hidden_size=hidden_size,
-        prefix=prefix,
-        router=router,
-        gate=gate,
-        shared_experts=shared_experts,
-        apply_routed_scale_to_output=apply_routed_scale_to_output,
-        routed_scaling_factor=routed_scaling_factor,
-    )
+    if is_expertkit_fused_moe_factory(platform_factory):
+        return platform_factory
+
+    @wraps(platform_factory)
+    def remote_factory(
+        *args: P.args,
+        **kwargs: P.kwargs,
+    ) -> MoERunnerInterface:
+        options: dict[str, Any] = dict(kwargs)
+        conflicts = {
+            "custom_runner": options.get("runner_cls") is not None
+            or options.get("runner_args") not in (None, {}),
+            "custom_experts": options.get("routed_experts_cls") is not None
+            or options.get("routed_experts_args") not in (None, {}),
+        }
+        enabled = sorted(name for name, value in conflicts.items() if value)
+        if enabled:
+            raise ValueError(f"Expert Kit remote MoE does not support: {', '.join(enabled)}")
+
+        options["runner_cls"] = RemoteMoERunner
+        options["routed_experts_cls"] = RemoteRoutedExperts
+        # Global DP still controls vLLM scheduling and attention. EK returns a
+        # complete routed-expert result for this rank, so the injected MoE must
+        # not form vLLM expert collectives across the DP group.
+        options["dp_size"] = 1
+        options["tp_size"] = 1
+        options["pcp_size"] = 1
+
+        invoke = cast(Callable[..., MoERunnerInterface], platform_factory)
+        return invoke(*args, **options)
+
+    _WRAPPED_FACTORIES.add(remote_factory)
+    return remote_factory

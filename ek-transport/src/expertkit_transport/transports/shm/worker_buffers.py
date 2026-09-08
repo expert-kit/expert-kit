@@ -30,6 +30,8 @@ class ShmWorkerBatchBuffers(WorkerBatchBuffers):
     """Copy through the session's fixed mapping without private Host staging."""
 
     def __init__(self, spec: BatchBufferConfig) -> None:
+        if spec.device.type == "npu":
+            raise ValueError("SHM transport does not support NPU devices")
         self._spec = spec
         self._closed = False
 
@@ -120,7 +122,7 @@ class ShmWorkerBatchBuffers(WorkerBatchBuffers):
         _require_tensor(
             "output destination",
             destination,
-            shape=tuple(partial_output.shape),
+            shape=(partial_output.shape[0], partial_output.shape[1]),
             dtype=self._spec.dtype,
             device=torch.device("cpu"),
         )
