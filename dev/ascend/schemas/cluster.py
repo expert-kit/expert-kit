@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+from ipaddress import IPv4Address
 from pathlib import Path
 from typing import Self
 
 import yaml
-from pydantic import Field, IPvAnyAddress, computed_field, model_validator
+from pydantic import Field, computed_field, model_validator
 
 from .config import ConfigModel
 
@@ -29,7 +30,7 @@ class ClusterConfig(ConfigModel):
         return cls.model_validate(data)
 
     @model_validator(mode="after")
-    def validate_unValueErrorique_pool_ids(self) -> Self:
+    def validate_unique_pool_ids(self) -> Self:
         allocated_ids = set()
         for pool in self.pools:
             if pool.id in allocated_ids:
@@ -54,7 +55,7 @@ class ImageConfig(ConfigModel):
 
 
 class NodeConfig(ConfigModel):
-    address: IPvAnyAddress
+    address: IPv4Address
 
 
 class AttentionConfig(ConfigModel):

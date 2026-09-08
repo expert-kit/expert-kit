@@ -103,7 +103,7 @@ dev/ascend/
 ├── generate.py                     # output expansion
 ├── renderer.py                     # StrictUndefined Jinja renderer
 ├── bench_launcher.py               # vLLM benchmark YAML adapter
-├── run-compose.sh                  # selects image, attention, or pool Compose
+├── run-compose.sh                  # selects image, control, attention, or pool Compose
 ├── schemas/                        # input and template-context models
 ├── configs/
 │   ├── qwen3-30b-a3b/
@@ -118,6 +118,7 @@ dev/ascend/
 │   └── compose.build.yaml          # standalone image-build defaults
 ├── templates/
 │   ├── compose.build.yaml.jinja
+│   ├── compose.control*.yaml.jinja
 │   ├── compose.attention*.yaml.jinja
 │   ├── compose.expert*.yaml.jinja
 │   ├── controller.yaml.jinja
@@ -128,6 +129,8 @@ dev/ascend/
 └── generated/                      # ignored exact materialization
     ├── .expert-kit-generated       # cleanup safety marker
     ├── compose.build.yaml
+    ├── compose.control.dev.yaml
+    ├── compose.control.yaml
     ├── compose.attention.dev.yaml
     ├── compose.attention.yaml
     ├── controller.yaml
@@ -173,7 +176,8 @@ flowchart LR
     workers --> pool_dir
     pool_dir --> generated
 
-    generated --> attention_host["Attention/control node"]
+    generated --> control_host["Control node"]
+    generated --> attention_host["Attention node"]
     generated --> expert_a["Expert node: worker-pool1"]
     generated --> expert_b["Expert node: worker-pool2"]
     generated --> torch["Host-native Torch ablation"]

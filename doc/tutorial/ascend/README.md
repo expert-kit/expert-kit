@@ -34,6 +34,7 @@ The shared commands use these placeholders:
 | `<RESULTS_DIR>` | Writable result directory inside `<PROJECT_ROOT>` |
 | `<ATTENTION_HOST_IP>` | Routable address of the attention Host |
 | `<SERVED_MODEL_NAME>` | Exact `model.name` value from `experiment.yaml` |
+| `<MODEL_CONFIG>` | Model-specific directory selected by its tutorial |
 
 The examples use this placement:
 
@@ -44,8 +45,11 @@ The examples use this placement:
 | `node-c` | `worker-pool2` |
 
 Replace the example node names and pool IDs when `cluster.yaml` uses different
-values. The model checkpoint is mounted only on the attention Host. Expert
-Hosts receive assigned expert blobs from the Weight Server.
+values. `attention.node` and `control.node` may refer to the same Host or to
+different Hosts. The model checkpoint path must be available on both Hosts
+because vLLM mounts it from the attention bundle and the Weight Server mounts
+it from the control bundle. Expert Hosts receive assigned expert blobs from
+the Weight Server.
 
 If a Host requires a Python mirror, prefix commands that resolve packages:
 
@@ -59,8 +63,10 @@ UV_DEFAULT_INDEX=https://mirror.nju.edu.cn/pypi/web/simple \
 Create the ignored Host-local inputs once:
 
 ```bash
-cp dev/ascend/configs/cluster.example.yaml dev/ascend/configs/cluster.yaml
-cp dev/ascend/configs/experiment.example.yaml dev/ascend/configs/experiment.yaml
+cp dev/ascend/configs/<MODEL_CONFIG>/cluster.example.yaml \
+  dev/ascend/configs/cluster.yaml
+cp dev/ascend/configs/<MODEL_CONFIG>/experiment.example.yaml \
+  dev/ascend/configs/experiment.yaml
 ```
 
 Replace the RFC 5737 documentation addresses and `/home/<USER>` paths, then
@@ -97,11 +103,12 @@ The default output directory is replaced on every generation. A custom output
 directory must be nonexistent, empty, or contain the generated
 `.expert-kit-generated` marker.
 
-Validate the image definition, attention bundle, and every expert pool before
-deployment:
+Validate the image definition, control bundle, attention bundle, and every
+expert pool before deployment:
 
 ```bash
 dev/ascend/run-compose.sh image config -q
+dev/ascend/run-compose.sh control config -q
 dev/ascend/run-compose.sh attention config -q
 dev/ascend/run-compose.sh expert worker-pool1 config -q
 dev/ascend/run-compose.sh expert worker-pool2 config -q
@@ -123,11 +130,15 @@ uv build --wheel --package expertkit-vllm \
   --out-dir dist/attention-wheels
 ```
 
-Build only the targets required by the current Host:
+Build only the targets required by the current Host. If attention and control
+share a Host, the first two commands may be combined:
 
 ```bash
-# node-a
-dev/ascend/run-compose.sh image build control-image attention-image
+# control node
+dev/ascend/run-compose.sh image build control-image
+
+# attention node
+dev/ascend/run-compose.sh image build attention-image
 
 # node-b and node-c
 dev/ascend/run-compose.sh image build worker-image
@@ -138,12 +149,13 @@ image references therefore come from `cluster.yaml`.
 
 ### 4. Start the deployment
 
-On `node-a`, start the control stack. The `controller` dependency chain also
-starts PostgreSQL, migrations, model initialization, and the Weight Server:
+On the Host selected by `control.node`, start the control stack. The
+`controller` dependency chain also starts PostgreSQL, migrations, model
+initialization, and the Weight Server:
 
 ```bash
-dev/ascend/run-compose.sh attention up -d controller
-dev/ascend/run-compose.sh attention ps
+dev/ascend/run-compose.sh control up -d controller
+dev/ascend/run-compose.sh control ps
 ```
 
 Start one Worker on each expert Host and inspect its logs before scaling out:
@@ -168,11 +180,11 @@ dev/ascend/run-compose.sh expert worker-pool1 up -d
 dev/ascend/run-compose.sh expert worker-pool2 up -d
 ```
 
-After every Worker has registered, rebalance placement from `node-a` and start
-the attention frontend:
+After every Worker has registered, rebalance placement from the control Host.
+Then start the frontend on the Host selected by `attention.node`:
 
 ```bash
-dev/ascend/run-compose.sh attention run --rm admin \
+dev/ascend/run-compose.sh control run --rm admin \
   ek-cli schedule rebalance
 
 dev/ascend/run-compose.sh attention up -d attention
@@ -217,7 +229,8 @@ dev/ascend/run-compose.sh attention run --rm \
 Inspect logs without changing the deployment:
 
 ```bash
-dev/ascend/run-compose.sh attention logs --tail=100 attention controller
+dev/ascend/run-compose.sh control logs --tail=100 controller weight-server
+dev/ascend/run-compose.sh attention logs --tail=100 attention
 dev/ascend/run-compose.sh expert worker-pool1 logs --tail=100
 dev/ascend/run-compose.sh expert worker-pool2 logs --tail=100
 ```
@@ -243,7 +256,7 @@ fixed offline batches; report the two execution modes separately.
 Stop containers without deleting named volumes:
 
 ```bash
-# node-a
+# attention node
 dev/ascend/run-compose.sh attention down
 
 # node-b
@@ -251,6 +264,9 @@ dev/ascend/run-compose.sh expert worker-pool1 down
 
 # node-c
 dev/ascend/run-compose.sh expert worker-pool2 down
+
+# control node
+dev/ascend/run-compose.sh control down
 ```
 
 ### Runtime version boundaries

@@ -21,6 +21,8 @@ class ConfigFileNames:
     COMPOSE_BUILD = "compose.build.yaml"
     COMPOSE_ATTENTION_DEV = "compose.attention.dev.yaml"
     COMPOSE_ATTENTION = "compose.attention.yaml"
+    COMPOSE_CONTROL_DEV = "compose.control.dev.yaml"
+    COMPOSE_CONTROL = "compose.control.yaml"
     COMPOSE_EXPERT_DEV = "compose.expert.dev.yaml"
     COMPOSE_EXPERT = "compose.expert.yaml"
     VLLM_SERVE = "vllm-serve.yaml"
@@ -143,6 +145,8 @@ def root_render_specs(output: Path) -> tuple[RenderSpec, ...]:
         create_render_spec(output, ConfigFileNames.COMPOSE_BUILD),
         create_render_spec(output, ConfigFileNames.COMPOSE_ATTENTION),
         create_render_spec(output, ConfigFileNames.COMPOSE_ATTENTION_DEV),
+        create_render_spec(output, ConfigFileNames.COMPOSE_CONTROL),
+        create_render_spec(output, ConfigFileNames.COMPOSE_CONTROL_DEV),
         create_render_spec(output, ConfigFileNames.CONTROLLER),
         create_render_spec(output, ConfigFileNames.VLLM_BENCH),
         create_render_spec(output, ConfigFileNames.VLLM_SERVE),

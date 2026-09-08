@@ -6,6 +6,7 @@ GENERATED_DIR="$SCRIPT_DIR/generated"
 
 usage() {
   echo "usage: $0 attention <compose-args...>" >&2
+  echo "       $0 control <compose-args...>" >&2
   echo "       $0 expert <pool-id> <compose-args...>" >&2
   echo "       $0 image <compose-args...>" >&2
 }
@@ -15,14 +16,20 @@ if (( $# < 1 )); then
   exit 2
 fi
 
-role="$1"
+target="$1"
 shift
 
-case "$role" in
+case "$target" in
   attention)
     files=(
       -f "$GENERATED_DIR/compose.attention.dev.yaml"
       -f "$GENERATED_DIR/compose.attention.yaml"
+    )
+    ;;
+  control)
+    files=(
+      -f "$GENERATED_DIR/compose.control.dev.yaml"
+      -f "$GENERATED_DIR/compose.control.yaml"
     )
     ;;
   expert)
@@ -57,7 +64,7 @@ case "$role" in
     )
     ;;
   *)
-    echo "unknown role: $role" >&2
+    echo "unknown target: $target" >&2
     usage
     exit 2
     ;;

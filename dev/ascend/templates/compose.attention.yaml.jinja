@@ -7,113 +7,11 @@ x-model-mount: &model-mount
   read_only: true
 
 services:
-  postgres:
-    image: {{ images.postgres }}
-    pull_policy: missing
-    environment:
-      POSTGRES_USER: {{ control.database.user }}
-      POSTGRES_PASSWORD: {{ control.database.password }}
-      POSTGRES_DB: {{ control.database.name }}
-    healthcheck:
-      test: ["CMD", "pg_isready", "-U", "{{ control.database.user }}"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-    restart: unless-stopped
-    volumes:
-      - pg-data:/var/lib/postgresql/data
-    networks:
-      - expert-kit-network
-
-  migrations:
-    image: {{ images.control }}
-    depends_on:
-      postgres:
-        condition: service_healthy
-    volumes:
-      - ./controller.yaml:/etc/expert-kit/config.yaml:ro
-    command:
-      - ek-cli
-      - db
-      - migrate
-    networks:
-      - expert-kit-network
-
-  weight-server:
-    image: {{ images.control }}
-    depends_on:
-      migrations:
-        condition: service_completed_successfully
-    restart: unless-stopped 
-    volumes:
-      - *model-mount
-      - ./controller.yaml:/etc/expert-kit/config.yaml:ro
-      - weight-cache:/var/cache/expert-kit/weight-cache
-    environment:
-      RUST_LOG: info
-    command: 
-      - ek-cli
-      - weight-server
-      - --model
-      - /model/{{ model.name }}
-    networks:
-      - expert-kit-network
-
-  model-init:
-    image: {{ images.control }}
-    depends_on:
-      migrations:
-        condition: service_completed_successfully
-      weight-server:
-        condition: service_started
-    volumes:
-      - ./controller.yaml:/etc/expert-kit/config.yaml:ro
-    environment:
-      RUST_LOG: info
-    networks:
-      - expert-kit-network
-    command: 
-        - ek-cli 
-        - model 
-        - upsert
-        - --name
-        - {{ model.name }}
-
-  controller:
-    image: {{ images.control }}
-    depends_on:
-      migrations:
-        condition: service_completed_successfully
-      model-init:
-        condition: service_completed_successfully
-    restart: unless-stopped 
-    volumes:
-      - ./controller.yaml:/etc/expert-kit/config.yaml:ro
-    environment:
-      RUST_LOG: info
-    command: 
-      - ek-cli
-      - controller
-    networks:
-      - expert-kit-network
-
-  admin:
-    image: {{ images.control }}
-    profiles: ["tools"]
-    volumes:
-      - ./controller.yaml:/etc/expert-kit/config.yaml:ro
-      - weight-cache:/var/cache/expert-kit/weight-cache
-    networks:
-      - expert-kit-network
-
   attention:
     image: {{ images.attention }}
     privileged: true
     ipc: host
     shm_size: 16g
-    depends_on:
-      controller:
-        condition: service_started
     healthcheck:
       test:
         - CMD
@@ -140,7 +38,7 @@ services:
       - /configs/vllm-serve.yaml
     environment:
       EK_ENABLE: "1"
-      EK_ADDR: controller:5002
+      EK_ADDR: {{ control.address }}:{{ control.frontend_control_port }}
       ASCEND_RT_VISIBLE_DEVICES: {{ attention.visible_devices }}
     networks:
       - expert-kit-network
@@ -181,7 +79,3 @@ services:
 networks:
   expert-kit-network:
     driver: bridge
-
-volumes:
-  pg-data:
-  weight-cache:

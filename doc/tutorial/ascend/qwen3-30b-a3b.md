@@ -52,13 +52,12 @@ jq -s '.' \
 
 Create the inputs through the
 [shared Host-local input step](README.md#1-create-the-host-local-inputs).
-Keep the example's 8A32E placement and make these model-specific changes.
+Use `qwen3-30b-a3b` as `<MODEL_CONFIG>`, keep the example's 8A32E placement,
+and replace its Host-local addresses and paths.
 
-In `cluster.yaml`:
-
-- set `paths.models.qwen3-30b-a3b` to `<MODEL_DIR>`;
-- set `paths.datasets.sharegpt` to `<DATASET_DIR>`;
-- set `paths.results` to `<RESULTS_DIR>`.
+In `cluster.yaml`, set `paths.models.qwen3-30b-a3b` to `<MODEL_DIR>`,
+`paths.datasets.sharegpt` to `<DATASET_DIR>`, and `paths.results` to
+`<RESULTS_DIR>`.
 
 Keep the Qwen model block in `experiment.yaml` and select ShareGPT:
 

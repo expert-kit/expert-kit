@@ -26,7 +26,7 @@ Sources:
 - [Official DeepSeek-V3 repository and BF16 conversion](https://github.com/deepseek-ai/DeepSeek-V3)
 - [Official DeepSeek-V3 checkpoint](https://huggingface.co/deepseek-ai/DeepSeek-V3)
 - [DeepSeek-V3 on ModelScope](https://www.modelscope.cn/models/deepseek-ai/DeepSeek-V3)
-- [ModelScope BF16 mirror](https://www.modelscope.cn/models/unsloth/deepseek-V3-bf16)
+- [ModelScope BF16 mirror](https://www.modelscope.cn/models/unsloth/DeepSeek-V3-bf16)
 - [vLLM-Ascend supported-model matrix](https://docs.vllm.ai/projects/ascend/en/main/user_guide/support_matrix/supported_models.html)
 
 vLLM-Ascend's DeepSeek support does not by itself qualify EK. EK replaces the
@@ -62,8 +62,12 @@ verifying its provenance and file checksums:
 ```bash
 modelscope download \
   --model unsloth/DeepSeek-V3-bf16 \
-  --local_dir <DEEPSEEK_V3_BF16_DIR>
+  --local_dir ~/models/DeepSeek-V3-bf16
 ```
+
+For the remaining configuration, `<DEEPSEEK_V3_BF16_DIR>` means the absolute
+expansion of `~/models/DeepSeek-V3-bf16`; do not put an unexpanded `~` in
+`cluster.yaml`.
 
 Allow roughly 1.37 TB for the BF16 checkpoint. Confirm that the converted
 checkpoint no longer declares FP8 quantization and that its expert tensors are
@@ -103,9 +107,12 @@ MoE layers to 0 through 57.
 
 Create the inputs through the
 [shared Host-local input step](README.md#1-create-the-host-local-inputs)
-and keep the example's 8A32E multi-pool placement.
+using `deepseek-v3` as `<MODEL_CONFIG>`, then replace its Host-local addresses
+and paths. This pair already carries the 8A32E placement and `52GiB` Worker
+admission budget required by the BF16 checkpoint.
 
-In `cluster.yaml`, add the BF16 checkpoint to the model-path registry:
+In `cluster.yaml`, replace the example BF16 checkpoint path with the absolute
+path produced by the ModelScope download:
 
 ```yaml
 paths:

@@ -108,19 +108,29 @@ class TemplateContext(BaseModel):
             if duplicates:
                 raise DuplicatePortError(f"Ports {duplicates} have been used.")
 
-        node = self.attention.config.node
+        def check_duplicate_ports_with_expert(
+            src_node: str,
+            src_ports: set[int],
+        ) -> None:
+            pool = self.expert.get_pool_by_node(src_node)
+            if pool is None:
+                return
+
+            pool_ports = pool.allocated_ports
+            check_duplicate_ports(src_ports, pool_ports)
+
+        attention_node = self.attention.config.node
         attention_ports = self.attention.config.allocated_ports
+        check_duplicate_ports_with_expert(attention_node, attention_ports)
+
+        control_node = self.control.config.node
         control_ports = self.control.config.allocated_ports
-        check_duplicate_ports(attention_ports, control_ports)
+        check_duplicate_ports_with_expert(control_node, control_ports)
 
-        pool = self.expert.get_pool_by_node(node)
-        if pool is None:
-            return self
+        if attention_node == control_node:
+            # Same node, check if attention and control shares any port
+            check_duplicate_ports(attention_ports, control_ports)
 
-        # Expert and attention are on a same node
-        pool_ports = pool.allocated_ports
-        check_duplicate_ports(attention_ports, pool_ports)
-        check_duplicate_ports(control_ports, pool_ports)
         return self
 
     @computed_field

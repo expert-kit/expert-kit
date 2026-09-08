@@ -1,4 +1,4 @@
-"""Structural tests for the generated Host-native Torch benchmark config."""
+"""Structural tests for generated Ascend deployment configuration."""
 
 from __future__ import annotations
 
@@ -8,17 +8,24 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
 import yaml
 
 ROOT = Path(__file__).resolve().parents[3]
 ASCEND = ROOT / "dev" / "ascend"
 
 
-def _inputs(tmp_path: Path, *, dataset_type: str = "sharegpt") -> tuple[Path, Path]:
+def _inputs(
+    tmp_path: Path,
+    *,
+    model_config: str = "qwen3-30b-a3b",
+    dataset_type: str = "sharegpt",
+) -> tuple[Path, Path]:
     cluster = tmp_path / "cluster.yaml"
     experiment = tmp_path / "experiment.yaml"
-    shutil.copy(ASCEND / "configs" / "cluster.example.yaml", cluster)
-    shutil.copy(ASCEND / "configs" / "experiment.example.yaml", experiment)
+    example_dir = ASCEND / "configs" / model_config
+    shutil.copy(example_dir / "cluster.example.yaml", cluster)
+    shutil.copy(example_dir / "experiment.example.yaml", experiment)
 
     cluster_data = yaml.safe_load(cluster.read_text(encoding="utf-8"))
     cluster_data["nodes"]["node-a"]["address"] = "192.0.2.10"
@@ -67,8 +74,31 @@ def _generate(cluster: Path, experiment: Path, output: Path) -> None:
     assert completed.returncode == 0, completed.stderr
 
 
-def test_sharegpt_generation_emits_host_native_torch_config(tmp_path: Path) -> None:
-    cluster, experiment = _inputs(tmp_path)
+@pytest.mark.parametrize(
+    ("model_config", "expected_model_path", "expected_memory_limit"),
+    [
+        (
+            "qwen3-30b-a3b",
+            "/home/<USER>/expert-kit/local/models/Qwen3-30B-A3B",
+            "20GiB",
+        ),
+        (
+            "deepseek-v3",
+            "/home/<USER>/models/DeepSeek-V3-bf16",
+            "52GiB",
+        ),
+    ],
+)
+def test_sharegpt_generation_emits_host_native_torch_config(
+    tmp_path: Path,
+    model_config: str,
+    expected_model_path: str,
+    expected_memory_limit: str,
+) -> None:
+    cluster, experiment = _inputs(
+        tmp_path,
+        model_config=model_config,
+    )
     output = tmp_path / "generated"
 
     _generate(cluster, experiment, output)
@@ -82,13 +112,50 @@ def test_sharegpt_generation_emits_host_native_torch_config(tmp_path: Path) -> N
     assert config["dataset-path"] == (
         "/home/<USER>/expert-kit/local/datasets/sharegpt/ShareGPT.json"
     )
-    assert config["model-path"] == (
-        "/home/<USER>/expert-kit/local/models/Qwen3-30B-A3B"
+    assert config["model-path"] == expected_model_path
+
+    worker = yaml.safe_load((output / "worker-pool1" / "workers" / "worker-00.yaml").read_text())
+    assert worker["worker"]["device_memory_limit"] == expected_memory_limit
+
+
+def test_generation_splits_control_and_attention_bundles(tmp_path: Path) -> None:
+    cluster, experiment = _inputs(tmp_path)
+    output = tmp_path / "generated"
+
+    _generate(cluster, experiment, output)
+    control = yaml.safe_load((output / "compose.control.yaml").read_text())
+    attention = yaml.safe_load((output / "compose.attention.yaml").read_text())
+
+    assert control["name"] == "expert-kit-ascend-control"
+    assert set(control["services"]) == {
+        "admin",
+        "controller",
+        "migrations",
+        "model-init",
+        "postgres",
+        "weight-server",
+    }
+    assert attention["name"] == "expert-kit-ascend-attention"
+    assert set(attention["services"]) == {"attention", "benchmark"}
+    assert attention["services"]["attention"]["environment"]["EK_ADDR"] == ("192.0.2.10:15002")
+
+
+@pytest.mark.parametrize(
+    "model_config",
+    [
+        "qwen3-30b-a3b",
+        "deepseek-v3",
+    ],
+)
+def test_random_generation_does_not_emit_torch_config(
+    tmp_path: Path,
+    model_config: str,
+) -> None:
+    cluster, experiment = _inputs(
+        tmp_path,
+        model_config=model_config,
+        dataset_type="random",
     )
-
-
-def test_non_sharegpt_generation_does_not_emit_torch_config(tmp_path: Path) -> None:
-    cluster, experiment = _inputs(tmp_path, dataset_type="random")
     output = tmp_path / "generated"
 
     _generate(cluster, experiment, output)
