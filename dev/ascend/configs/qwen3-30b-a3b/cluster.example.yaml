@@ -75,12 +75,13 @@ nodes:
   node-c:
     address: 192.0.2.30
 
-# Replace <USER> and the example directories with paths on the deployment
-# Hosts. All Host paths should remain inside the operator's home directory.
+# Fill in absolute Host paths for the deployment. These placeholders may point
+# to shared mounts or local storage; model and dataset paths must be available
+# wherever the generated Compose bundle mounts them.
 paths:
   models:
-    qwen3-30b-a3b: /home/<USER>/expert-kit/local/models/Qwen3-30B-A3B
+    qwen3-30b-a3b: "<QWEN3_30B_A3B_MODEL_DIR>"
   datasets:
-    sharegpt: /home/<USER>/expert-kit/local/datasets/sharegpt
-    code-agent: /home/<USER>/expert-kit/local/datasets/code-agent
-  results: /home/<USER>/expert-kit/local/results
+    sharegpt: "<SHAREGPT_DATASET_DIR>"
+    code-agent: "<CODE_AGENT_DATASET_DIR>"
+  results: "<RESULTS_DIR>"

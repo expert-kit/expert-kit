@@ -1,7 +1,8 @@
 import subprocess
-import yaml
-from typing import Any
 from pathlib import Path
+from typing import Any
+
+import yaml
 
 
 def to_cmd(file: Path) -> list[str]:

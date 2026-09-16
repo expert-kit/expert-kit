@@ -14,8 +14,8 @@ model-specific placeholders:
 
 | Placeholder | Meaning |
 | --- | --- |
-| `<MODEL_DIR>` | Qwen3-30B-A3B checkpoint directory on the attention Host |
-| `<DATASET_DIR>` | ShareGPT directory on the attention Host |
+| `<QWEN3_30B_A3B_MODEL_DIR>` | Qwen3-30B-A3B checkpoint directory |
+| `<SHAREGPT_DATASET_DIR>` | ShareGPT directory |
 
 ## 1. Prepare the checkpoint and dataset
 
@@ -29,23 +29,23 @@ python3 -m pip install \
 
 modelscope download \
   --model Qwen/Qwen3-30B-A3B \
-  --local_dir <MODEL_DIR>
+  --local_dir <QWEN3_30B_A3B_MODEL_DIR>
 ```
 
 Download ShareGPT and convert the JSONL file into the JSON array expected by
 both benchmark frontends:
 
 ```bash
-mkdir -p <DATASET_DIR>
+mkdir -p <SHAREGPT_DATASET_DIR>
 
 modelscope download \
   --dataset AI-ModelScope/sharegpt_gpt4 \
   sharegpt_gpt4.jsonl \
-  --local_dir <DATASET_DIR>
+  --local_dir <SHAREGPT_DATASET_DIR>
 
 jq -s '.' \
-  <DATASET_DIR>/sharegpt_gpt4.jsonl \
-  > <DATASET_DIR>/sharegpt_gpt4.json
+  <SHAREGPT_DATASET_DIR>/sharegpt_gpt4.jsonl \
+  > <SHAREGPT_DATASET_DIR>/sharegpt_gpt4.json
 ```
 
 ## 2. Create the Host-local configuration
@@ -55,8 +55,9 @@ Create the inputs through the
 Use `qwen3-30b-a3b` as `<MODEL_CONFIG>`, keep the example's 8A32E placement,
 and replace its Host-local addresses and paths.
 
-In `cluster.yaml`, set `paths.models.qwen3-30b-a3b` to `<MODEL_DIR>`,
-`paths.datasets.sharegpt` to `<DATASET_DIR>`, and `paths.results` to
+In `cluster.yaml`, set `paths.models.qwen3-30b-a3b` to
+`<QWEN3_30B_A3B_MODEL_DIR>`, `paths.datasets.sharegpt` to
+`<SHAREGPT_DATASET_DIR>`, and `paths.results` to
 `<RESULTS_DIR>`.
 
 Keep the Qwen model block in `experiment.yaml` and select ShareGPT:

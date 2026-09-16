@@ -62,12 +62,11 @@ verifying its provenance and file checksums:
 ```bash
 modelscope download \
   --model unsloth/DeepSeek-V3-bf16 \
-  --local_dir ~/models/DeepSeek-V3-bf16
+  --local_dir <DEEPSEEK_V3_BF16_DIR>
 ```
 
-For the remaining configuration, `<DEEPSEEK_V3_BF16_DIR>` means the absolute
-expansion of `~/models/DeepSeek-V3-bf16`; do not put an unexpanded `~` in
-`cluster.yaml`.
+Use the same absolute `<DEEPSEEK_V3_BF16_DIR>` value in the example
+`cluster.yaml`; it may refer to shared storage or another Host-local location.
 
 Allow roughly 1.37 TB for the BF16 checkpoint. Confirm that the converted
 checkpoint no longer declares FP8 quantization and that its expert tensors are
@@ -117,8 +116,12 @@ path produced by the ModelScope download:
 ```yaml
 paths:
   models:
-    deepseek-v3-bf16: <DEEPSEEK_V3_BF16_DIR>
+    deepseek-v3-bf16: "<DEEPSEEK_V3_BF16_DIR>"
 ```
+
+For a file-backed dataset run, set `paths.datasets.sharegpt` to
+`<SHAREGPT_DATASET_DIR>` (or use `<CODE_AGENT_DATASET_DIR>` for the custom
+dataset) and set `paths.results` to `<RESULTS_DIR>`.
 
 The BF16 routed experts require about 1.2 TiB before runtime overhead. Evenly
 distributed over 32 Workers, the raw expert matrices use about 38 GiB per NPU.

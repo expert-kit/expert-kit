@@ -10,9 +10,10 @@ qualification status differ.
 | Qwen3-30B-A3B | Qualified with the current BF16 Worker and vLLM-Ascend path | [Deploy Qwen3-30B-A3B](qwen3-30b-a3b.md) |
 | DeepSeek-V3 | BF16 qualification path; vLLM integration still needs an end-to-end hardware run | [Qualify DeepSeek-V3](deepseek-v3.md) |
 
-Both guides keep authored configuration, generated YAML, caches, and results
-inside the EK checkout under the operator's home directory. Container paths
-such as `/etc/expert-kit` remain container-local mount targets.
+Both guides keep authored configuration, generated YAML, and caches inside the
+EK checkout. Model, dataset, and result paths are explicit Host-local inputs
+and may point to shared mounts or other storage outside the checkout.
+Container paths such as `/etc/expert-kit` remain container-local mount targets.
 
 ## Common deployment workflow
 
@@ -24,14 +25,15 @@ then use this workflow to generate and run the deployment.
 Use the same EK revision and absolute `<PROJECT_ROOT>` on every Host. Every
 Host needs Docker Compose v2 with Buildx, access to its assigned NPU devices,
 and permission to use Docker. Keep Host-local configuration, generated YAML,
-caches, and results inside `<PROJECT_ROOT>`.
+and caches inside `<PROJECT_ROOT>`; replace the model, dataset, and result
+placeholders with absolute paths valid for the deployment Hosts.
 
 The shared commands use these placeholders:
 
 | Placeholder | Meaning |
 | --- | --- |
 | `<PROJECT_ROOT>` | EK checkout at the same absolute path on every Host |
-| `<RESULTS_DIR>` | Writable result directory inside `<PROJECT_ROOT>` |
+| `<RESULTS_DIR>` | Writable result directory on the benchmark Host |
 | `<ATTENTION_HOST_IP>` | Routable address of the attention Host |
 | `<SERVED_MODEL_NAME>` | Exact `model.name` value from `experiment.yaml` |
 | `<MODEL_CONFIG>` | Model-specific directory selected by its tutorial |
@@ -69,8 +71,9 @@ cp dev/ascend/configs/<MODEL_CONFIG>/experiment.example.yaml \
   dev/ascend/configs/experiment.yaml
 ```
 
-Replace the RFC 5737 documentation addresses and `/home/<USER>` paths, then
-set the model, dataset, and runtime fields described by the selected tutorial.
+Replace the RFC 5737 documentation addresses and every model, dataset, and
+result path placeholder, then set the runtime fields described by the selected
+tutorial.
 Create the result directory as the Host user before a benchmark container
 writes to it:
 

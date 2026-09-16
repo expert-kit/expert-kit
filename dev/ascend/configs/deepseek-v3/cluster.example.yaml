@@ -75,12 +75,12 @@ nodes:
   node-c:
     address: 192.0.2.30
 
-# The ModelScope command in the tutorial expands ~ to /home/<USER>. Keep the
-# absolute path here because Docker Compose does not expand ~ in YAML values.
+# Fill in absolute Host paths for the deployment. These placeholders may point
+# to shared mounts or local storage; Docker Compose does not expand ~.
 paths:
   models:
-    deepseek-v3-bf16: /home/<USER>/models/DeepSeek-V3-bf16
+    deepseek-v3-bf16: "<DEEPSEEK_V3_BF16_DIR>"
   datasets:
-    sharegpt: /home/<USER>/expert-kit/local/datasets/sharegpt
-    code-agent: /home/<USER>/expert-kit/local/datasets/code-agent
-  results: /home/<USER>/expert-kit/local/results
+    sharegpt: "<SHAREGPT_DATASET_DIR>"
+    code-agent: "<CODE_AGENT_DATASET_DIR>"
+  results: "<RESULTS_DIR>"

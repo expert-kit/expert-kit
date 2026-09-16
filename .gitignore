@@ -28,4 +28,5 @@ experiments/
 .rsyncignore
 AGENTS.md
 .polaris/
+.agents
 dev/atlas-a3/generated/
