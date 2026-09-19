@@ -5,6 +5,7 @@ endpoint: /v1/completions
 base-url: http://attention:8000
 num-prompts: {{ run.num_prompts }}
 {% if dataset.type == "random" %}
+dataset-name: random
 input-len: {{ run.input_len }}
 output-len: {{ run.output_len }}
 {% else %}
