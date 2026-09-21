@@ -14,11 +14,7 @@ import torch
 from expertkit_transport.batches import WorkerBatch
 from expertkit_transport.errors import TransportError, TransportErrorCode
 from expertkit_transport.tracing import Tracer, TraceSpan
-from expertkit_transport.transports.base import (
-    BatchBufferConfig,
-    ReceivedBatch,
-    WorkerBatchBuffers,
-)
+from expertkit_transport.transports.base import BatchBufferConfig, ReceivedBatch, WorkerBatchBuffers
 
 from expertkit_worker.backends import (
     BackendBatch,
@@ -437,6 +433,7 @@ class _TimingEvents[EventT]:
 @dataclass(frozen=True, slots=True)
 class _AsyncSlotResources[StreamT, EventT]:
     stream: StreamT
+    end_event: EventT
     timing_events: _TimingEvents[EventT] | None = None
 
 
@@ -455,6 +452,7 @@ class AsyncExecutionSlot[StreamT, EventT](ExecutionSlot):
                 self._resources: _AsyncSlotResources[StreamT, EventT] | None
                 self._resources = _AsyncSlotResources(
                     stream=runtime.create_stream(),
+                    end_event=runtime.create_event(enable_timing=False),
                     timing_events=self._create_timing_events(runtime, enable_device_timing),
                 )
         except BaseException:
@@ -522,9 +520,11 @@ class AsyncExecutionSlot[StreamT, EventT](ExecutionSlot):
                             )
                 if timing_events is not None:
                     runtime.record_event(timing_events.after_output, stream)
+
+                runtime.record_event(resources.end_event, stream)
             try:
                 with _trace_span(tracer, "worker.device.wait"):
-                    runtime.synchronize_stream(stream)
+                    runtime.synchronize_event(resources.end_event)
             except torch.OutOfMemoryError as error:
                 raise BackendFatalError(BackendFatalReason.DEVICE_OOM, str(error)) from error
             except Exception as error:

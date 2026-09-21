@@ -48,7 +48,7 @@ def test_cpu_runtime_rejects_invalid_memory_information(
         runtime.memory_info()
 
 
-class _Event:
+class _Stream:
     def __init__(self) -> None:
         self.synchronized = False
 
@@ -56,24 +56,16 @@ class _Event:
         self.synchronized = True
 
 
-def test_cuda_runtime_captures_current_stream_with_an_event(
+def test_cuda_runtime_captures_current_stream(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     runtime = CudaWorkerRuntime(torch.device("cuda:3"))
-    stream = object()
-    event = _Event()
-    recorded: list[tuple[object, object]] = []
+    stream = _Stream()
     monkeypatch.setattr(runtime, "device_context", nullcontext)
     monkeypatch.setattr(runtime, "current_stream", lambda: stream)
-    monkeypatch.setattr(runtime, "create_event", lambda *, enable_timing: event)
-    monkeypatch.setattr(
-        runtime,
-        "record_event",
-        lambda selected_event, selected_stream: recorded.append((selected_event, selected_stream)),
-    )
 
     work = runtime.capture_current_work()
 
-    assert recorded == [(event, stream)]
+    assert stream.synchronized is False
     work.wait_host()
-    assert event.synchronized is True
+    assert stream.synchronized is True
