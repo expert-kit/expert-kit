@@ -14,6 +14,7 @@ from typing import Any
 import grpc
 import torch
 
+from expertkit_transport._accelerator import TorchAccelerator, accelerator_for
 from expertkit_transport.batches import WorkerBatch
 from expertkit_transport.errors import (
     TransportError,
@@ -100,7 +101,8 @@ def _encode_with_staging(
     batch: WorkerBatch,
     spec: WorkerEndpointConfig,
     buffers: GrpcTransferBuffers,
-    stream: torch.cuda.Stream | None,
+    accelerator: TorchAccelerator | None,
+    stream: torch.Stream | None,
 ) -> bytes:
     validate_worker_batch(batch, spec)
     token_count = batch.token_count
@@ -111,8 +113,9 @@ def _encode_with_staging(
             buffers.host_expert_ids[:token_count].copy_(batch.expert_ids)
             buffers.host_routing_weights[:token_count].copy_(batch.routing_weights)
         else:
+            assert accelerator is not None
             assert buffers.request_copy_event is not None
-            with torch.cuda.stream(stream):
+            with accelerator.stream_context(stream):
                 hidden_states = _selected_hidden_states(batch)
                 buffers.host_hidden_states[:token_count].copy_(
                     hidden_states,
@@ -145,19 +148,21 @@ def _decode_into_output(
     spec: WorkerEndpointConfig,
     buffers: GrpcTransferBuffers,
     output: torch.Tensor,
-    stream: torch.cuda.Stream | None,
+    accelerator: TorchAccelerator | None,
+    stream: torch.Stream | None,
 ) -> None:
     partial_output = decode_response(payload, token_count, spec)
     if stream is None:
         output[:token_count].copy_(partial_output)
         return
 
+    assert accelerator is not None
     assert buffers.receive_event is not None
     assert buffers.host_partial_output is not None
     if buffers.receive_recorded:
         buffers.receive_event.synchronize()
     buffers.host_partial_output[:token_count].copy_(partial_output)
-    with torch.cuda.stream(stream):
+    with accelerator.stream_context(stream):
         output[:token_count].copy_(
             buffers.host_partial_output[:token_count],
             non_blocking=True,
@@ -212,6 +217,7 @@ class GrpcWorkerTransport(WorkerTransport):
         self._endpoint = endpoint
         self._spec = endpoint_config
         self._device = torch.device(device)
+        self._accelerator = accelerator_for(self._device)
         self._limits = calculate_message_limits(endpoint_config)
         self._buffers = GrpcTransferBufferPool(
             endpoint_config,
@@ -335,13 +341,14 @@ class GrpcWorkerTransport(WorkerTransport):
         monotonic_deadline: float,
     ) -> None:
         _validate_output(output, batch, self._spec, self._device)
-        stream = torch.cuda.current_stream(output.device) if output.device.type == "cuda" else None
+        stream = self._accelerator.current_stream() if self._accelerator is not None else None
         try:
             request = await self._run_cpu(
                 _encode_with_staging,
                 batch,
                 self._spec,
                 buffers,
+                self._accelerator,
                 stream,
             )
         except TransportProtocolError as error:
@@ -377,6 +384,7 @@ class GrpcWorkerTransport(WorkerTransport):
                 self._spec,
                 buffers,
                 output,
+                self._accelerator,
                 stream,
             )
         except TransportProtocolError as error:

@@ -1,0 +1,50 @@
+model:
+  name: {{ model.name }}
+  weight_version: {{ model.weight_version }}
+  num_layers: {{ model.num_layers }}
+  experts_per_layer: {{ model.experts_per_layer }}
+  hidden_dim: {{ model.hidden_dim }}
+  expert_intermediate_dim: {{ model.intermediate_dim }}
+  top_k: {{ model.topk }}
+  activation_dtype: {{ model.activation_dtype }}
+  weight_dtype: {{ model.weight_dtype }}
+
+worker:
+  id: {{ pool.id }}-{{ worker.id }}
+  backend: torch
+  device: {{ worker.device_name }}
+  max_batch_tokens: {{ expert.runtime.max_batch_tokens }}
+  max_active_batches_per_device: {{ expert.runtime.max_active_batches_per_device }}
+  device_memory_limit: {{ expert.runtime.device_memory_limit }}
+  shutdown_grace_secs: {{ expert.runtime.shutdown_grace_secs }}
+
+transport:
+  type: grpc
+  max_pending_batches_per_device: {{ expert.runtime.max_pending_batches_per_device }}
+  listen: 0.0.0.0:51234
+  advertise: {{ pool.address }}:{{ worker.port }}
+
+controller:
+  endpoint: {{ control.address }}:{{ control.worker_control_port }}
+  heartbeat_interval_secs: {{ expert.runtime.heartbeat_interval_secs }}
+  heartbeat_timeout_secs: {{ expert.runtime.heartbeat_timeout_secs }}
+
+weight_manager:
+  max_concurrent_loads: {{ expert.runtime.max_concurrent_loads }}
+  disk_cache:
+    path: /ek/worker_cache
+    writeback: false
+  peer:
+    listen: 0.0.0.0:52234
+    advertise: http://{{ pool.address }}:{{ worker.peer_port }}
+  weight_server_endpoint: http://{{ control.address }}:{{ control.weight_server_port }}
+
+logging:
+  level: INFO
+  format: console
+
+observability:
+  prometheus:
+    enabled: false
+  tracing:
+    enabled: false

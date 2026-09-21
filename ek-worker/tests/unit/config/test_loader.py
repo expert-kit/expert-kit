@@ -93,7 +93,7 @@ def test_repository_qwen_example_remains_valid() -> None:
     [
         ("heartbeat_timeout_secs: 2", "heartbeat_timeout_secs"),
         ("top_k: 9", "model.top_k"),
-        ("device: cpu", "requires worker.device"),
+        ("device: tpu:0", "requires cpu, cuda:<id> or npu:<id>"),
         ("max_updates: 65", "less than or equal to 64"),
     ],
 )

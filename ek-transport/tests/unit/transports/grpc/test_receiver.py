@@ -146,6 +146,16 @@ def run(coroutine: Awaitable[None]) -> None:
     asyncio.run(coroutine)
 
 
+def accelerator_module(device_type: str):
+    try:
+        module = torch.get_device_module(device_type)
+    except RuntimeError:
+        pytest.skip(f"{device_type.upper()} is not registered")
+    if not module.is_available():
+        pytest.skip(f"{device_type.upper()} is unavailable")
+    return module
+
+
 async def await_with_loop_yields[T](awaitable: Awaitable[T]) -> T:
     """Keep the test loop runnable while executor threads finish codec work."""
 
@@ -169,7 +179,7 @@ def test_receiver_creates_direct_cpu_batch_buffers() -> None:
             hidden_dim=3,
             top_k=2,
             dtype=torch.float16,
-            device="cpu",
+            device=torch.device("cpu"),
         )
     )
     batch = worker_batch()
@@ -216,14 +226,16 @@ def test_receiver_rejects_batch_buffer_shape_mismatch() -> None:
                 hidden_dim=3,
                 top_k=2,
                 dtype=torch.float16,
-                device="cpu",
+                device=torch.device("cpu"),
             )
         )
     run(server.close())
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
-def test_receiver_reuses_pinned_cuda_batch_staging() -> None:
+@pytest.mark.parametrize("device_type", ["cuda", "npu"])
+def test_receiver_reuses_pinned_accelerator_batch_staging(device_type: str) -> None:
+    module = accelerator_module(device_type)
+    device = torch.device(f"{device_type}:0")
     server = GrpcWorkerBatchReceiver(
         "127.0.0.1:0",
         batch_spec(),
@@ -236,7 +248,7 @@ def test_receiver_reuses_pinned_cuda_batch_staging() -> None:
             hidden_dim=3,
             top_k=2,
             dtype=torch.float16,
-            device="cuda:0",
+            device=device,
         )
     )
     batch = worker_batch()
@@ -250,13 +262,13 @@ def test_receiver_reuses_pinned_cuda_batch_staging() -> None:
         routing_weights=batch.routing_weights,
         distinct_expert_ids=batch.distinct_expert_ids,
     )
-    hidden = torch.empty((2, 3), dtype=torch.float16, device="cuda:0")
-    expert_ids = torch.empty((2, 2), dtype=torch.int32, device="cuda:0")
-    routing_weights = torch.empty((2, 2), dtype=torch.float32, device="cuda:0")
-    output = torch.full((2, 3), 5, dtype=torch.float16, device="cuda:0")
+    hidden = torch.empty((2, 3), dtype=torch.float16, device=device)
+    expert_ids = torch.empty((2, 2), dtype=torch.int32, device=device)
+    routing_weights = torch.empty((2, 2), dtype=torch.float32, device=device)
+    output = torch.full((2, 3), 5, dtype=torch.float16, device=device)
 
-    stream = torch.cuda.Stream(device="cuda:0")
-    with torch.cuda.stream(stream):
+    stream = module.Stream(device=device)
+    with module.stream(stream):
         buffers.copy_input(compact, hidden, expert_ids, routing_weights)
         host_output = buffers.copy_output(output, None)
         output_pointer = host_output.data_ptr()
@@ -264,7 +276,7 @@ def test_receiver_reuses_pinned_cuda_batch_staging() -> None:
     torch.testing.assert_close(hidden.cpu(), compact.hidden_states)
     torch.testing.assert_close(host_output, torch.full((2, 3), 5, dtype=torch.float16))
 
-    with torch.cuda.stream(stream):
+    with module.stream(stream):
         second_output = buffers.copy_output(output + 1, None)
     stream.synchronize()
     assert second_output.data_ptr() == output_pointer

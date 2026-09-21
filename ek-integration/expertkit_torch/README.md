@@ -61,24 +61,39 @@ useful as a baseline, but the complete model must fit on the Frontend device.
 
 ## Benchmark
 
-The shared benchmark uses deterministic token IDs with an exact input length.
-It performs one prefill call and then greedy one-token decode calls that reuse
-the attention key/value cache. EOS does not stop the measured run, so every
-configuration executes the same number of token steps.
+The shared benchmark reads native ShareGPT JSON, applies the same prompt-length
+limits as vLLM's ShareGPT benchmark, and selects prompts with a deterministic
+shuffle. Each static Torch batch is left-padded, performs one prefill call, and
+then runs greedy one-token decode calls that reuse the attention key/value
+cache. EOS does not stop the run, so every prompt generates the configured
+number of tokens.
+The CLI also displays one prompt-level progress bar; each completed forward
+batch advances it by the batch's actual size, including a smaller final batch.
 
 ```bash
-uv run --package expertkit-torch ek-torch-benchmark \
+uv run --package expertkit-torch ek-torch-benchmark run \
   --model-path /models/DeepSeek-V2-Lite-Chat \
   --mode expertkit \
   --controller-endpoint 10.0.0.10:5002 \
-  --batch-sizes 1 32 \
-  --input-length 128 \
-  --output-length 20 \
+  --dataset-path /datasets/ShareGPT.json \
+  --device-platform cuda \
+  --device-ids 0 \
+  --seed 0 \
+  --num-prompts 16 \
+  --max-concurrency 1 \
+  --output-length 128 \
   --warmup-runs 1 \
-  --runs 5 \
-  --device cuda:0 \
   --dtype auto \
   --json-output /tmp/deepseek-v2-benchmark.json
+```
+
+For generated Ascend inputs, pass the flat YAML as optional defaults. Explicit
+`run` options override the corresponding file values:
+
+```bash
+uv run --package expertkit-torch ek-torch-benchmark \
+  --config dev/ascend/generated/torch-bench.yaml run \
+  --device-ids 0 --max-concurrency 4
 ```
 
 The Frontend does not select a Transport on the command line. Each Worker
@@ -88,7 +103,10 @@ Frontend must share the same OS shared-memory namespace and Unix user. SHM does
 not work across machines and does not remove GPU-to-Host or Host-to-GPU
 transfers.
 
-The command reports medians across measured runs:
+The command reports one measured static batch per rank. Global maximum
+concurrency must be divisible by the selected rank count; each rank receives
+`max_concurrency / rank_count` requests. Multi-device runs spawn one process
+per device without DDP or HCCL:
 
 - `Prefill ms` is the first full-input model call.
 - `Prefill tok/s` is aggregate input tokens divided by prefill time.
@@ -98,24 +116,28 @@ The command reports medians across measured runs:
 - `Total ms` is prefill plus decode.
 - `Output tok/s` counts all generated tokens over total time.
 
-Model loading and tokenization are excluded. CUDA is synchronized only at phase
-boundaries. The timings include the complete Frontend, Transport, and Worker
-path in Expert Kit mode. Use the existing tracing configuration when a
-Frontend, Transport, and Worker breakdown is needed.
+Model loading and tokenization are excluded. CUDA and NPU devices are
+synchronized only at phase boundaries. The timings include the complete
+Frontend, Transport, and Worker path in Expert Kit mode. Use the existing
+tracing configuration when a Frontend, Transport, and Worker breakdown is
+needed.
 
-When `--json-output` is set, every raw run also records its generated token IDs
-and decoded text. Token transfer and decoding happen after timing, so they do
-not inflate the latency values. Compare those fields between otherwise
+When `--json-output` is set, every measured batch also records its generated
+token IDs and decoded text. Token transfer and decoding happen after timing, so
+they do not inflate the latency values. Compare those fields between otherwise
 identical local and Expert Kit runs when qualifying a dependency upgrade.
 
 Run the same workload locally by changing only the mode:
 
 ```bash
-uv run --package expertkit-torch ek-torch-benchmark \
+uv run --package expertkit-torch ek-torch-benchmark run \
   --model-path /models/DeepSeek-V2-Lite-Chat \
   --mode local \
-  --batch-sizes 1 \
-  --input-length 128 \
+  --dataset-path /datasets/ShareGPT.json \
+  --num-prompts 16 \
+  --device-platform cuda \
+  --device-ids 0 \
+  --max-concurrency 1 \
   --output-length 20
 ```
 
@@ -140,11 +162,13 @@ configured:
 ```bash
 EK_QWEN_MODEL_PATH=/models/Qwen3-30B-A3B \
 EK_QWEN_CONTROLLER_ENDPOINT=10.0.0.10:5002 \
+EK_BENCHMARK_DATASET_PATH=/datasets/ShareGPT.json \
 uv run --package expertkit-torch pytest \
   ek-integration/expertkit_torch/tests/test_deployment_benchmark.py -m qwen
 
 EK_DEEPSEEK_V2_MODEL_PATH=/models/DeepSeek-V2-Lite-Chat \
 EK_DEEPSEEK_V2_CONTROLLER_ENDPOINT=10.0.0.10:5002 \
+EK_BENCHMARK_DATASET_PATH=/datasets/ShareGPT.json \
 uv run --package expertkit-torch pytest \
   ek-integration/expertkit_torch/tests/test_deployment_benchmark.py -m deepseek_v2
 ```

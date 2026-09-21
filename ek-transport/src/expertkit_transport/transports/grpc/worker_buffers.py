@@ -27,12 +27,13 @@ def _require_tensor(
 
 
 class GrpcWorkerBatchBuffers(WorkerBatchBuffers):
-    """Reuse pinned Host staging for CUDA and direct fixed tensors for CPU."""
+    """Reuse pinned Host staging for accelerators and direct fixed tensors for CPU."""
 
     def __init__(self, spec: BatchBufferConfig) -> None:
         self._spec = spec
+        self._uses_accelerator = spec.device.type in {"cuda", "npu"}
         self._closed = False
-        if spec.device.type == "cuda":
+        if self._uses_accelerator:
             self._host_hidden_states = torch.empty(
                 (spec.max_batch_tokens, spec.hidden_dim),
                 dtype=spec.dtype,
@@ -67,7 +68,7 @@ class GrpcWorkerBatchBuffers(WorkerBatchBuffers):
     def host_staging_bytes(self) -> int:
         """Return the fixed pinned Host allocation for this execution slot."""
 
-        if self._spec.device.type == "cpu":
+        if not self._uses_accelerator:
             return 0
         activation_bytes = torch.empty((), dtype=self._spec.dtype).element_size()
         return self._spec.max_batch_tokens * (
@@ -125,7 +126,7 @@ class GrpcWorkerBatchBuffers(WorkerBatchBuffers):
             device=self._spec.device,
         )
 
-        if self._spec.device.type == "cpu":
+        if not self._uses_accelerator:
             hidden_states.copy_(batch.hidden_states)
             expert_ids.copy_(batch.expert_ids)
             routing_weights.copy_(batch.routing_weights)
@@ -172,18 +173,18 @@ class GrpcWorkerBatchBuffers(WorkerBatchBuffers):
             _require_tensor(
                 "output destination",
                 destination,
-                shape=tuple(partial_output.shape),
+                shape=(partial_output.shape[0], partial_output.shape[1]),
                 dtype=self._spec.dtype,
                 device=torch.device("cpu"),
             )
-            if self._spec.device.type == "cuda" and not destination.is_pinned():
-                raise ValueError("CUDA output destination must use pinned Host memory")
+            if self._uses_accelerator and not destination.is_pinned():
+                raise ValueError("accelerator output destination must use pinned Host memory")
             destination.copy_(
                 partial_output,
-                non_blocking=self._spec.device.type == "cuda",
+                non_blocking=self._uses_accelerator,
             )
             return destination
-        if self._spec.device.type == "cpu":
+        if not self._uses_accelerator:
             return partial_output
 
         host_output = self._require_host(self._host_partial_output)[: partial_output.shape[0]]

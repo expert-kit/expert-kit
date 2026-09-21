@@ -1,0 +1,46 @@
+model:
+  name: DeepSeek-V3-BF16
+  path_ref: deepseek-v3-bf16
+  weight_version: main
+  num_layers: 61
+  experts_per_layer: 256
+  hidden_dim: 7168
+  intermediate_dim: 2048
+  topk: 8
+  weight_dtype: bf16
+  activation_dtype: bf16
+
+# Random needs no path fields. For a file-backed dataset, replace this block
+# with one of the ShareGPT or custom examples below.
+dataset:
+  type: random
+  name: Random
+
+# dataset:
+#   type: sharegpt
+#   name: ShareGPT
+#   path_ref: sharegpt
+#   mounted_path: /dataset/sharegpt
+#   file: ShareGPT.json
+
+# dataset:
+#   type: custom
+#   name: CodeAgent
+#   path_ref: code-agent
+#   mounted_path: /dataset/code-agent
+#   file: requests.jsonl
+
+serve:
+  gpu_memory_utilization: 0.8
+  max_model_len: 4096
+
+run:
+  num_prompts: 16
+  max_concurrency: 1
+  # Required for random; remove this field for ShareGPT/custom.
+  input_len: 1024
+  output_len: 128
+  num_warmups: 1
+  ignore_eos: true
+  temperature: 0
+  save_result: true

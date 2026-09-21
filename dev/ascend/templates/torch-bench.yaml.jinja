@@ -1,0 +1,17 @@
+mode: expertkit
+controller-endpoint: "{{ control.address }}:{{ control.frontend_control_port }}"
+launcher: auto
+device-platform: npu
+device-ids: {{ attention.devices }}
+model-path: "{{ model.path }}"
+dtype: {{ model.activation_dtype }}
+dataset-name: {{ dataset.type }}
+dataset-path: "{{ dataset.path }}/{{ dataset.file }}"
+seed: 0
+num-prompts: {{ run.num_prompts }}
+max-concurrency: {{ run.max_concurrency }}
+output-length: {{ run.output_len }}
+warmup-runs: {{ run.num_warmups }}
+{% if run.save_result %}
+json-output: "{{ results_path }}/{{ label }}-torch.json"
+{% endif %}

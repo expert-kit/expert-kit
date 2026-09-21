@@ -10,7 +10,11 @@ from expertkit_transport.batches import ACTIVATION_DTYPES
 
 @dataclass(frozen=True, slots=True)
 class TorchExpertWeights:
-    """Hold one gated FFN's final Torch tensors on its computation device.
+    """Hold one gated FFN's projection Torch tensors on its computation device.
+
+    Instances may represent zero-copy CPU cache views or final computation
+    weights. Readiness is established by TorchWeightAdapter completing placement
+    and WeightManager publishing the object into ReadyWeightTable.
 
     Attributes:
         gate_proj: Contiguous matrix shaped ``[intermediate_dim, hidden_dim]``.
@@ -48,6 +52,39 @@ class TorchExpertWeights:
             raise ValueError("gate and up projection shapes must match")
         if self.down_proj.shape != (hidden_dim, intermediate_dim):
             raise ValueError("down projection shape must reverse gate and up dimensions")
+
+    def to(
+        self,
+        device: str | torch.device | int | None = None,
+        dtype: torch.dtype | None = None,
+        non_blocking: bool = False,
+        copy: bool = False,
+        *,
+        memory_format: torch.memory_format | None = None,
+    ) -> TorchExpertWeights:
+        return TorchExpertWeights(
+            gate_proj=self.gate_proj.to(
+                device=device,
+                dtype=dtype,
+                non_blocking=non_blocking,
+                copy=copy,
+                memory_format=memory_format,
+            ),
+            up_proj=self.up_proj.to(
+                device=device,
+                dtype=dtype,
+                non_blocking=non_blocking,
+                copy=copy,
+                memory_format=memory_format,
+            ),
+            down_proj=self.down_proj.to(
+                device=device,
+                dtype=dtype,
+                non_blocking=non_blocking,
+                copy=copy,
+                memory_format=memory_format,
+            ),
+        )
 
     @property
     def hidden_dim(self) -> int:

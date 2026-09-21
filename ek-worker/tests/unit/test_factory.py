@@ -3,15 +3,26 @@
 from __future__ import annotations
 
 import asyncio
+import builtins
+import sys
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
+from types import ModuleType
+from typing import Any
 
 import pytest
 import torch
 from expertkit_transport.controller import ResolvedDefaultInstance
+from expertkit_transport.transports.base import BatchBufferConfig
+from expertkit_transport.transports.grpc.worker_buffers import GrpcWorkerBatchBuffers
 
 from expertkit_worker.config import WorkerConfig
-from expertkit_worker.factory import build_worker_application
+from expertkit_worker.execution import AsyncExecutionSlot, CpuExecutionSlot
+from expertkit_worker.factory import (
+    _async_wiring,
+    _create_device_wiring,
+    build_worker_application,
+)
 from expertkit_worker.weights import DirectIOWeightDiskCache
 
 
@@ -120,10 +131,6 @@ def test_factory_probes_direct_io_before_returning_application(
 
     monkeypatch.setattr(DirectIOWeightDiskCache, "initialize", fail_initialize)
     monkeypatch.setattr(torch.cuda, "set_device", lambda _device: None)
-    monkeypatch.setattr(
-        "expertkit_worker.factory._memory_info",
-        lambda _device: (2**40, 2**40),
-    )
 
     async def scenario() -> None:
         with pytest.raises(OSError, match="direct I/O probe failed"):
@@ -179,3 +186,110 @@ def test_factory_resolves_an_omitted_instance_before_device_setup(
 
     asyncio.run(scenario())
     assert calls == [None]
+
+
+def _buffer_config() -> BatchBufferConfig:
+    return BatchBufferConfig(
+        max_batch_tokens=2,
+        hidden_dim=4,
+        top_k=2,
+        dtype=torch.float32,
+        device=torch.device("cpu"),
+    )
+
+
+def test_cpu_wiring_builds_cpu_slot() -> None:
+    wiring = _create_device_wiring("cpu")
+    spec = _buffer_config()
+
+    slot = wiring.create_slot(spec, GrpcWorkerBatchBuffers(spec))
+
+    assert isinstance(slot, CpuExecutionSlot)
+    assert wiring.runtime.device == torch.device("cpu")
+    slot.close()
+
+
+class _FakeAsyncRuntime:
+    device = torch.device("cpu")
+
+    def __init__(self) -> None:
+        self.current_device_set = False
+
+    def device_context(self):
+        from contextlib import nullcontext
+
+        return nullcontext()
+
+    def create_stream(self, *, priority: int = 0) -> object:
+        assert priority == 0
+        return object()
+
+    def create_event(self, *, enable_timing: bool = False) -> object:
+        raise AssertionError(f"timing event unexpectedly requested: {enable_timing}")
+
+    def set_current_device(self) -> None:
+        self.current_device_set = True
+
+
+def test_async_wiring_captures_runtime_in_slot_factory() -> None:
+    runtime = _FakeAsyncRuntime()
+    wiring = _async_wiring(runtime)  # type: ignore[arg-type]
+    spec = _buffer_config()
+
+    slot = wiring.create_slot(
+        spec,
+        GrpcWorkerBatchBuffers(spec),
+        enable_device_timing=False,
+    )
+
+    assert runtime.current_device_set is True
+    assert isinstance(slot, AsyncExecutionSlot)
+    slot.close()
+
+
+def test_cpu_and_cuda_selection_do_not_import_ascend(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import expertkit_worker.factory as factory
+
+    real_import = builtins.__import__
+
+    def guarded_import(name: str, *args: Any, **kwargs: Any):
+        if name == "expertkit_worker.device.ascend":
+            raise AssertionError("Ascend runtime imported for a non-NPU device")
+        return real_import(name, *args, **kwargs)
+
+    class FakeCudaRuntime:
+        def __init__(self, device: torch.device) -> None:
+            self.device = device
+
+    cuda_wiring = object()
+    monkeypatch.setattr(builtins, "__import__", guarded_import)
+    monkeypatch.setattr(factory, "CudaWorkerRuntime", FakeCudaRuntime)
+    monkeypatch.setattr(factory, "_async_wiring", lambda _runtime: cuda_wiring)
+
+    cpu_wiring = _create_device_wiring("cpu")
+    assert isinstance(cpu_wiring.runtime, factory.CpuWorkerRuntime)
+    assert _create_device_wiring("cuda:0") is cuda_wiring
+
+
+def test_npu_selection_lazily_loads_ascend_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import expertkit_worker.factory as factory
+
+    selected: list[object] = []
+
+    class FakeAscendRuntime:
+        def __init__(self, device: object) -> None:
+            selected.append(device)
+
+    module = ModuleType("expertkit_worker.device.ascend")
+    module.AscendWorkerRuntime = FakeAscendRuntime  # type: ignore[attr-defined]
+    wiring = object()
+    monkeypatch.setitem(sys.modules, "expertkit_worker.device.ascend", module)
+    monkeypatch.setattr(factory.torch, "device", lambda name: f"parsed:{name}")
+    monkeypatch.setattr(factory, "_async_wiring", lambda _runtime: wiring)
+
+    assert _create_device_wiring("npu:2") is wiring
+    assert selected == ["parsed:npu:2"]

@@ -12,6 +12,7 @@ from safetensors.torch import save as official_save
 
 from expertkit_worker.backends import BackendBatch
 from expertkit_worker.backends.torch import TorchBackend, TorchExpertWeights, TorchWeightAdapter
+from expertkit_worker.device import CpuWorkerRuntime
 from expertkit_worker.weights import (
     CachedCpuWeight,
     CpuWeightLoader,
@@ -85,25 +86,26 @@ async def _with_weight_server(
         await runner.cleanup()
 
 
-def _adapter() -> TorchWeightAdapter:
+def _adapter(runtime: CpuWorkerRuntime) -> TorchWeightAdapter:
     return TorchWeightAdapter(
         hidden_dim=_HIDDEN_DIM,
         intermediate_dim=_INTERMEDIATE_DIM,
         source_dtype=torch.float32,
         compute_dtype=torch.float32,
-        device="cpu",
+        runtime=runtime,
     )
 
 
 def _manager(
     root: Path,
     endpoint: str,
+    runtime: CpuWorkerRuntime,
 ) -> tuple[
     WeightManager[TorchExpertWeights, TorchExpertWeights],
     DirectIOWeightDiskCache,
     HttpWeightTransfer,
 ]:
-    adapter = _adapter()
+    adapter = _adapter(runtime)
     disk = DirectIOWeightDiskCache(
         root=root,
         model_name=_MODEL_NAME,
@@ -138,13 +140,16 @@ def _manager(
     return manager, disk, transfer
 
 
-def _compute(manager: WeightManager[TorchExpertWeights, TorchExpertWeights]) -> torch.Tensor:
+def _compute(
+    manager: WeightManager[TorchExpertWeights, TorchExpertWeights],
+    runtime: CpuWorkerRuntime,
+) -> torch.Tensor:
     backend = TorchBackend(
         hidden_dim=_HIDDEN_DIM,
         intermediate_dim=_INTERMEDIATE_DIM,
         top_k=1,
         dtype=torch.float32,
-        device="cpu",
+        runtime=runtime,
         acquire_many=manager.acquire_many,
     )
     hidden_states = torch.tensor(
@@ -169,7 +174,8 @@ async def _load_and_compute(
     root: Path,
     endpoint: str,
 ) -> tuple[torch.Tensor, Path]:
-    manager, disk, transfer = _manager(root, endpoint)
+    runtime = CpuWorkerRuntime(torch.device("cpu"))
+    manager, disk, transfer = _manager(root, endpoint, runtime)
     await transfer.start()
     manager.start()
     try:
@@ -180,7 +186,7 @@ async def _load_and_compute(
         assert generation == 1
         assert len(states) == 1
         assert states[0].state is ExpertStateKind.READY
-        return _compute(manager), disk.path(TargetExpert(0, 0, "cpu").key)
+        return _compute(manager, runtime), disk.path(TargetExpert(0, 0, "cpu").key)
     finally:
         await manager.close()
         await transfer.close()

@@ -6,16 +6,17 @@ import torch
 from expertkit_transport.transports.base import BatchBufferConfig
 
 
-def test_batch_buffer_config_normalizes_device() -> None:
+def test_batch_buffer_config_preserves_device() -> None:
+    device = torch.device("cuda:3")
     spec = BatchBufferConfig(
         max_batch_tokens=8,
         hidden_dim=16,
         top_k=2,
         dtype=torch.bfloat16,
-        device="cuda:3",
+        device=device,
     )
 
-    assert spec.device == torch.device("cuda:3")
+    assert spec.device is device
 
 
 @pytest.mark.parametrize(
@@ -25,7 +26,7 @@ def test_batch_buffer_config_normalizes_device() -> None:
         ("hidden_dim", True, "positive integer"),
         ("top_k", -1, "positive integer"),
         ("dtype", torch.int32, "FP16, BF16, or FP32"),
-        ("device", "meta", "must be CPU or CUDA"),
+        ("device", torch.device("meta"), "must be CPU, CUDA, or NPU"),
     ],
 )
 def test_batch_buffer_config_rejects_invalid_values(
@@ -38,9 +39,20 @@ def test_batch_buffer_config_rejects_invalid_values(
         "hidden_dim": 16,
         "top_k": 2,
         "dtype": torch.float16,
-        "device": "cpu",
+        "device": torch.device("cpu"),
     }
     fields[field] = value
 
     with pytest.raises(ValueError, match=match):
         BatchBufferConfig(**fields)  # type: ignore[arg-type]
+
+
+def test_batch_buffer_config_rejects_string_device() -> None:
+    with pytest.raises(TypeError, match=r"must be a torch\.device"):
+        BatchBufferConfig(
+            max_batch_tokens=8,
+            hidden_dim=16,
+            top_k=2,
+            dtype=torch.float16,
+            device="cpu",  # type: ignore[arg-type]
+        )

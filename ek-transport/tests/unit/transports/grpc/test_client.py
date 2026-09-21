@@ -83,6 +83,16 @@ def run(coroutine: Awaitable[None]) -> None:
     asyncio.run(coroutine)
 
 
+def accelerator_module(device_type: str):
+    try:
+        module = torch.get_device_module(device_type)
+    except RuntimeError:
+        pytest.skip(f"{device_type.upper()} is not registered")
+    if not module.is_available():
+        pytest.skip(f"{device_type.upper()} is unavailable")
+    return module
+
+
 def test_client_compacts_request_and_fills_preallocated_output() -> None:
     async def scenario() -> None:
         received: list[WorkerBatch] = []
@@ -109,6 +119,48 @@ def test_client_compacts_request_and_fills_preallocated_output() -> None:
             assert len(received) == 1
             assert received[0].token_indices is None
             assert received[0].expert_ids.tolist() == [[1, -1], [0, 3]]
+            await client.close()
+
+    run(scenario())
+
+
+@pytest.mark.parametrize("device_type", ["cuda", "npu"])
+def test_client_stages_accelerator_tensors_through_grpc(device_type: str) -> None:
+    module = accelerator_module(device_type)
+    device = torch.device(f"{device_type}:0")
+
+    async def scenario() -> None:
+        async def execute(payload: bytes, context: grpc.aio.ServicerContext) -> bytes:
+            batch = decode_request(payload, batch_spec())
+            return encode_success_response(batch.hidden_states * 2, batch_spec())
+
+        source = worker_batch()
+        batch = WorkerBatch(
+            instance_id=source.instance_id,
+            layer_id=source.layer_id,
+            topology_version=source.topology_version,
+            hidden_states=source.hidden_states.to(device),
+            token_indices=source.token_indices.to(device),
+            expert_ids=source.expert_ids.to(device),
+            routing_weights=source.routing_weights.to(device),
+            distinct_expert_ids=source.distinct_expert_ids,
+        )
+        async with raw_server(execute) as endpoint:
+            client = GrpcWorkerTransport(
+                endpoint,
+                batch_spec(),
+                max_in_flight=1,
+                device=device,
+            )
+            await client.start()
+            output = torch.empty((2, 3), dtype=torch.float16, device=device)
+            await client.execute(batch, output, monotonic_deadline=float("inf"))
+            module.current_stream(device).synchronize()
+
+            torch.testing.assert_close(
+                output.cpu(),
+                torch.tensor([[14.0, 16.0, 18.0], [2.0, 4.0, 6.0]], dtype=torch.float16),
+            )
             await client.close()
 
     run(scenario())

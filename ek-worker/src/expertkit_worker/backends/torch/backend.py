@@ -21,6 +21,8 @@ from expertkit_worker.backends.base import (
     InvalidBackendInput,
 )
 from expertkit_worker.backends.torch.weights import TorchExpertWeights
+from expertkit_worker.device import WorkerDeviceRuntime
+from expertkit_worker.device.runtime import DeviceWork
 from expertkit_worker.weights import ReadyWeightLease, WeightsNotReady
 
 type AcquireTorchWeights = Callable[
@@ -30,28 +32,24 @@ type AcquireTorchWeights = Callable[
 
 
 class _TorchCompletion(BackendCompletion):
-    """Retain ready weights and the submitting CUDA stream until result release."""
+    """Retain ready weights and the submitting device stream until result release."""
 
     def __init__(
         self,
         lease: ReadyWeightLease[TorchExpertWeights],
-        stream: torch.cuda.Stream | None,
+        work: DeviceWork,
     ) -> None:
         self._lease = lease
-        self._stream = stream
+        self._work = work
         self._lock = threading.Lock()
-        self._waited = stream is None
+        self._waited = False
         self._failed = False
         self._closed = False
 
     def wait_host(self) -> None:
-        """Wait for submitted Torch CUDA work and surface asynchronous failures."""
-
-        stream = self._stream
-        if stream is None:
-            return
+        """Wait for submitted device work and surface asynchronous failures."""
         try:
-            stream.synchronize()
+            self._work.wait_host()
         except BaseException:
             with self._lock:
                 self._failed = True
@@ -61,22 +59,22 @@ class _TorchCompletion(BackendCompletion):
 
     def close(self) -> None:
         """Release ready weights after submitted Torch work is complete."""
-
         with self._lock:
             if self._closed:
                 return
             self._closed = True
-            stream = self._stream
             waited = self._waited
             failed = self._failed
 
         close_error: BaseException | None = None
-        if stream is not None and not waited and not failed:
+        if not waited and not failed:
             try:
-                stream.synchronize()
+                self._work.wait_host()
             except BaseException as error:
                 close_error = error
+
         self._lease.close()
+
         if close_error is not None:
             raise close_error
 
@@ -91,7 +89,7 @@ class TorchBackend(ComputeBackend):
         intermediate_dim: int,
         top_k: int,
         dtype: torch.dtype,
-        device: torch.device | str,
+        runtime: WorkerDeviceRuntime,
         acquire_many: AcquireTorchWeights,
     ) -> None:
         for name, value in (
@@ -103,11 +101,6 @@ class TorchBackend(ComputeBackend):
                 raise ValueError(f"{name} must be a positive integer")
         if dtype not in ACTIVATION_DTYPES:
             raise ValueError("Torch Backend dtype must be FP16, BF16, or FP32")
-        resolved_device = torch.device(device)
-        if resolved_device.type not in {"cpu", "cuda"}:
-            raise ValueError("Torch Backend device must be CPU or CUDA")
-        if resolved_device.type == "cuda" and resolved_device.index is None:
-            raise ValueError("Torch Backend CUDA device must include an index")
         if not callable(acquire_many):
             raise TypeError("acquire_many must be callable")
 
@@ -115,8 +108,8 @@ class TorchBackend(ComputeBackend):
         self._intermediate_dim = intermediate_dim
         self._top_k = top_k
         self._dtype = dtype
-        self._device = resolved_device
         self._acquire_many = acquire_many
+        self._runtime = runtime
         self._capabilities = BackendCapabilities(
             supports_dynamic_tokens=True,
             supports_concurrent_batches=True,
@@ -168,12 +161,12 @@ class TorchBackend(ComputeBackend):
 
         try:
             self._validate_weights(lease, batch)
+
             with torch.inference_mode():
                 self._compute(batch, prepared_output, lease)
-            stream = (
-                torch.cuda.current_stream(self._device) if self._device.type == "cuda" else None
-            )
-            return _TorchCompletion(lease, stream)
+
+            work = self._runtime.capture_current_work()
+            return _TorchCompletion(lease, work)
         except BaseException:
             self._finish_failed_submission(lease)
             raise
@@ -183,19 +176,20 @@ class TorchBackend(ComputeBackend):
         batch: BackendBatch,
         prepared_output: torch.Tensor,
     ) -> None:
+        device = self._runtime.device
         if batch.hidden_dim != self._hidden_dim:
             raise InvalidBackendInput("batch hidden dimension does not match the Torch Backend")
         if batch.top_k != self._top_k:
             raise InvalidBackendInput("batch top_k does not match the Torch Backend")
         if batch.hidden_states.dtype != self._dtype:
             raise InvalidBackendInput("batch dtype does not match the Torch Backend")
-        if batch.hidden_states.device != self._device:
+        if batch.hidden_states.device != device:
             raise InvalidBackendInput("batch device does not match the Torch Backend")
         if prepared_output.shape != batch.hidden_states.shape:
             raise InvalidBackendInput("prepared output shape does not match hidden states")
         if prepared_output.dtype != self._dtype:
             raise InvalidBackendInput("prepared output dtype does not match the Torch Backend")
-        if prepared_output.device != self._device:
+        if prepared_output.device != device:
             raise InvalidBackendInput("prepared output device does not match the Torch Backend")
         if not prepared_output.is_contiguous():
             raise InvalidBackendInput("prepared output must be contiguous")
@@ -214,6 +208,7 @@ class TorchBackend(ComputeBackend):
         lease: ReadyWeightLease[TorchExpertWeights],
         batch: BackendBatch,
     ) -> None:
+        device = self._runtime.device
         if lease.expert_ids != batch.distinct_expert_ids:
             raise RuntimeError("ready weight lookup returned different expert IDs")
         if len(lease.objects) != len(batch.distinct_expert_ids):
@@ -234,7 +229,7 @@ class TorchBackend(ComputeBackend):
                     BackendFatalReason.UNEXPECTED,
                     "ready expert weight dtype does not match the Torch Backend",
                 )
-            if weight.device != self._device:
+            if weight.device != device:
                 raise BackendFatalError(
                     BackendFatalReason.UNEXPECTED,
                     "ready expert weight device does not match the Torch Backend",
@@ -276,11 +271,10 @@ class TorchBackend(ComputeBackend):
         lease: ReadyWeightLease[TorchExpertWeights],
     ) -> None:
         synchronization_error: BaseException | None = None
-        if self._device.type == "cuda":
-            try:
-                torch.cuda.current_stream(self._device).synchronize()
-            except BaseException as error:
-                synchronization_error = error
+        try:
+            self._runtime.capture_current_work().wait_host()
+        except BaseException as error:
+            synchronization_error = error
         lease.close()
         if synchronization_error is not None:
             raise BackendFatalError(

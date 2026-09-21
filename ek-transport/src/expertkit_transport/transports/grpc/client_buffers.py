@@ -6,6 +6,7 @@ from dataclasses import dataclass
 
 import torch
 
+from expertkit_transport._accelerator import accelerator_for
 from expertkit_transport.transports.base import WorkerEndpointConfig
 
 
@@ -17,8 +18,8 @@ class GrpcTransferBuffers:
     host_expert_ids: torch.Tensor
     host_routing_weights: torch.Tensor
     host_partial_output: torch.Tensor | None
-    request_copy_event: torch.cuda.Event | None
-    receive_event: torch.cuda.Event | None
+    request_copy_event: torch.Event | None
+    receive_event: torch.Event | None
     request_copy_recorded: bool = False
     receive_recorded: bool = False
 
@@ -34,8 +35,9 @@ class GrpcTransferBufferPool:
         capacity: int,
     ) -> None:
         self._device = torch.device(device)
-        uses_cuda = self._device.type == "cuda"
-        host_options = {"device": "cpu", "pin_memory": uses_cuda}
+        accelerator = accelerator_for(self._device)
+        uses_accelerator = accelerator is not None
+        host_options = {"device": "cpu", "pin_memory": uses_accelerator}
         self._all = tuple(
             GrpcTransferBuffers(
                 host_hidden_states=torch.empty(
@@ -59,11 +61,11 @@ class GrpcTransferBufferPool:
                         dtype=endpoint_config.dtype,
                         **host_options,
                     )
-                    if uses_cuda
+                    if uses_accelerator
                     else None
                 ),
-                request_copy_event=torch.cuda.Event() if uses_cuda else None,
-                receive_event=torch.cuda.Event() if uses_cuda else None,
+                request_copy_event=accelerator.create_event() if accelerator is not None else None,
+                receive_event=accelerator.create_event() if accelerator is not None else None,
             )
             for _ in range(capacity)
         )

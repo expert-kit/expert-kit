@@ -24,6 +24,7 @@ from expertkit_transport.transports.grpc import (
 
 from expertkit_worker.backends.torch import TorchBackend, TorchExpertWeights
 from expertkit_worker.execution import WorkerExecutor
+from expertkit_worker.factory import _create_device_wiring
 from expertkit_worker.weights import ReadyWeightTable
 
 _INSTANCE_ID = 7
@@ -111,6 +112,7 @@ async def _start_worker(
     expert_id: int,
     weight: TorchExpertWeights,
 ) -> _RunningWorker:
+    device_wiring = _create_device_wiring("cpu")
     ready: ReadyWeightTable[TorchExpertWeights] = ReadyWeightTable(1, 3)
     ready.publish(0, expert_id, weight)
     server = GrpcWorkerBatchReceiver(
@@ -124,19 +126,20 @@ async def _start_worker(
         intermediate_dim=_INTERMEDIATE_DIM,
         top_k=_TOP_K,
         dtype=torch.float32,
-        device="cpu",
+        runtime=device_wiring.runtime,
         acquire_many=ready.acquire_many,
     )
     execution = WorkerExecutor(
         server,
         backend,
+        create_slot=device_wiring.create_slot,
         instance_id=_INSTANCE_ID,
         buffer_config=BatchBufferConfig(
             max_batch_tokens=_MAX_BATCH_TOKENS,
             hidden_dim=_HIDDEN_DIM,
             top_k=_TOP_K,
             dtype=torch.float32,
-            device="cpu",
+            device=torch.device("cpu"),
         ),
         slot_count=1,
     )

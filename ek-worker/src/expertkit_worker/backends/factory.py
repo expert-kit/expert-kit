@@ -9,6 +9,7 @@ import torch
 
 from expertkit_worker.backends.base import ComputeBackend
 from expertkit_worker.config import ActivationDType, BackendName, WorkerConfig
+from expertkit_worker.device import WorkerDeviceRuntime
 from expertkit_worker.weights.adapter import WeightAdapter
 
 _TORCH_DTYPES = {
@@ -29,7 +30,7 @@ def create_weight_adapter(
     *,
     source_dtype: torch.dtype,
     compute_dtype: torch.dtype,
-    device: torch.device,
+    runtime: WorkerDeviceRuntime,
 ) -> WeightAdapter[Any, Any]:
     """Create the weight conversion and device-placement implementation for the Backend."""
 
@@ -41,7 +42,7 @@ def create_weight_adapter(
             intermediate_dim=config.model.expert_intermediate_dim,
             source_dtype=source_dtype,
             compute_dtype=compute_dtype,
-            device=device,
+            runtime=runtime,
         )
     if config.worker.backend is BackendName.GGML:
         try:
@@ -71,7 +72,7 @@ def create_weight_adapter(
         intermediate_dim=config.model.expert_intermediate_dim,
         source_dtype=source_dtype,
         compute_dtype=compute_dtype,
-        device=device,
+        device=runtime.device,
     )
 
 
@@ -79,7 +80,7 @@ def create_compute_backend(
     config: WorkerConfig,
     *,
     dtype: torch.dtype,
-    device: torch.device,
+    runtime: WorkerDeviceRuntime,
     acquire_many: Callable[[int, tuple[int, ...]], Any],
 ) -> ComputeBackend:
     """Create the computation implementation selected by the Worker configuration."""
@@ -92,7 +93,7 @@ def create_compute_backend(
             intermediate_dim=config.model.expert_intermediate_dim,
             top_k=config.model.top_k,
             dtype=dtype,
-            device=device,
+            runtime=runtime,
             acquire_many=acquire_many,
         )
     if config.worker.backend is BackendName.GGML:
@@ -122,6 +123,6 @@ def create_compute_backend(
         intermediate_dim=config.model.expert_intermediate_dim,
         top_k=config.model.top_k,
         dtype=dtype,
-        device=device,
+        device=runtime.device,
         acquire_many=acquire_many,
     )

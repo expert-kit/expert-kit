@@ -29,6 +29,7 @@ from expertkit_worker.backends import (
 )
 from expertkit_worker.config.models import ObservabilityConfig
 from expertkit_worker.execution import WorkerExecutor
+from expertkit_worker.factory import _create_device_wiring
 from expertkit_worker.observability import create_observability
 
 pytest.importorskip("prometheus_client")
@@ -159,6 +160,7 @@ def test_prometheus_listener_exposes_low_cardinality_worker_metrics() -> None:
 
 def test_tracing_extracts_parent_context_and_exports_off_the_rpc_path() -> None:
     async def scenario() -> None:
+        device_wiring = _create_device_wiring("cpu")
         collector = _TraceCollector()
         collector_server = grpc.aio.server()
         trace_service_pb2_grpc.add_TraceServiceServicer_to_server(
@@ -189,8 +191,15 @@ def test_tracing_extracts_parent_context_and_exports_off_the_rpc_path() -> None:
         execution = WorkerExecutor(
             server,
             _DoubleBackend(),
+            create_slot=device_wiring.create_slot,
             instance_id=7,
-            buffer_config=BatchBufferConfig(2, 2, 1, torch.float32, "cpu"),
+            buffer_config=BatchBufferConfig(
+                2,
+                2,
+                1,
+                torch.float32,
+                torch.device("cpu"),
+            ),
             slot_count=1,
             tracer=observability.tracer,
         )

@@ -1,0 +1,39 @@
+name: {{ project_name }}-{{ pool.id }}
+
+services:
+{% for worker in pool.workers %}
+  {{ worker.id }}:
+    image: {{ images.expert }}
+    entrypoint:
+      - uv
+      - run
+      - --no-sync
+      - --package
+      - expertkit-worker
+      - ek-worker
+    command: ["--config", "/etc/expert-kit/worker.yaml"]
+    privileged: true
+    ipc: host
+    restart: unless-stopped
+    stop_grace_period: 60s
+    volumes:
+      - ./workers/{{ worker.id }}.yaml:/etc/expert-kit/worker.yaml:ro
+      - worker-cache:/ek/worker_cache
+      - /usr/local/Ascend/driver:/usr/local/Ascend/driver:ro
+      - /usr/local/Ascend/firmware:/usr/local/Ascend/firmware:ro
+      - /etc/ascend_install.info:/etc/ascend_install.info:ro
+      - /usr/local/bin/npu-smi:/usr/local/bin/npu-smi:ro
+      - /usr/local/dcmi:/usr/local/dcmi:ro
+      - /dev/devmm_svm:/dev/devmm_svm
+    environment:
+      RUST_LOG: info
+    networks:
+      - expert-kit-network
+{% endfor %}
+
+networks:
+  expert-kit-network:
+    driver: bridge
+
+volumes:
+  worker-cache:

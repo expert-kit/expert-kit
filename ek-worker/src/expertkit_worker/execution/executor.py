@@ -31,6 +31,8 @@ from expertkit_worker.backends import (
 from expertkit_worker.execution.slot import ExecutionResult, ExecutionSlot
 from expertkit_worker.observability.api import NoopWorkerMetrics, WorkerMetrics
 
+from .slot import ExecutionSlotFactory
+
 logger = structlog.get_logger(__name__)
 
 
@@ -69,6 +71,7 @@ class WorkerExecutor:
         receiver: WorkerBatchReceiver,
         backend: ComputeBackend,
         *,
+        create_slot: ExecutionSlotFactory,
         instance_id: int,
         buffer_config: BatchBufferConfig,
         slot_count: int,
@@ -96,10 +99,10 @@ class WorkerExecutor:
             for _ in range(slot_count):
                 buffers = receiver.create_batch_buffers(buffer_config)
                 self._slots.append(
-                    ExecutionSlot(
+                    create_slot(
                         buffer_config,
                         buffers,
-                        enable_cuda_timing=tracer is not None,
+                        enable_device_timing=tracer is not None,
                     )
                 )
         except BaseException:
