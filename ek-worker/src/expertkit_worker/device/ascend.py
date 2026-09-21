@@ -10,10 +10,10 @@ from .runtime import DeviceWork
 
 @dataclass(frozen=True, slots=True)
 class AscendWork:
-    event: Event
+    stream: Stream
 
     def wait_host(self) -> None:
-        self.event.synchronize()
+        self.stream.synchronize()
 
 
 class AscendWorkerRuntime:
@@ -31,10 +31,8 @@ class AscendWorkerRuntime:
     def capture_current_work(self) -> DeviceWork:
         with self.device_context():
             stream = self.current_stream()
-            event = self.create_event(enable_timing=False)
-            self.record_event(event, stream)
 
-        return AscendWork(event)
+        return AscendWork(stream)
 
     def memory_info(self) -> tuple[int, int]:
         return torch_npu.npu.mem_get_info(self.device)
