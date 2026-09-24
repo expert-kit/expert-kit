@@ -29,6 +29,7 @@ class BackendName(StrEnum):
     TORCH = "torch"
     GGML = "ggml"
     FUSED = "fused"
+    ASCEND_FUSED = "ascend_fused"
 
 
 class ActivationDType(StrEnum):
