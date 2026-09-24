@@ -131,7 +131,20 @@ def create_weight_adapter(
         )
 
     if config.worker.backend is BackendName.ASCEND_FUSED:
-        from expertkit_worker.backends.ascend_fused import AscendFusedWeightAdapter
+        from expertkit_worker.backends.ascend_fused import (
+            AscendFusedModelSlimW8A8WeightAdapter,
+            AscendFusedWeightAdapter,
+        )
+
+        if config.model.quantization is not None:
+            if config.model.quantization.type is not QuantizationType.MODELSLIM_W8A8_DYNAMIC:
+                raise ValueError("unsupported Ascend fused quantization type")
+            return AscendFusedModelSlimW8A8WeightAdapter(
+                hidden_dim=config.model.hidden_dim,
+                intermediate_dim=config.model.expert_intermediate_dim,
+                runtime=runtime,
+                compute_dtype=compute_dtype,
+            )
 
         return AscendFusedWeightAdapter(
             num_layers=config.model.num_layers,
@@ -203,7 +216,16 @@ def create_compute_backend(
         )
 
     if config.worker.backend is BackendName.ASCEND_FUSED:
-        from expertkit_worker.backends.ascend_fused import AscendFusedBackend
+        from expertkit_worker.backends.ascend_fused import (
+            AscendFusedBackend,
+            AscendFusedComputeType,
+        )
+
+        compute_type = (
+            AscendFusedComputeType.DYNAMIC_W8A8
+            if config.model.quantization is not None
+            else AscendFusedComputeType.UNQUANTIZED
+        )
 
         return AscendFusedBackend(
             hidden_dim=config.model.hidden_dim,
@@ -212,4 +234,6 @@ def create_compute_backend(
             dtype=dtype,
             runtime=runtime,
             acquire_many=acquire_many,
+            compute_type=compute_type,
+            swiglu_limit=config.model.swiglu_limit,
         )

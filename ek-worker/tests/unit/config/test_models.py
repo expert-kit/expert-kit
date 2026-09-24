@@ -119,6 +119,41 @@ def test_fused_backend_remains_cuda_only(tmp_path: Path) -> None:
         WorkerConfig.model_validate(_config(tmp_path, backend="fused", device="npu:0"))
 
 
+def test_ascend_fused_backend_requires_indexed_npu(tmp_path: Path) -> None:
+    with pytest.raises(ValidationError, match=r"requires npu:<id>"):
+        WorkerConfig.model_validate(_config(tmp_path, backend="ascend_fused", device="cuda:0"))
+
+
+def test_ascend_fused_accepts_modelslim_and_v4(tmp_path: Path) -> None:
+    raw = _config(tmp_path, backend="ascend_fused", device="npu:0")
+    model = raw["model"]
+    assert isinstance(model, dict)
+    model["activation_dtype"] = "bf16"
+    model["weight_dtype"] = "bf16"
+    model["expert_compute"] = "deepseek_v4"
+    model["swiglu_limit"] = 7.0
+    model["quantization"] = {
+        "type": "modelslim-w8a8-dynamic",
+        "bits": 8,
+        "group_size": None,
+    }
+
+    config = WorkerConfig.model_validate(raw)
+
+    assert config.model.quantization is not None
+    assert config.model.expert_compute == "deepseek_v4"
+
+
+def test_ascend_fused_rejects_other_quantization(tmp_path: Path) -> None:
+    raw = _config(tmp_path, backend="ascend_fused", device="npu:0")
+    model = raw["model"]
+    assert isinstance(model, dict)
+    model["quantization"] = {"type": "w8a8", "bits": 8, "group_size": None}
+
+    with pytest.raises(ValidationError, match="supports only ModelSlim W8A8_DYNAMIC"):
+        WorkerConfig.model_validate(raw)
+
+
 def test_npu_worker_rejects_shm_transport(tmp_path: Path) -> None:
     raw = _config(tmp_path, backend="torch", device="npu:0")
     raw["transport"] = {
