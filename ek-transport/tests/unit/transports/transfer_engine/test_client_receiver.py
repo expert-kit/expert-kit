@@ -286,7 +286,7 @@ async def start_pair(
         session_close_grace_secs=session_close_grace_secs,
         owns_runtime=False,
     )
-    buffers = receiver.create_batch_buffers(BatchBufferConfig(4, 3, 2, torch.float32, "cpu"))
+    buffers = receiver.create_batch_buffers(BatchBufferConfig(4, 3, 2, torch.float32, torch.device("cpu")))
     await receiver.start()
     transport = TransferEngineWorkerTransport(
         f"127.0.0.1:{receiver.bound_port}",
@@ -828,7 +828,7 @@ def test_two_phase_close_gates_sibling_between_deregister_and_commit(
             max_pending_batches=1,
             owns_runtime=False,
         )
-        buffers = receiver.create_batch_buffers(BatchBufferConfig(4, 3, 2, torch.float32, "cpu"))
+        buffers = receiver.create_batch_buffers(BatchBufferConfig(4, 3, 2, torch.float32, torch.device("cpu")))
         await receiver.start()
         transports = [
             TransferEngineWorkerTransport(
@@ -927,7 +927,7 @@ def test_concurrent_prepared_epochs_hold_gate_until_every_commit(
             max_pending_batches=1,
             owns_runtime=False,
         )
-        buffers = receiver.create_batch_buffers(BatchBufferConfig(4, 3, 2, torch.float32, "cpu"))
+        buffers = receiver.create_batch_buffers(BatchBufferConfig(4, 3, 2, torch.float32, torch.device("cpu")))
         await receiver.start()
         transports = [
             TransferEngineWorkerTransport(
@@ -1027,7 +1027,7 @@ def test_close_waits_past_start_timeout_for_active_sibling_session(
             max_pending_batches=1,
             owns_runtime=False,
         )
-        buffers = receiver.create_batch_buffers(BatchBufferConfig(4, 3, 2, torch.float32, "cpu"))
+        buffers = receiver.create_batch_buffers(BatchBufferConfig(4, 3, 2, torch.float32, torch.device("cpu")))
         await receiver.start()
         transports = [
             TransferEngineWorkerTransport(

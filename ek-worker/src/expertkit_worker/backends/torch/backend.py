@@ -85,7 +85,6 @@ class _TorchCompletion(BackendCompletion):
                 self._work.wait_host()
             except BaseException as error:
                 close_error = error
-,
         if close_error is not None:
             _QUARANTINED_COMPLETIONS.append(self)
             raise close_error

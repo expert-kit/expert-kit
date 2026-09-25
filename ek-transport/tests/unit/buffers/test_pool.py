@@ -199,6 +199,7 @@ def test_reuse_event_wait_failure_never_restores_the_available_slot(
     async def scenario() -> None:
         outputs = pool()
         slot = outputs._available[-1]  # type: ignore[attr-defined]
+        slot.tensor = _FakeCudaTensor()  # type: ignore[assignment]
         slot.reuse_event = _FailingEvent()
         monkeypatch.setattr(torch.cuda, "current_stream", lambda device: _FailingStream())
 

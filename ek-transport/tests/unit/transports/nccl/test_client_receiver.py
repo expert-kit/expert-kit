@@ -261,7 +261,7 @@ async def start_pair(
                 yield response
 
         receiver._execute = delay_first_response  # type: ignore[method-assign]
-    buffers = receiver.create_batch_buffers(BatchBufferConfig(4, 3, 2, torch.float32, "cpu"))
+    buffers = receiver.create_batch_buffers(BatchBufferConfig(4, 3, 2, torch.float32, torch.device("cpu")))
     await receiver.start()
     transport = NcclWorkerTransport(
         f"127.0.0.1:{receiver.bound_port}",

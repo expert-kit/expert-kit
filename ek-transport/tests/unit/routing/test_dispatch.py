@@ -219,6 +219,11 @@ def test_aggregation_fence_failure_retains_the_complete_routing_graph(
         output_slot = output_pool._available[-1]  # type: ignore[attr-defined]
         output_slot.reuse_event = _FailingRecordEvent()
         monkeypatch.setattr(torch.cuda, "current_stream", lambda device: _FakeStream())
+        monkeypatch.setattr(
+            buffers_module,
+            "accelerator_for_tensor",
+            lambda tensor: buffers_module.accelerator_for("cuda"),
+        )
         accumulator = torch.zeros((3, 4), dtype=torch.float32)
 
         failures = await dispatch_once(
@@ -278,6 +283,11 @@ def test_aggregation_exception_waits_for_event_despite_repeated_cancellation(
         output_slot = output_pool._available[-1]  # type: ignore[attr-defined]
         output_slot.reuse_event = event
         monkeypatch.setattr(torch.cuda, "current_stream", lambda device: _FakeStream())
+        monkeypatch.setattr(
+            buffers_module,
+            "accelerator_for_tensor",
+            lambda tensor: buffers_module.accelerator_for("cuda"),
+        )
 
         if phase == "to":
 
@@ -346,6 +356,11 @@ def test_aggregation_exception_sync_failure_becomes_unsafe_fatal(
         output_slot = output_pool._available[-1]  # type: ignore[attr-defined]
         output_slot.reuse_event = event
         monkeypatch.setattr(torch.cuda, "current_stream", lambda device: _FakeStream())
+        monkeypatch.setattr(
+            buffers_module,
+            "accelerator_for_tensor",
+            lambda tensor: buffers_module.accelerator_for("cuda"),
+        )
 
         def fail_index_add(
             accumulator: torch.Tensor,
@@ -396,6 +411,11 @@ def test_successful_aggregation_does_not_host_synchronize_the_reuse_event(
         output_slot = output_pool._available[-1]  # type: ignore[attr-defined]
         output_slot.reuse_event = event
         monkeypatch.setattr(torch.cuda, "current_stream", lambda device: _FakeStream())
+        monkeypatch.setattr(
+            buffers_module,
+            "accelerator_for_tensor",
+            lambda tensor: buffers_module.accelerator_for("cuda"),
+        )
 
         failure = await dispatch_module._dispatch_plan(  # type: ignore[attr-defined]
             plan,

@@ -11,7 +11,11 @@ from collections.abc import Callable, Mapping
 
 import torch
 
-from expertkit_transport._accelerator import TorchAccelerator, accelerator_for
+from expertkit_transport._accelerator import (
+    TorchAccelerator,
+    accelerator_for,
+    accelerator_for_tensor,
+)
 from expertkit_transport.batches import RoutedLayerBatch
 from expertkit_transport.controller.instance import resolve_default_instance
 from expertkit_transport.controller.topology import ControllerTopologyWatcher
@@ -255,7 +259,7 @@ class BlockingRoutedMoEClient:
             "transport_runtimes": transport_runtimes,
             "same_worker_retry_delay_seconds": same_worker_retry_delay_seconds,
         }
-        self._accelerator = accelerator_for(device)
+        accelerator_for(device)
         self._loop: asyncio.AbstractEventLoop | None = None
         self._client: RoutedMoEClient | None = None
         self._thread_error: BaseException | None = None
@@ -322,11 +326,12 @@ class BlockingRoutedMoEClient:
         task_started = threading.Event()
         task_holder: list[asyncio.Task[object]] = []
         input_ready: torch.Event | None = None
-        if self._accelerator is not None:
+        input_accelerator = accelerator_for_tensor(hidden_states)
+        if input_accelerator is not None:
             caller_stream: object | None = None
             try:
-                caller_stream = self._accelerator.current_stream()
-                input_ready = self._accelerator.create_event()
+                caller_stream = input_accelerator.current_stream()
+                input_ready = input_accelerator.create_event()
                 input_ready.record(caller_stream)
             except BaseException as error:
                 completion.set()
@@ -354,7 +359,7 @@ class BlockingRoutedMoEClient:
                 distinct_expert_ids=distinct_expert_ids,
                 monotonic_deadline=deadline,
                 input_ready=input_ready,
-                accelerator=self._accelerator,
+                accelerator=input_accelerator,
                 completion=completion,
                 owner=self,
                 task_started=task_started,
@@ -394,10 +399,11 @@ class BlockingRoutedMoEClient:
             with self._lock:
                 self._active.discard(completion)
         if output_ready is not None:
-            assert self._accelerator is not None
+            output_accelerator = accelerator_for_tensor(result)
+            assert output_accelerator is not None
             caller_stream = None
             try:
-                caller_stream = self._accelerator.current_stream()
+                caller_stream = output_accelerator.current_stream()
                 caller_stream.wait_event(output_ready)
                 result.record_stream(caller_stream)
             except BaseException as error:
@@ -495,11 +501,12 @@ class BlockingRoutedMoEClient:
                 monotonic_deadline=monotonic_deadline,
             )
             output_ready: torch.Event | None = None
-            if accelerator is not None:
+            output_accelerator = accelerator_for_tensor(result)
+            if output_accelerator is not None:
                 output_stream: object | None = None
                 try:
-                    output_stream = accelerator.current_stream()
-                    output_ready = accelerator.create_event()
+                    output_stream = output_accelerator.current_stream()
+                    output_ready = output_accelerator.create_event()
                     output_ready.record(output_stream)
                 except BaseException as error:
                     fatal = _blocking_ownership_error(

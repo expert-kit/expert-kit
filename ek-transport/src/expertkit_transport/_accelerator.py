@@ -48,3 +48,11 @@ def accelerator_for(device: torch.device | str) -> TorchAccelerator | None:
     if resolved.type not in _SUPPORTED_ACCELERATORS:
         raise ValueError("transport device must be CPU, CUDA, or NPU")
     return TorchAccelerator(resolved)
+
+
+def accelerator_for_tensor(tensor: torch.Tensor) -> TorchAccelerator | None:
+    """Select the accelerator that actually owns a tensor's storage."""
+
+    device = tensor.device
+    # Tests may provide a tensor-like object whose device only exposes ``type``.
+    return accelerator_for(device if isinstance(device, torch.device) else device.type)
