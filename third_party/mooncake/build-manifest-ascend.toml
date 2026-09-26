@@ -1,0 +1,36 @@
+schema_version = 1
+[upstream]
+commit = "731c4521dae71a78bc6fe4e218ad52cfc6ed3554"
+source_date_epoch = 1784774179
+archive = "mooncake-731c4521.tar.gz"
+sha256 = "75f64157ddd5a776746b9faac3fcbec4ea1518a23daa22262657d17843d56427"
+
+[artifact]
+version = "0.3.12.dev20260817+ek.731c4521.ascend1"
+platform = "linux_aarch64"
+python = "3.12"
+cann = "9.0.1"
+
+[[submodules]]
+name = "pybind11"
+commit = "58c382a8e3d7081364d2f5c62e7f429f0412743b"
+archive = "pybind11-58c382a8.tar.gz"
+sha256 = "12cd8028f7ef8f3a58c7c770e4a6c6f82c465e33ff4928aaefc41371ee24bd46"
+
+[[submodules]]
+name = "yalantinglibs"
+commit = "6a0e067d9a43492cf8e4e280b531924fbd724dbd"
+archive = "yalantinglibs-6a0e067d.tar.gz"
+sha256 = "5c1edef7f18c70e3b21e9194f9fd8d38ec2910628937456c89741ba633a3aa2b"
+
+[[patches]]
+path = "patches/ek-731c4521.patch"
+sha256 = "c6168451f17443bc00e01455a55eff411a2787d8c88139aed43adf9048d78e26"
+
+[[patches]]
+path = "patches/ek-rdma-731c4521.patch"
+sha256 = "67cfe82e5191c8be2582f989f346a8d21527b87a2601314b36269cec0370b3f2"
+
+[[patches]]
+path = "patches/ek-ascend-731c4521.patch"
+sha256 = "88dc4b42e93aca73817ab65ff70c144c3587c6a4004ac80ce0807064482721aa"

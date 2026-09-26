@@ -19,10 +19,24 @@ worker:
   shutdown_grace_secs: {{ expert.runtime.shutdown_grace_secs }}
 
 transport:
+{% if transport.type == "transfer_engine" %}
+  type: transfer_engine
+  protocol: ascend_direct
+  metadata_server: P2PHANDSHAKE
+  max_pending_batches_per_device: {{ expert.runtime.max_pending_batches_per_device }}
+  control_listen: 0.0.0.0:{{ worker.port }}
+  control_advertise: {{ pool.address }}:{{ worker.port }}
+  segment_advertise: {{ pool.address }}
+  max_workers: {{ transport.max_workers }}
+{% if transport.max_registered_bytes is not none %}
+  max_registered_bytes: {{ transport.max_registered_bytes }}
+{% endif %}
+{% else %}
   type: grpc
   max_pending_batches_per_device: {{ expert.runtime.max_pending_batches_per_device }}
   listen: 0.0.0.0:51234
   advertise: {{ pool.address }}:{{ worker.port }}
+{% endif %}
 
 controller:
   endpoint: {{ control.address }}:{{ control.worker_control_port }}
@@ -35,7 +49,11 @@ weight_manager:
     path: /ek/worker_cache
     writeback: false
   peer:
+{% if transport.type == "transfer_engine" %}
+    listen: 0.0.0.0:{{ worker.peer_port }}
+{% else %}
     listen: 0.0.0.0:52234
+{% endif %}
     advertise: http://{{ pool.address }}:{{ worker.peer_port }}
   weight_server_endpoint: http://{{ control.address }}:{{ control.weight_server_port }}
 

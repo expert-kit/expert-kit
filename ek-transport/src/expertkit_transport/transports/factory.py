@@ -41,7 +41,10 @@ def _create_transfer_engine_transport(
     return TransferEngineWorkerTransport(
         endpoint,
         endpoint_config,
-        max_in_flight=max_in_flight,
+        max_in_flight=min(
+            max_in_flight,
+            getattr(runtime, "client_max_in_flight", None) or max_in_flight,
+        ),
         device=device,
         runtime=runtime,
         expected_worker_start_id=worker_start_id,

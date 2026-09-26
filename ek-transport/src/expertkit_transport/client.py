@@ -103,6 +103,10 @@ class RoutedMoEClient:
         self._top_k = top_k
         self._dtype = dtype
         self._device = torch.device(device)
+        if transport_runtime is None and transport_runtimes is None:
+            from expertkit_transport.bootstrap import runtimes_from_environment
+
+            transport_runtimes = runtimes_from_environment(self._device)
         self._runtime_registry = WorkerTransportRuntimeRegistry(
             transport_runtimes,
             default_runtime=transport_runtime,

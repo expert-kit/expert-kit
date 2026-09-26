@@ -230,7 +230,7 @@ class TransferEngineWorkerBatchReceiver(WorkerBatchReceiver):
         self._on_rejection = on_rejection or (lambda _reason: None)
         self._sessions: dict[str, TransferEngineSession] = {}
         self._session_nonces: dict[str, tuple[str, str, str]] = {}
-        # Active target ownership plus RDMA endpoint-generation tombstones.
+        # Active target ownership plus RDMA/Ascend endpoint-generation tombstones.
         # Descriptor-only retirement deliberately preserves shared QPs, so an
         # endpoint must not be rebound to a different remote process generation
         # until this Worker runtime itself restarts.
@@ -275,7 +275,7 @@ class TransferEngineWorkerBatchReceiver(WorkerBatchReceiver):
     def fixed_device_bytes(self) -> int:
         """Return the registered receive arena charged to the Worker budget."""
 
-        return self._arena.slab.numel() * self._arena.slab.element_size()
+        return self._arena.allocated_bytes
 
     async def start(self) -> None:
         async with self._start_lock:
@@ -949,7 +949,7 @@ class TransferEngineWorkerBatchReceiver(WorkerBatchReceiver):
 
             # Keep the target gate visible while backend-specific retirement
             # commits so sibling Execute/Open calls cannot reopen stale state.
-            # Intra-NVLink and RDMA invalidate backend-specific remote-target
+            # Forced backends invalidate their remote-target
             # caches here, after the owner synchronously deregistered its arena.
             try:
                 await self._runtime.invalidate_remote_session(session.target_session_id)
@@ -967,7 +967,10 @@ class TransferEngineWorkerBatchReceiver(WorkerBatchReceiver):
                 self._sessions.pop(session.client_epoch)
                 if not self._sessions:
                     self._sessions_empty.set()
-                if not remaining_target_sessions and session.backend != "rdma":
+                if (
+                    not remaining_target_sessions
+                    and session.backend not in {"rdma", "ascend_direct"}
+                ):
                     self._target_generations.pop(session.target_session_id)
                 gates.remove(session.client_epoch)
                 if not gates:
@@ -1006,7 +1009,7 @@ class TransferEngineWorkerBatchReceiver(WorkerBatchReceiver):
         # Route removal makes Frontends close their per-Worker transports. Keep
         # only CloseSession reachable during that propagation window: Open and
         # ExecutePull reject on _closing, while CloseSession drains sibling work
-        # and invalidates Mooncake's target-wide CUDA IPC cache before ACKing.
+        # and retires Mooncake's target descriptor before ACKing.
         session_barrier_failed = False
         async with self._session_lock:
             sessions_pending = bool(self._sessions)

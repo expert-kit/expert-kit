@@ -283,11 +283,12 @@ class TransferEngineTransportConfig(_StrictModel):
     metadata_server: str = Field(default="P2PHANDSHAKE", min_length=1)
     # RDMA remains explicitly experimental until the native binding advertises
     # forced selection, exact backend reporting, and drained cache invalidation.
-    protocol: Literal["nvlink_intra", "rdma"] = "nvlink_intra"
+    protocol: Literal["nvlink_intra", "rdma", "ascend_direct"] = "nvlink_intra"
     device_name: str = ""
     max_workers: int = Field(default=2, gt=0)
     transport_hint: Literal[""] = ""
     enable_experimental_rdma: bool = False
+    max_registered_bytes: int | None = Field(default=None, gt=0)
 
     @model_validator(mode="after")
     def validate_rdma_opt_in(self) -> TransferEngineTransportConfig:
@@ -302,6 +303,8 @@ class TransferEngineTransportConfig(_StrictModel):
                 raise ValueError("transport.metadata_server must be P2PHANDSHAKE for RDMA")
         elif self.enable_experimental_rdma:
             raise ValueError("transport.enable_experimental_rdma is valid only for RDMA")
+        if self.protocol == "ascend_direct" and self.metadata_server != "P2PHANDSHAKE":
+            raise ValueError("Ascend Direct requires transport.metadata_server=P2PHANDSHAKE")
         return self
 
 
@@ -482,6 +485,13 @@ class WorkerConfig(_StrictModel):
                 )
             if self.transport.protocol == "rdma":
                 raise ValueError("the Transfer Engine RDMA transport requires a CUDA Worker device")
+        if isinstance(self.transport, TransferEngineTransportConfig):
+            if self.transport.protocol == "ascend_direct" and not self.worker.device.startswith(
+                "npu:"
+            ):
+                raise ValueError("the Ascend Direct transport requires an NPU Worker device")
+            if self.worker.device.startswith("npu:") and self.transport.protocol != "ascend_direct":
+                raise ValueError("an NPU Transfer Engine Worker requires protocol: ascend_direct")
         if (
             isinstance(self.transport, TransferEngineTransportConfig)
             and self.worker.max_active_batches_per_device

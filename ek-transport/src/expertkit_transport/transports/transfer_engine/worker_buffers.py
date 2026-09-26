@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import torch
 
+from expertkit_transport._accelerator import accelerator_for
 from expertkit_transport.batches import WorkerBatch
 from expertkit_transport.errors import TransportProtocolError
 from expertkit_transport.transports.base import BatchBufferConfig, WorkerBatchBuffers
@@ -41,8 +42,8 @@ class TransferEngineWorkerBatchBuffers(WorkerBatchBuffers):
         self._spec = spec
         self._experts_per_layer = experts_per_layer
         self._closed = False
-        uses_cuda = spec.device.type == "cuda"
-        host_options = {"device": "cpu", "pin_memory": uses_cuda}
+        uses_accelerator = spec.device.type != "cpu"
+        host_options = {"device": "cpu", "pin_memory": uses_accelerator}
         self._host_expert_ids = torch.empty(
             (spec.max_batch_tokens, spec.top_k),
             dtype=torch.int32,
@@ -97,11 +98,11 @@ class TransferEngineWorkerBatchBuffers(WorkerBatchBuffers):
 
         host_expert_ids = self._host_expert_ids[: batch.token_count]
         host_routing_weights = self._host_routing_weights[: batch.token_count]
-        non_blocking = self._spec.device.type == "cuda"
+        non_blocking = self._spec.device.type != "cpu"
         host_expert_ids.copy_(expert_ids, non_blocking=non_blocking)
         host_routing_weights.copy_(routing_weights, non_blocking=non_blocking)
         if non_blocking:
-            torch.cuda.current_stream(self._spec.device).synchronize()
+            accelerator_for(self._spec.device).current_stream().synchronize()
         distinct = validate_received_routing(
             host_expert_ids,
             host_routing_weights,

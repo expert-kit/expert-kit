@@ -1282,26 +1282,27 @@ def test_nvlink_same_endpoint_allows_new_generation_only_after_close() -> None:
     asyncio.run(scenario())
 
 
-def test_rdma_closed_endpoint_keeps_generation_tombstone() -> None:
+@pytest.mark.parametrize("backend", ["rdma", "ascend_direct"])
+def test_closed_endpoint_keeps_generation_tombstone(backend: str) -> None:
     async def scenario() -> None:
         link = _FakeLink()
-        worker_runtime = _FakeRuntime(link, "worker:19002", backend="rdma")
+        worker_runtime = _FakeRuntime(link, "worker:19002", backend=backend)
         original_runtime = _FakeRuntime(
             link,
             "client:19001",
-            backend="rdma",
+            backend=backend,
             generation="frontend-generation-a",
         )
         same_generation_runtime = _FakeRuntime(
             link,
             "client:19001",
-            backend="rdma",
+            backend=backend,
             generation="frontend-generation-a",
         )
         restarted_runtime = _FakeRuntime(
             link,
             "client:19001",
-            backend="rdma",
+            backend=backend,
             generation="frontend-generation-b",
         )
         receiver = TransferEngineWorkerBatchReceiver(
@@ -1729,7 +1730,11 @@ def test_unprovable_input_staging_retains_the_caller_batch_and_poisoned_graph(
         batch = worker_batch()
         event = _InjectedCudaEvent(fail_record=1 if failure == "record" else None)
         pair.transport._arena.slots[0].copy_event = event  # type: ignore[attr-defined]
-        monkeypatch.setattr(torch.cuda, "current_stream", lambda device: object())
+        monkeypatch.setattr(
+            client_module,
+            "accelerator_for",
+            lambda device: type("InjectedAccelerator", (), {"current_stream": lambda self: object()})(),
+        )
 
         original_copy = client_module._copy_tensor  # type: ignore[attr-defined]
         copy_count = 0
@@ -1794,7 +1799,11 @@ def test_unprovable_output_staging_quarantines_the_output_pool_lease(
         )
         event = _InjectedCudaEvent(fail_record=2 if failure == "record" else None)
         pair.transport._arena.slots[0].copy_event = event  # type: ignore[attr-defined]
-        monkeypatch.setattr(torch.cuda, "current_stream", lambda device: object())
+        monkeypatch.setattr(
+            client_module,
+            "accelerator_for",
+            lambda device: type("InjectedAccelerator", (), {"current_stream": lambda self: object()})(),
+        )
 
         original_copy = client_module._copy_tensor  # type: ignore[attr-defined]
         copy_count = 0
@@ -1844,7 +1853,7 @@ def test_unprovable_output_staging_quarantines_the_output_pool_lease(
                             monotonic_deadline=time.monotonic() + 5,
                         )
                     )
-                    received = await pair.receiver.receive()
+                    received = await asyncio.wait_for(pair.receiver.receive(), 2)
                     await complete(received)
                     await submission
             assert not caught.value.retryable

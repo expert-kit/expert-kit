@@ -1,8 +1,12 @@
 services:
 {% for worker in pool.workers %}
   {{ worker.id }}:
+{% if transport.type == "transfer_engine" %}
+    network_mode: host
+{% else %}
     ports:
       - "{{ pool.address }}:{{ worker.port }}:51234"
       - "{{ pool.address }}:{{ worker.peer_port }}:52234"
+{% endif %}
 
 {% endfor %}

@@ -12,6 +12,7 @@ from typing import Any
 import grpc
 import torch
 
+from expertkit_transport._accelerator import accelerator_for
 from expertkit_transport.batches import WorkerBatch
 from expertkit_transport.errors import (
     TransportError,
@@ -56,8 +57,8 @@ def _copy_tensor(destination: torch.Tensor, source: torch.Tensor) -> None:
     destination.copy_(source)
 
 
-class _UnsafeCudaStaging(RuntimeError):
-    """Mark caller-owned CUDA memory whose last access cannot be fenced."""
+class _UnsafeDeviceStaging(RuntimeError):
+    """Mark caller-owned accelerator memory whose last access cannot be fenced."""
 
     def __init__(self, phase: str, cause: BaseException) -> None:
         super().__init__(phase)
@@ -373,8 +374,8 @@ class TransferEngineWorkerTransport(WorkerTransport):
         try:
             validate_worker_batch(batch, self._spec)
             await self._pack(batch, slot, monotonic_deadline)
-        except _UnsafeCudaStaging as unsafe:
-            raise self._quarantine_cuda_staging(
+        except _UnsafeDeviceStaging as unsafe:
+            raise self._quarantine_device_staging(
                 unsafe.phase,
                 batch,
                 output,
@@ -459,8 +460,8 @@ class TransferEngineWorkerTransport(WorkerTransport):
 
             try:
                 await self._unpack_output(batch, output, slot)
-            except _UnsafeCudaStaging as unsafe:
-                raise self._quarantine_cuda_staging(
+            except _UnsafeDeviceStaging as unsafe:
+                raise self._quarantine_device_staging(
                     unsafe.phase,
                     batch,
                     output,
@@ -539,13 +540,13 @@ class TransferEngineWorkerTransport(WorkerTransport):
                 _copy_tensor(slot.expert_ids[:token_count], batch.expert_ids)
                 _copy_tensor(slot.routing_weights[:token_count], batch.routing_weights)
                 if slot.copy_event is not None:
-                    slot.copy_event.record(torch.cuda.current_stream(self._device))
+                    slot.copy_event.record(accelerator_for(self._device).current_stream())
             except BaseException as error:
                 if slot.copy_event is not None:
-                    raise _UnsafeCudaStaging("input-copy", error) from error
+                    raise _UnsafeDeviceStaging("input-copy", error) from error
                 if isinstance(error, IndexError | RuntimeError):
                     raise TransportProtocolError(
-                        "Worker batch token indices or CUDA staging copy is invalid"
+                        "Worker batch token indices or device staging copy is invalid"
                     ) from error
                 raise
             if slot.copy_event is not None:
@@ -562,11 +563,11 @@ class TransferEngineWorkerTransport(WorkerTransport):
                     try:
                         self._runtime.ensure_healthy()
                     except TransportError:
-                        raise _UnsafeCudaStaging("input-copy fence", error) from error
+                        raise _UnsafeDeviceStaging("input-copy fence", error) from error
                     raise
                 except BaseException as error:
                     if slot.copy_event is not None:
-                        raise _UnsafeCudaStaging("input-copy fence", error) from error
+                        raise _UnsafeDeviceStaging("input-copy fence", error) from error
                     raise
 
     async def _unpack_output(
@@ -578,10 +579,10 @@ class TransferEngineWorkerTransport(WorkerTransport):
         try:
             _copy_tensor(output, slot.partial_output[: batch.token_count])
             if slot.copy_event is not None:
-                slot.copy_event.record(torch.cuda.current_stream(self._device))
+                slot.copy_event.record(accelerator_for(self._device).current_stream())
         except BaseException as error:
             if slot.copy_event is not None:
-                raise _UnsafeCudaStaging("output-copy", error) from error
+                raise _UnsafeDeviceStaging("output-copy", error) from error
             raise
         if slot.copy_event is None:
             return
@@ -597,14 +598,14 @@ class TransferEngineWorkerTransport(WorkerTransport):
             try:
                 self._runtime.ensure_healthy()
             except TransportError:
-                raise _UnsafeCudaStaging("output-copy fence", error) from error
+                raise _UnsafeDeviceStaging("output-copy fence", error) from error
             raise
         except BaseException as error:
             if slot.copy_event is not None:
-                raise _UnsafeCudaStaging("output-copy fence", error) from error
+                raise _UnsafeDeviceStaging("output-copy fence", error) from error
             raise
 
-    def _quarantine_cuda_staging(
+    def _quarantine_device_staging(
         self,
         phase: str,
         batch: WorkerBatch,
@@ -614,7 +615,8 @@ class TransferEngineWorkerTransport(WorkerTransport):
         unsafe_output: bool,
     ) -> TransportError:
         diagnostic = (
-            f"CUDA {phase} completion could not be proven; caller-owned Tensor "
+            f"{self._device.type.upper()} {phase} completion could not be proven; "
+            "caller-owned Tensor "
             "storage is retained and this process must restart"
         )
         self._retain_arena = True
@@ -622,7 +624,7 @@ class TransferEngineWorkerTransport(WorkerTransport):
         self._runtime.quarantine(diagnostic)
         # A quarantined runtime retains registered slabs, but it does not own
         # caller input/output storage. Keep the entire Python ownership graph
-        # alive process-wide because no later CUDA API can safely fence it.
+        # alive process-wide because no later device API can safely fence it.
         _UNSAFE_STAGING_GRAPHS.append((self, self._runtime, self._arena, slot, batch, output))
         return TransportError(
             TransportErrorCode.UNAVAILABLE,

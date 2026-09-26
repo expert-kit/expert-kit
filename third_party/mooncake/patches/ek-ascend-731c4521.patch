@@ -1,0 +1,220 @@
+diff --git a/mooncake-common/src/CMakeLists.txt b/mooncake-common/src/CMakeLists.txt
+index 1f231775cea1d6fa47bc0d2bcc88efd58445aa88..e60a7ccce1604c63e887e68d469b3a0f4f6c14c2 100644
+--- a/mooncake-common/src/CMakeLists.txt
++++ b/mooncake-common/src/CMakeLists.txt
+@@ -62,6 +62,7 @@ target_include_directories(mooncake_common PUBLIC
+ target_link_libraries(mooncake_common PUBLIC
+     yaml-cpp
+     jsoncpp
++    yalantinglibs::yalantinglibs
+ )
+ 
+ if (BUILD_SHARED_LIBS)
+diff --git a/mooncake-integration/transfer_engine/transfer_engine_py.cpp b/mooncake-integration/transfer_engine/transfer_engine_py.cpp
+index 6cfb3d27e9d3c8ecc2830b6ef756089a9a32992b..6b78dd56c53c382182274a6c500222a04f7b43b8 100644
+--- a/mooncake-integration/transfer_engine/transfer_engine_py.cpp
++++ b/mooncake-integration/transfer_engine/transfer_engine_py.cpp
+@@ -18,6 +18,9 @@
+ #include <numeric>
+ #include <fstream>
+ #include <stdexcept>
++#ifdef USE_ASCEND_DIRECT
++#include "acl/acl.h"
++#endif
+ 
+ #include <pybind11/stl.h>
+ #include "transport/rpc_communicator/rpc_interface.h"
+@@ -191,6 +194,17 @@ int TransferEnginePy::initializeExt(const char* local_hostname,
+ 
+     std::string proto = protocol ? std::string(protocol) : "";
+     std::string conn_string = buildConnString(metadata_type, metadata_server);
++    const bool use_forced_ascend = (proto == "ascend_direct");
++#ifndef USE_ASCEND_DIRECT
++    if (use_forced_ascend) {
++        LOG(ERROR) << "ascend_direct requires USE_ASCEND_DIRECT";
++        return -1;
++    }
++#endif
++    if (use_forced_ascend && (getenv("MC_FORCE_TCP") || conn_string != P2PHANDSHAKE)) {
++        LOG(ERROR) << "ascend_direct requires P2PHANDSHAKE and forbids MC_FORCE_TCP";
++        return -1;
++    }
+     const bool use_forced_rdma = (proto == "rdma");
+     if (use_forced_rdma && getenv("MC_FORCE_TCP")) {
+         LOG(ERROR) << "Protocol 'rdma' conflicts with MC_FORCE_TCP; refusing "
+@@ -243,7 +257,7 @@ int TransferEnginePy::initializeExt(const char* local_hostname,
+     }
+ #else
+     engine_ = std::make_unique<TransferEngine>(
+-        !use_intra_nvlink && !use_forced_rdma, device_filter);
++        !use_intra_nvlink && !use_forced_rdma && !use_forced_ascend, device_filter);
+ #endif
+ 
+     if (use_forced_rdma) {
+@@ -282,7 +296,7 @@ int TransferEnginePy::initializeExt(const char* local_hostname,
+             return -1;
+         }
+         LOG(INFO) << "EFA transport installed successfully";
+-    } else if (!use_intra_nvlink && !use_forced_rdma) {
++    } else if (!use_intra_nvlink && !use_forced_rdma && !use_forced_ascend) {
+         // For non-EFA protocols (e.g. TCP), manually install TCP transport
+         // since auto_discover is disabled to prevent RDMA installation
+         // (RDMA QP creation fails on EFA devices).
+@@ -305,7 +319,7 @@ int TransferEnginePy::initializeExt(const char* local_hostname,
+             return -1;
+         }
+         LOG(INFO) << "CXI transport installed successfully";
+-    } else if (!use_intra_nvlink && !use_forced_rdma) {
++    } else if (!use_intra_nvlink && !use_forced_rdma && !use_forced_ascend) {
+         // For non-EFA protocols (e.g. TCP), manually install TCP transport
+         // since auto_discover is disabled to prevent RDMA installation
+         // (RDMA QP creation fails on EFA devices).
+@@ -361,6 +375,17 @@ int TransferEnginePy::initializeExt(const char* local_hostname,
+     }
+ #endif
+ 
++#ifdef USE_ASCEND_DIRECT
++    if (use_forced_ascend) {
++        // initialize() installs Ascend Direct in this build. Verify the entire
++        // data transport set so metadata TCP cannot conceal a payload fallback.
++        if (!engine_->isTransportOnly("ascend")) {
++            LOG(ERROR) << "ascend_direct did not install exactly {ascend}";
++            return -1;
++        }
++        configured_backend_ = "ascend_direct";
++    }
++#endif
+     free_list_.resize(kSlabSizeKBTabLen);
+     return 0;
+ }
+@@ -652,6 +677,9 @@ int TransferEnginePy::batchTransferSync(
+                       TransferMetadata::NotifyDesc{notify->name, notify->msg})
+                 : engine_->submitTransfer(batch_id, entries);
+         if (!s.ok()) {
++            if (configured_backend_ == "ascend_direct") {
++                throw std::runtime_error("Ascend submit failed; retain batch and registered owners");
++            }
+             engine_->freeBatchID(batch_id);
+             Status segment_status = engine_->CheckSegmentStatus(handle);
+             if (!segment_status.ok()) {
+@@ -670,7 +698,16 @@ int TransferEnginePy::batchTransferSync(
+         bool terminal_wait_logged = false;
+         while (!retry_transfer) {
+             Status s = engine_->getBatchTransferStatus(batch_id, status);
++            if (!s.ok() && configured_backend_ == "ascend_direct") {
++                throw std::runtime_error("Ascend status query failed; DMA termination is unknown");
++            }
+             LOG_ASSERT(s.ok());
++            if (configured_backend_ == "ascend_direct" &&
++                (status.s == TransferStatusEnum::FAILED || status.s == TransferStatusEnum::TIMEOUT)) {
++                // Failure is not a drain proof. Never free/retry the batch here;
++                // the EK adapter quarantines the engine and allocation owners.
++                throw std::runtime_error("Ascend transfer failed; DMA termination is unknown");
++            }
+             if (status.s == TransferStatusEnum::COMPLETED) {
+                 Status free_status = engine_->freeBatchID(batch_id);
+                 if (free_status.ok()) {
+@@ -1192,6 +1229,32 @@ int TransferEnginePy::invalidateDrainedRdmaSegment(
+     return engine_->removeLocalSegment(segment_name);
+ }
+ 
++#ifdef USE_ASCEND_DIRECT
++void TransferEnginePy::acquireAscendWrites() {
++    pybind11::gil_scoped_release release;
++    // Called only after successful synchronous READ or peer WRITE completion.
++    // This barrier orders subsequent local device consumers; it does not cancel
++    // or establish completion of an unknown remote transfer.
++    auto status = aclrtSynchronizeDevice();
++    if (status != ACL_ERROR_NONE) {
++        throw std::runtime_error("Ascend device acquire failed");
++    }
++}
++
++int TransferEnginePy::invalidateDrainedAscendSegment(const std::string& segment_name) {
++    pybind11::gil_scoped_release release;
++    if (configured_backend_ != "ascend_direct") return -1;
++    {
++        std::lock_guard<std::mutex> guard(mutex_);
++        handle_map_.erase(segment_name);
++    }
++    // Caller gates all sessions and drains transfers before deregistration.
++    // Evict the TE descriptor only. Existing ADXL links are not reusable across
++    // process generations; EK tombstones the endpoint until runtime restart.
++    return engine_->removeLocalSegment(segment_name);
++}
++#endif
++
+ std::string TransferEnginePy::getLocalTopology(const char* device_name) {
+     pybind11::gil_scoped_release release;
+     auto device_name_safe = device_name ? std::string(device_name) : "";
+@@ -1283,6 +1346,12 @@ PYBIND11_MODULE(engine, m) {
+     m.attr("EK_DRAINED_NVLINK_INTRA_LOCAL_INVALIDATION") = true;
+     m.attr("EK_FORCE_CONFIGURED_RDMA_TRANSPORT") = true;
+     m.attr("EK_DRAINED_RDMA_REMOTE_DESCRIPTOR_INVALIDATION") = true;
++#ifdef USE_ASCEND_DIRECT
++    m.attr("EK_ASCEND_SYNC_SUCCESS_COMPLETION") = true;
++    m.attr("EK_HAS_ASCEND_ACQUIRE") = true;
++    m.attr("EK_FORCE_CONFIGURED_ASCEND_DIRECT_TRANSPORT") = true;
++    m.attr("EK_DRAINED_ASCEND_REMOTE_DESCRIPTOR_INVALIDATION") = true;
++#endif
+ 
+     py::enum_<TransferEnginePy::TransferOpcode> transfer_opcode(
+         m, "TransferOpcode", py::arithmetic());
+@@ -1303,6 +1372,10 @@ PYBIND11_MODULE(engine, m) {
+             .def("initialize", &TransferEnginePy::initialize)
+             .def("initialize_ext", &TransferEnginePy::initializeExt)
+             .def("get_rpc_port", &TransferEnginePy::getRpcPort)
++#ifdef USE_ASCEND_DIRECT
++            .def("acquire_ascend_writes", &TransferEnginePy::acquireAscendWrites)
++            .def("invalidate_drained_ascend_segment", &TransferEnginePy::invalidateDrainedAscendSegment)
++#endif
+             .def("get_configured_backend",
+                  &TransferEnginePy::getConfiguredBackend,
+                  "Return the exact backend installed by forced configuration")
+diff --git a/mooncake-integration/transfer_engine/transfer_engine_py.h b/mooncake-integration/transfer_engine/transfer_engine_py.h
+index 2c1b8c7e59860f73b20ad814716f404bc63344b3..eb9e65b8fd2287ff85d4ada6a96b415525c46bdc 100644
+--- a/mooncake-integration/transfer_engine/transfer_engine_py.h
++++ b/mooncake-integration/transfer_engine/transfer_engine_py.h
+@@ -173,6 +173,10 @@ class TransferEnginePy {
+         const std::string &segment_name);
+ 
+     int invalidateDrainedRdmaSegment(const std::string &segment_name);
++#ifdef USE_ASCEND_DIRECT
++    void acquireAscendWrites();
++    int invalidateDrainedAscendSegment(const std::string& segment_name);
++#endif
+ 
+     // Pre-connect every (local_ctx, peer_nic) pair for `segment_name` so the
+     // first submitTransfer does not stall on handshake RPC + fi_av_insert.
+diff --git a/mooncake-transfer-engine/src/transport/ascend_transport/ascend_direct_transport/sync_transfer_executor.cpp b/mooncake-transfer-engine/src/transport/ascend_transport/ascend_direct_transport/sync_transfer_executor.cpp
+index 434235a270dd45650d3a705a95726322c718bf19..3a24697d53a163ef7f574d07c38c856d87286e47 100644
+--- a/mooncake-transfer-engine/src/transport/ascend_transport/ascend_direct_transport/sync_transfer_executor.cpp
++++ b/mooncake-transfer-engine/src/transport/ascend_transport/ascend_direct_transport/sync_transfer_executor.cpp
+@@ -76,11 +76,9 @@ TransferExecutorBase::ExecuteResult SyncTransferExecutor::execute(
+                              op_descs, params_.transfer_timeout);
+ 
+     if (status != adxl::SUCCESS) {
+-        if (!params_.auto_connect) {
+-            disconnect(local_engine_idx, target_adxl_engine_name,
+-                       kDefaultDisconnectTime);
+-        }
+-        return {.ret = -1, .status = status, .retryable = true};
++        // TransferSync failure does not establish DMA termination. Do not
++        // disconnect/retry or claim that the buffers may be recycled.
++        return {.ret = -1, .status = status, .retryable = false};
+     }
+ 
+     recordConnectedSegment(local_engine_idx, target_adxl_engine_name);
+diff --git a/mooncake-transfer-engine/src/transport/ascend_transport/ascend_direct_transport/transfer_executor_base.cpp b/mooncake-transfer-engine/src/transport/ascend_transport/ascend_direct_transport/transfer_executor_base.cpp
+index 6f08a3257c33a8584cbb5483d38857d325f1fadf..208a0c935e08d1bca4453c0c3ca52ace701797a8 100644
+--- a/mooncake-transfer-engine/src/transport/ascend_transport/ascend_direct_transport/transfer_executor_base.cpp
++++ b/mooncake-transfer-engine/src/transport/ascend_transport/ascend_direct_transport/transfer_executor_base.cpp
+@@ -93,7 +93,7 @@ void TransferExecutorBase::ParseExecutorEnvIntoInitParams(InitParams& params) {
+     }
+     char* use_async = std::getenv("ASCEND_USE_ASYNC_TRANSFER");
+     if (use_async) {
+-        params.use_async_transfer = true;
++        params.use_async_transfer = std::strcmp(use_async, "0") != 0;
+     }
+     char* auto_connect = std::getenv("ASCEND_AUTO_CONNECT");
+     if (auto_connect) {

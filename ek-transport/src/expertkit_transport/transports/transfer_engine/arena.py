@@ -6,6 +6,7 @@ from dataclasses import dataclass
 
 import torch
 
+from expertkit_transport._accelerator import accelerator_for
 from expertkit_transport.transports.base import WorkerEndpointConfig
 
 _ALIGNMENT = 256
@@ -107,7 +108,7 @@ class TransferArenaSlot:
     partial_output: torch.Tensor
     generation: int = 0
     in_use: bool = False
-    copy_event: torch.cuda.Event | None = None
+    copy_event: torch.Event | None = None
 
 
 class TransferArena:
@@ -126,14 +127,19 @@ class TransferArena:
             raise ValueError(f"Transfer Engine arena capacity cannot exceed {_MAX_ARENA_SLOTS}")
         self._spec = endpoint_config
         self._device = torch.device(device)
-        if self._device.type not in {"cpu", "cuda"}:
-            raise ValueError("Transfer Engine arena device must be CPU or CUDA")
+        if self._device.type not in {"cpu", "cuda", "npu"}:
+            raise ValueError("Transfer Engine arena device must be CPU, CUDA, or NPU")
         self._layout = TransferArenaLayout.for_endpoint(endpoint_config)
-        self._slab = torch.empty(
-            capacity * self._layout.slot_stride,
+        logical_bytes = capacity * self._layout.slot_stride
+        alignment = (2 << 20) if self._device.type == "npu" else 1
+        registered_bytes = (logical_bytes + alignment - 1) // alignment * alignment
+        self._owner = torch.empty(
+            registered_bytes + alignment - 1,
             dtype=torch.uint8,
             device=self._device,
         )
+        offset = (-self._owner.data_ptr()) % alignment
+        self._slab = self._owner.narrow(0, offset, registered_bytes)
         self._slots = tuple(self._make_slot(index) for index in range(capacity))
         self._available = list(reversed(self._slots))
         self._closed = False
@@ -141,6 +147,12 @@ class TransferArena:
     @property
     def slab(self) -> torch.Tensor:
         return self._slab
+
+    @property
+    def allocated_bytes(self) -> int:
+        """Charge alignment over-allocation as well as registered bytes."""
+
+        return self._owner.numel() * self._owner.element_size()
 
     @property
     def slots(self) -> tuple[TransferArenaSlot, ...]:
@@ -216,7 +228,11 @@ class TransferArena:
                 spec.dtype,
                 (spec.max_batch_tokens, spec.hidden_dim),
             ),
-            copy_event=torch.cuda.Event() if self._device.type == "cuda" else None,
+            copy_event=(
+                accelerator_for(self._device).create_event()
+                if self._device.type != "cpu"
+                else None
+            ),
         )
 
     def _view(

@@ -17,7 +17,7 @@ services:
         - CMD
         - python3
         - -c
-        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2)"
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:{{ attention.vllm_port if transport.type == 'transfer_engine' else 8000 }}/health', timeout=2)"
       interval: 10s
       timeout: 3s
       retries: 12
@@ -31,6 +31,10 @@ services:
       - /usr/local/bin/npu-smi:/usr/local/bin/npu-smi:ro
       - /usr/local/dcmi:/usr/local/dcmi:ro
       - /dev/devmm_svm:/dev/devmm_svm
+{% if transport.type == "transfer_engine" %}
+      - /etc/hccn.conf:/etc/hccn.conf:ro
+      - ./a-transport.toml:/configs/a-transport.toml:ro
+{% endif %}
     entrypoint: ["vllm"]
     command:
       - serve
@@ -40,8 +44,16 @@ services:
       EK_ENABLE: "1"
       EK_ADDR: {{ control.address }}:{{ control.frontend_control_port }}
       ASCEND_RT_VISIBLE_DEVICES: {{ attention.visible_devices }}
+{% if transport.type == "transfer_engine" %}
+      EK_TRANSPORT_CONFIG: /configs/a-transport.toml
+      ASCEND_USE_ASYNC_TRANSFER: "0"
+      ASCEND_BUFFER_POOL: "0:0"
+      ASCEND_USE_SHORT_CONNECTION: "0"
+    network_mode: host
+{% else %}
     networks:
       - expert-kit-network
+{% endif %}
 
   benchmark:
     image: {{ images.attention }}
