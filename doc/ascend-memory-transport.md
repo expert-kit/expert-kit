@@ -143,3 +143,9 @@ gRPC runs. These small runs do not isolate transport time. Profile native
 transfer, device synchronization, per-layer control, and expert computation
 before selecting the next performance change. Physical HCCS routing,
 cross-host RDMA, and numerical equivalence across all layers remain unverified.
+
+During cleanup, Attention exited with code 0. All E containers exceeded the
+30-second Docker stop grace and exited with code 137; `OOMKilled` was false.
+The host subsequently showed no NPU processes. Graceful E shutdown remains
+unverified: inspect frontend CloseSession delivery, the receiver's 30-second
+session barrier, and native teardown before changing retirement semantics.
