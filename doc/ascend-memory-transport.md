@@ -88,6 +88,11 @@ ASCEND_USE_SHORT_CONNECTION=0
 Keep V4 ModelSlim-specific settings when generating V4 deployment files:
 `quantization: ascend`, eager mode, batch limits, and required weight metadata.
 
+For source-mounted validation, preserve the image's existing CANN Python paths
+when adding source directories to `PYTHONPATH`. vLLM Ascend imports the CANN
+`acl` Python module during worker initialization. Test that import and NPU
+enumeration in the same container configuration before loading the model.
+
 ## Verification
 
 `scripts/smoke-ascend-memory.py` runs real NPU READ and WRITE between two
@@ -112,3 +117,29 @@ Forced Ascend selection does not establish which physical route ADXL used.
 Same-host HCCS, cross-host RDMA, and one runtime serving both kinds of peers
 must each be verified on the hardware. No model speedup or hot-restart support
 is claimed before those experiments succeed.
+
+## Initial real-model results (2026-09-26)
+
+Code `55185b8` and the CANN 9.0.1 Ascend wheel ran
+DeepSeek-V4-Flash-0731-w8a8 on one 16-device Ascend host with 8A8E.
+All 11,008 experts loaded. Eight real chat requests passed content checks,
+including repeated arithmetic, Chinese output, and four concurrent requests.
+The running A/E logs contained no ERROR, traceback, or quarantine messages.
+A initialized eight Ascend Direct engines; each E initialized one.
+
+The online benchmark used random input 128 / output 16 tokens, seed 0,
+temperature 0, ignored EOS, and one warmup. Both profiles used eager execution
+and the same model, topology, and batch settings. The gRPC baseline was
+measured on the preceding day.
+
+| Concurrency | Successful / failed | Ascend output tok/s | gRPC output tok/s | Ascend mean TTFT / TPOT |
+| --- | --- | --- | --- | --- |
+| 1 | 8 / 0 | 0.814 | 0.891 | 3.002 s / 1.111 s |
+| 8 | 16 / 0 | 4.963 | 5.261 | 4.811 s / 1.395 s |
+
+Real-model execution works with the new backend. This initial configuration
+showed approximately 8.7% / 5.7% lower output throughput than the previous
+gRPC runs. These small runs do not isolate transport time. Profile native
+transfer, device synchronization, per-layer control, and expert computation
+before selecting the next performance change. Physical HCCS routing,
+cross-host RDMA, and numerical equivalence across all layers remain unverified.
