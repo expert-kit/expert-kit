@@ -149,3 +149,65 @@ During cleanup, Attention exited with code 0. All E containers exceeded the
 The host subsequently showed no NPU processes. Graceful E shutdown remains
 unverified: inspect frontend CloseSession delivery, the receiver's 30-second
 session barrier, and native teardown before changing retirement semantics.
+
+## Matched critical-path profiling (2026-09-26)
+
+Both transports were rerun on the same host, source, images, model, topology,
+and batch settings. The profile used four formal requests, one warmup, random
+128-token input / 16-token output, and concurrency one. Independent Controller
+databases avoided stale placement-generation state during the switch.
+Counters were enabled only after model readiness. All formal requests passed.
+
+| Single-token phase, mean wall time | gRPC | Ascend Direct |
+| --- | --- | --- |
+| A complete blocking MoE layer, including dummy calls | 18.301 ms | 22.722 ms |
+| A input preparation, including executor wait | 3.015 ms | 1.462 ms |
+| A output retrieval, including executor wait | 0.762 ms | 0.513 ms |
+| A complete request to one E | 9.897 ms | 11.806 ms |
+| E input preparation | 0.315 ms | 0.766 ms |
+| E Torch expert submission | 2.044 ms | 2.483 ms |
+
+Profiled mean TPOT was 984.02 ms for gRPC and 1154.52 ms for Ascend Direct.
+These small runs include instrumentation overhead and are separate from the
+unprofiled throughput results above. Phase samples overlap, span different
+workers, and include dummy/warmup work; their means cannot be summed into an
+exact useful-request latency decomposition. The Torch submission timer also
+includes Python routing/indexing and asynchronous operator submission, rather
+than only completed NPU kernels.
+
+The new path improves A input/output preparation while adding explicit
+native READ/WRITE completion, receive barriers, routing D2H validation, and
+control-stream handling. Ascend native READ/WRITE bodies averaged 0.325 /
+0.270 ms; their awaited interfaces averaged 0.756 / 0.577 ms. The difference
+includes executor queueing, device-context setup, dispatch, and event-loop
+wakeup. It does not isolate queueing alone. A uses one shared two-thread
+native executor, whereas gRPC owns an executor per E connection; a separate
+thread-count experiment is needed to measure this change's causal effect.
+Receive-fence native bodies averaged 0.049 ms on A / 0.085 ms on E, so these
+measurements do not support attributing the entire regression to device
+synchronization alone.
+
+Call-stack tags in the gRPC run identified 26,143 dummy calls among 29,368
+single-token remote MoE layer calls (89.02%). The remaining 3,225 real decode
+calls and 215 prefill calls match five requests, 15 decode steps, and 43 layers.
+The common EK integration currently forwards vLLM DP dummy passes to remote
+experts. The DP engine runs a dummy pass when its rank executes no ready
+request while local or global work remains; it pauses when all ranks are idle.
+An 18-second idle observation after the benchmark recorded zero remote calls.
+This is a call-count ratio, not a measured wasted-compute percentage. The
+Ascend run did not have stack tags; its similar counts and common integration
+show the same risk without establishing an identical exact ratio.
+
+The next changes should explicitly mark DP placeholder execution in the EK
+integration and skip remote expert work after verifying collective requirements;
+send small routing metadata with control messages to avoid D2H revalidation;
+and reduce executor handoffs and staging copies with verified completion
+contracts. Preserve required DP synchronization and memory-lifetime barriers.
+All changes still need real-model correctness and performance checks.
+
+Raw counters, benchmark logs, the opt-in profiler, and the actual vLLM/Ascend
+source snapshots are retained on `.85` under
+`/home/xxl/ek-npu-transport-build/model-results/phase-profile/`. The dedicated
+profile model is stopped and the original Ascend Direct generated configs
+are restored after the experiment. Physical HCCS routing and cross-host RDMA
+remain unverified.
