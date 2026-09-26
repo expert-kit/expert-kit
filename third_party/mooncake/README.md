@@ -27,7 +27,7 @@ Clone the transport branch explicitly; the repository default branch may not
 contain these backends:
 
 ```bash
-git clone --branch ek-transport-bakend --single-branch \
+git clone --branch <TRANSPORT_BRANCH> --single-branch \
   <EK_REPOSITORY_URL> expert-kit
 cd expert-kit
 git status --short --branch
@@ -117,8 +117,7 @@ must already be present and match the lock.
 environment; the script will not mutate a system Python. The target virtual
 environment must already contain the exact runtime recorded by the manifest:
 CPython 3.12.13, `torch==2.10.0+cu128`, and `torch.version.cuda == "12.8"`,
-plus the normal EK and Mooncake Python dependencies. These are the versions
-recorded by the successful DeepSeek A/B experiment. The verifier rejects the
+plus the normal EK and Mooncake Python dependencies. The verifier rejects the
 workspace's CUDA 13 Torch build instead of relying on loader order or a global
 `LD_PRELOAD` workaround. `--source-url` accepts only a
 credential-free `https://` or local `file://` URL. Git and recursive submodule
