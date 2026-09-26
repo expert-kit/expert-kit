@@ -211,3 +211,8 @@ source snapshots are retained on `.85` under
 profile model is stopped and the original Ascend Direct generated configs
 are restored after the experiment. Physical HCCS routing and cross-host RDMA
 remain unverified.
+
+For measurements that exclude model/framework/expert computation, see the
+[real-NPU communication-only echo benchmark](ascend-communication-benchmark.md).
+The 8A run reproduced small-payload latency regressions inside the transport
+backend itself while showing substantial improvements for larger payloads.
