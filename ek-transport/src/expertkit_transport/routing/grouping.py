@@ -15,6 +15,7 @@ from expertkit_transport.routing.topology import (
     WorkerConnection,
     WorkerIdentity,
 )
+from expertkit_transport.tracing import traced
 
 
 @dataclass(frozen=True, slots=True)
@@ -105,6 +106,7 @@ def _split_batch(target: WorkerConnection, batch: WorkerBatch) -> tuple[WorkerBa
     return tuple(plans)
 
 
+@traced("transport.group")
 def group_worker_batches(
     batch: RoutedLayerBatch,
     topology: TopologySnapshot,

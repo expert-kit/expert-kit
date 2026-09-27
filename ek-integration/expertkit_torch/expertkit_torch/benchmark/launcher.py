@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import multiprocessing as mp
+import os
 import time
 import traceback
 from collections.abc import Callable
@@ -10,6 +11,8 @@ from dataclasses import asdict, dataclass
 from queue import Empty
 from typing import Any, Protocol
 
+from expertkit_transport.observability import FrontendTracing
+from expertkit_transport.tracing import use_tracer
 from tqdm import tqdm
 
 from expertkit_torch.benchmark.config import BenchmarkConfig, LauncherKind
@@ -186,21 +189,29 @@ def execute_rank(
         device=device,
         dtype=config.dtype.torch_name,
     ) as loaded:
-        benchmark = run_benchmark(
-            loaded.model,
-            loaded.tokenizer,
-            dataset,
-            model_type=loaded.model_type,
-            mode=config.mode.value,
-            batch_sizes=(config.batch_size_per_rank,),
-            num_prompts=assignment.num_prompts,
-            output_length=config.output_length,
-            warmup_runs=config.warmup_runs,
-            device=device,
-            before_measurement=start_measurement,
-            on_progress=on_progress,
+        tracing = FrontendTracing(
+            os.getenv("EK_TRACE_ENDPOINT"),
+            sample_ratio=float(os.getenv("EK_TRACE_SAMPLE_RATIO", "1")),
         )
-        measured_end = clock()
+        try:
+            with use_tracer(tracing.tracer):
+                benchmark = run_benchmark(
+                    loaded.model,
+                    loaded.tokenizer,
+                    dataset,
+                    model_type=loaded.model_type,
+                    mode=config.mode.value,
+                    batch_sizes=(config.batch_size_per_rank,),
+                    num_prompts=assignment.num_prompts,
+                    output_length=config.output_length,
+                    warmup_runs=config.warmup_runs,
+                    device=device,
+                    before_measurement=start_measurement,
+                    on_progress=on_progress,
+                )
+                measured_end = clock()
+        finally:
+            tracing.close()
 
     if measured_start[0] is None:
         raise RuntimeError("benchmark did not enter its measured phase")

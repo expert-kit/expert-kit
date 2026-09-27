@@ -7,6 +7,7 @@ import threading
 
 import torch
 from expertkit_transport import BlockingRoutedMoEClient, validate_and_convert_routing
+from expertkit_transport.tracing import trace_attributes, trace_span, traced
 
 
 class RoutedMoEClient:
@@ -92,6 +93,7 @@ class RoutedMoEClient:
             self._device = resolved_device
             self._dtype = dtype
 
+    @traced("frontend.moe")
     def forward_layer(
         self,
         *,
@@ -125,11 +127,15 @@ class RoutedMoEClient:
         ):
             raise ValueError("all Routed-MoE tensors must use the activation device")
 
-        encoded_experts, fp32_weights, distinct_expert_ids = validate_and_convert_routing(
-            expert_ids,
-            routing_weights,
-            experts_per_layer=self._experts_per_layer,
+        trace_attributes(
+            {"expertkit.layer_id": layer_id, "expertkit.token_count": hidden_states.shape[0]}
         )
+        with trace_span("frontend.route"):
+            encoded_experts, fp32_weights, distinct_expert_ids = validate_and_convert_routing(
+                expert_ids,
+                routing_weights,
+                experts_per_layer=self._experts_per_layer,
+            )
         self.start(device=hidden_states.device, dtype=hidden_states.dtype)
         transport = self._transport
         assert transport is not None

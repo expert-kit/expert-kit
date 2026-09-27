@@ -17,6 +17,7 @@ from expertkit_transport.controller.instance import resolve_default_instance
 from expertkit_transport.controller.topology import ControllerTopologyWatcher
 from expertkit_transport.errors import TransportError, TransportErrorCode
 from expertkit_transport.routing import RoundRobinSelector, execute_routed_layer
+from expertkit_transport.tracing import trace_attributes, traced
 
 _RESULT_GRACE_SECONDS = 0.1
 
@@ -121,6 +122,7 @@ class RoutedMoEClient:
         self._topology = topology
         self._started = True
 
+    @traced("transport.layer")
     async def execute(
         self,
         *,
@@ -164,6 +166,14 @@ class RoutedMoEClient:
             expert_ids=expert_ids,
             routing_weights=routing_weights,
             distinct_expert_ids=distinct_expert_ids,
+        )
+        trace_attributes(
+            {
+                "expertkit.layer_id": layer_id,
+                "expertkit.instance_id": instance_id,
+                "expertkit.token_count": hidden_states.shape[0],
+                "expertkit.expert_count": len(distinct_expert_ids),
+            }
         )
         return await execute_routed_layer(
             batch,
@@ -258,6 +268,7 @@ class BlockingRoutedMoEClient:
         with self._lock:
             self._started = True
 
+    @traced("frontend.transport")
     def execute(
         self,
         *,

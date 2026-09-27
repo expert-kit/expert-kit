@@ -22,6 +22,10 @@ def register() -> None:
         # Expert Kit captures the active factory.
         current_platform.pre_register_and_update()
 
+    from expertkit_vllm.tracing import install_forward_tracing
+
+    install_forward_tracing()
+
     import vllm.model_executor.layers.fused_moe as fused_moe_package
     import vllm.model_executor.layers.fused_moe.layer as fused_moe_layer
 

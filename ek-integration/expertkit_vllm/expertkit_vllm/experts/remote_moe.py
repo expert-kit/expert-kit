@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import atexit
 import logging
+import os
 import re
 import threading
 import weakref
@@ -13,6 +14,7 @@ from typing import TYPE_CHECKING, Any, cast
 
 import torch
 from expertkit_transport import BlockingRoutedMoEClient, validate_and_convert_routing
+from expertkit_transport.tracing import trace_attributes, trace_span, traced
 from torch import nn
 from vllm.config import CUDAGraphMode, get_current_vllm_config
 from vllm.config.parallel import ExpertPlacementStrategy
@@ -190,6 +192,8 @@ class RemoteMoERunner(MoERunnerInterface):
             raise ValueError(f"Expert Kit remote MoE does not support: {', '.join(enabled)}")
 
         vllm_config = get_current_vllm_config()
+        if os.getenv("EK_TRACE_ENDPOINT") and not vllm_config.model_config.enforce_eager:
+            raise ValueError("Expert Kit frontend tracing requires --enforce-eager")
         self.moe_config = moe_config
         self.num_experts = moe_config.num_logical_experts
         self.num_layers = _num_layers(vllm_config)
@@ -317,32 +321,37 @@ class RemoteMoERunner(MoERunnerInterface):
             _encode_layer_name(self.layer_name),
         )
 
+    @traced("frontend.moe")
     def _forward_impl(
         self,
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
         input_ids: torch.Tensor | None,
     ) -> torch.Tensor:
-        if self.gate is not None:
-            if hasattr(self.gate, "weight_fp32"):
-                # Ascend preserves FP32 gate weights for stable expert selection.
-                router_logits = torch.nn.functional.linear(
-                    hidden_states.float(), self.gate.weight_fp32
-                )
-            else:
-                router_logits = _unwrap_tensor(self.gate(hidden_states))
-        # Expert selector (in vLLM or vLLM-Ascend) will select experts
-        # under different platform and runtime
-        routing_weights, expert_ids = self.expert_selector.select_experts(
-            hidden_states,
-            router_logits,
-            input_ids=input_ids,
+        trace_attributes(
+            {"expertkit.layer_id": self.layer_id, "expertkit.token_count": hidden_states.shape[0]}
         )
-        expert_ids, routing_weights, distinct_expert_ids = validate_and_convert_routing(
-            expert_ids,
-            routing_weights,
-            experts_per_layer=self.num_experts,
-        )
+        with trace_span("frontend.route"):
+            if self.gate is not None:
+                if hasattr(self.gate, "weight_fp32"):
+                    # Ascend preserves FP32 gate weights for stable expert selection.
+                    router_logits = torch.nn.functional.linear(
+                        hidden_states.float(), self.gate.weight_fp32
+                    )
+                else:
+                    router_logits = _unwrap_tensor(self.gate(hidden_states))
+            # Expert selector (in vLLM or vLLM-Ascend) will select experts
+            # under different platform and runtime
+            routing_weights, expert_ids = self.expert_selector.select_experts(
+                hidden_states,
+                router_logits,
+                input_ids=input_ids,
+            )
+            expert_ids, routing_weights, distinct_expert_ids = validate_and_convert_routing(
+                expert_ids,
+                routing_weights,
+                experts_per_layer=self.num_experts,
+            )
         routed_output = _client_for(self, hidden_states).execute(
             layer_id=self.layer_id,
             hidden_states=hidden_states,
@@ -354,7 +363,8 @@ class RemoteMoERunner(MoERunnerInterface):
 
         shared_output: torch.Tensor | None = None
         if self._shared_experts_module is not None:
-            shared_output = _unwrap_tensor(self._shared_experts_module(hidden_states))
+            with trace_span("frontend.shared_experts"):
+                shared_output = _unwrap_tensor(self._shared_experts_module(hidden_states))
         if self.routed_scaling_factor != 1.0:
             if routed_output.dtype != torch.float16 or shared_output is None:
                 routed_output = routed_output * self.routed_scaling_factor

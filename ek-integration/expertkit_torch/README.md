@@ -184,3 +184,9 @@ uv run --package expertkit-torch pytest \
 - The gRPC path copies Tensor bytes through protobuf and Host memory.
 - The experimental shared-memory path avoids protobuf and loopback-socket
   Tensor copies, but still stages data through pinned Host memory.
+
+## Inference tracing
+
+The benchmark supports optional `EK_TRACE_ENDPOINT` and `EK_TRACE_SAMPLE_RATIO`
+environment variables. See [the tracing tutorial](../../doc/tutorial/inference-tracing.md)
+for Frontend, Transport and Worker spans and measurement limits.

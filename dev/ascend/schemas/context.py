@@ -20,6 +20,7 @@ from .experiment import (
     ModelConfig,
     RunConfig,
     ServeConfig,
+    TracingConfig,
 )
 
 
@@ -44,6 +45,7 @@ class TemplateContext(BaseModel):
     dataset: ArtifactContext[DatasetConfig]
     serve: ServeConfig
     run: RunConfig
+    tracing: TracingConfig
     results_path: Path
 
     @classmethod
@@ -88,6 +90,7 @@ class TemplateContext(BaseModel):
             dataset=dataset,
             serve=experiment.serve,
             run=run,
+            tracing=experiment.tracing,
             results_path=cluster.paths.results,
         )
 

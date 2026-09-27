@@ -4,7 +4,7 @@ from __future__ import annotations
 import yaml
 from typing import Self
 from pathlib import Path
-from pydantic import model_validator
+from pydantic import AnyHttpUrl, Field, model_validator
 
 from enum import StrEnum
 from .config import ConfigModel
@@ -28,6 +28,27 @@ class Dtype(StrEnum):
     FP4 = "fp4"
 
 
+class TracingConfig(ConfigModel):
+    """Optional tracing settings shared by the generated Frontend and Workers."""
+
+    enabled: bool = False
+    endpoint: AnyHttpUrl | None = None
+    sample_ratio: float = Field(default=0.01, gt=0, le=1)
+
+    @model_validator(mode="after")
+    def validate_endpoint(self) -> TracingConfig:
+        """Require a plaintext collector endpoint when tracing is enabled."""
+        if self.enabled and self.endpoint is None:
+            raise ValueError("tracing.endpoint is required when tracing is enabled")
+        if (
+            self.enabled
+            and self.endpoint is not None
+            and self.endpoint.scheme != "http"
+        ):
+            raise ValueError("tracing requires a plaintext HTTP endpoint")
+        return self
+
+
 class ExperimentConfig(ConfigModel):
     """Complete model, dataset, serving, and run configuration."""
 
@@ -35,6 +56,7 @@ class ExperimentConfig(ConfigModel):
     dataset: DatasetConfig
     serve: ServeConfig
     run: RunConfig
+    tracing: TracingConfig = Field(default_factory=TracingConfig)
 
     @classmethod
     def from_yaml(cls, file: Path) -> Self:
@@ -104,6 +126,7 @@ class ServeConfig(ConfigModel):
 
     gpu_memory_utilization: float
     max_model_len: int
+    enforce_eager: bool = False
 
 
 class RunConfig(ConfigModel):

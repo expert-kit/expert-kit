@@ -34,6 +34,12 @@ serve:
   gpu_memory_utilization: 0.5
   max_model_len: 4096
 
+# Enable for a short trace run after replacing the collector address.
+# tracing:
+#   enabled: true
+#   endpoint: http://COLLECTOR_HOST:4317
+#   sample_ratio: 1.0
+
 run:
   num_prompts: 16
   max_concurrency: 1

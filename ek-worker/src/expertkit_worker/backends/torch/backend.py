@@ -9,6 +9,7 @@ from collections.abc import Callable
 import torch
 import torch.nn.functional as functional
 from expertkit_transport.batches import ACTIVATION_DTYPES
+from expertkit_transport.tracing import trace_span
 
 from expertkit_worker.backends.base import (
     BackendBatch,
@@ -346,19 +347,27 @@ class TorchBackend(ComputeBackend):
 
         accumulator = torch.zeros_like(batch.hidden_states, dtype=torch.float32)
         for expert_id, weight in zip(lease.expert_ids, lease.objects, strict=True):
-            coordinates = torch.nonzero(batch.expert_ids == expert_id, as_tuple=False)
-            if coordinates.shape[0] == 0:
-                raise InvalidBackendInput(
-                    "distinct expert metadata does not match the routing tensor"
-                )
-            token_indices = coordinates[:, 0]
-            route_indices = coordinates[:, 1]
-            expert_input = torch.index_select(batch.hidden_states, 0, token_indices)
-            gate = self._linear(expert_input, weight, 0)
-            up = self._linear(expert_input, weight, 1)
-            routing = batch.routing_weights[token_indices, route_indices].unsqueeze(1)
-            weighted = self._finish_expert(gate, up, routing, weight)
-            accumulator.index_add_(0, token_indices, weighted)
+            with trace_span(
+                "worker.expert.submit",
+                attributes={
+                    "expertkit.layer_id": batch.layer_id,
+                    "expertkit.expert_id": expert_id,
+                    "expertkit.timing": "host_submission",
+                },
+            ):
+                coordinates = torch.nonzero(batch.expert_ids == expert_id, as_tuple=False)
+                if coordinates.shape[0] == 0:
+                    raise InvalidBackendInput(
+                        "distinct expert metadata does not match the routing tensor"
+                    )
+                token_indices = coordinates[:, 0]
+                route_indices = coordinates[:, 1]
+                expert_input = torch.index_select(batch.hidden_states, 0, token_indices)
+                gate = self._linear(expert_input, weight, 0)
+                up = self._linear(expert_input, weight, 1)
+                routing = batch.routing_weights[token_indices, route_indices].unsqueeze(1)
+                weighted = self._finish_expert(gate, up, routing, weight)
+                accumulator.index_add_(0, token_indices, weighted)
         prepared_output.copy_(accumulator.to(batch.hidden_states.dtype))
 
     def _finish_failed_submission(

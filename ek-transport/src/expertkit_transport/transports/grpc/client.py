@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import math
 import time
 from collections.abc import Callable
@@ -21,6 +22,7 @@ from expertkit_transport.errors import (
     TransportErrorCode,
     TransportProtocolError,
 )
+from expertkit_transport.tracing import grpc_trace_metadata, trace_attributes, trace_span, traced
 from expertkit_transport.transports.base import WorkerEndpointConfig, WorkerTransport
 from expertkit_transport.transports.grpc.client_buffers import (
     GrpcTransferBufferPool,
@@ -97,6 +99,7 @@ def _selected_hidden_states(batch: WorkerBatch) -> torch.Tensor:
         raise TransportProtocolError("Worker batch token indices are invalid") from error
 
 
+@traced("transport.grpc.encode")
 def _encode_with_staging(
     batch: WorkerBatch,
     spec: WorkerEndpointConfig,
@@ -142,6 +145,7 @@ def _encode_with_staging(
     )
 
 
+@traced("transport.grpc.decode")
 def _decode_into_output(
     payload: bytes,
     token_count: int,
@@ -256,6 +260,7 @@ class GrpcWorkerTransport(WorkerTransport):
                 response_deserializer=_identity,
             )
 
+    @traced("transport.grpc.execute")
     async def execute(
         self,
         batch: WorkerBatch,
@@ -315,6 +320,7 @@ class GrpcWorkerTransport(WorkerTransport):
         )
         self._buffers.close()
 
+    @traced("transport.grpc.admission")
     async def _acquire(self, monotonic_deadline: float) -> GrpcTransferBuffers:
         remaining = monotonic_deadline - self._clock()
         if remaining <= 0:
@@ -361,20 +367,30 @@ class GrpcWorkerTransport(WorkerTransport):
         remaining = monotonic_deadline - self._clock()
         if remaining <= 0:
             raise _deadline_error("deadline expired before the Worker gRPC call")
-        call = self._execute(
-            request,
-            timeout=None if math.isinf(remaining) else remaining,
-            wait_for_ready=False,
-        )
-        try:
-            response = await call
-        except asyncio.CancelledError:
-            call.cancel()
-            with suppress(BaseException):
-                await call
-            raise
-        except grpc.aio.AioRpcError as error:
-            raise _rpc_error(error) from error
+        with trace_span("transport.grpc.rpc", kind="client"):
+            trace_attributes(
+                {
+                    "rpc.system": "grpc",
+                    "server.address": self._endpoint,
+                    "expertkit.request_bytes": len(request),
+                }
+            )
+            call = self._execute(
+                request,
+                timeout=None if math.isinf(remaining) else remaining,
+                wait_for_ready=False,
+                metadata=grpc_trace_metadata(),
+            )
+            try:
+                response = await call
+                trace_attributes({"expertkit.response_bytes": len(response)})
+            except asyncio.CancelledError:
+                call.cancel()
+                with suppress(BaseException):
+                    await call
+                raise
+            except grpc.aio.AioRpcError as error:
+                raise _rpc_error(error) from error
 
         try:
             await self._run_cpu(
@@ -396,10 +412,12 @@ class GrpcWorkerTransport(WorkerTransport):
 
     async def _run_cpu(self, function: Callable[..., Any], *args: object) -> Any:
         loop = asyncio.get_running_loop()
-        work = loop.run_in_executor(self._executor, function, *args)
-        try:
-            return await asyncio.shield(work)
-        except asyncio.CancelledError:
-            with suppress(BaseException):
-                await work
-            raise
+        with trace_span("transport.grpc.cpu_task"):
+            context = contextvars.copy_context()
+            work = loop.run_in_executor(self._executor, context.run, function, *args)
+            try:
+                return await asyncio.shield(work)
+            except asyncio.CancelledError:
+                with suppress(BaseException):
+                    await work
+                raise

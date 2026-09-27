@@ -5,3 +5,6 @@ port: 8000
 gpu-memory-utilization: {{ serve.gpu_memory_utilization }}
 max-model-len: {{ serve.max_model_len }}
 data-parallel-size: {{ attention.dp_size }}
+{% if serve.enforce_eager or tracing.enabled %}
+enforce-eager: true
+{% endif %}

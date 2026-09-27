@@ -47,4 +47,8 @@ observability:
   prometheus:
     enabled: false
   tracing:
-    enabled: false
+    enabled: {{ tracing.enabled | tojson }}
+{% if tracing.enabled %}
+    endpoint: {{ tracing.endpoint | tojson }}
+    sample_ratio: {{ tracing.sample_ratio }}
+{% endif %}

@@ -260,3 +260,52 @@ def test_benchmark_rejects_invalid_limits(
             FakeDataset(_model_input([[4, 5]], [[1, 1]])),
             **arguments,
         )
+
+
+def test_generation_traces_prefill_and_decode_without_extra_synchronization() -> None:
+    pytest.importorskip("opentelemetry.sdk")
+    from expertkit_transport.observability import OpenTelemetryTracer
+    from expertkit_transport.tracing import trace_span, use_tracer
+    from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+    from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+
+    class TracedModel(FakeModel):
+        def __call__(self, **arguments):
+            with trace_span("local_model"):
+                return super().__call__(**arguments)
+
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    synchronized = []
+    try:
+        with use_tracer(OpenTelemetryTracer(provider.get_tracer("test"))):
+            run_benchmark(
+                TracedModel(),
+                FakeTokenizer(),
+                FakeDataset(_model_input([[1, 2]], [[1, 1]])),
+                model_type="synthetic",
+                mode="local",
+                batch_sizes=(1,),
+                num_prompts=1,
+                output_length=3,
+                warmup_runs=0,
+                device="cpu",
+                clock=IncrementingClock(),
+                synchronize=synchronized.append,
+            )
+        spans = exporter.get_finished_spans()
+        root = next(s for s in spans if s.name == "frontend.generate")
+        by_id = {s.context.span_id: s for s in spans}
+        assert root.attributes["expertkit.batch_size"] == 1
+        assert len(synchronized) == 3
+        children = [s for s in spans if s.name == "local_model"]
+        assert [by_id[s.parent.span_id].name for s in children] == [
+            "frontend.prefill",
+            "frontend.decode_step",
+            "frontend.decode_step",
+        ]
+        assert all(s.context.trace_id == root.context.trace_id for s in spans)
+    finally:
+        provider.shutdown()

@@ -12,6 +12,7 @@ from expertkit_transport.buffers import OutputPool
 from expertkit_transport.errors import TransportError
 from expertkit_transport.routing.grouping import WorkerBatchPlan
 from expertkit_transport.routing.topology import WorkerIdentity
+from expertkit_transport.tracing import trace_attributes, trace_span, traced
 
 
 @dataclass(frozen=True, slots=True)
@@ -42,12 +43,20 @@ def _validate_accumulator(
         raise ValueError("output pool is too small for the physical Worker batch")
 
 
+@traced("transport.worker")
 async def _dispatch_plan(
     plan: WorkerBatchPlan,
     pool: OutputPool,
     accumulator: torch.Tensor,
     monotonic_deadline: float,
 ) -> FailedWorkerBatch | None:
+    trace_attributes(
+        {
+            "expertkit.worker_id": plan.target.identity.worker_id,
+            "expertkit.start_id": plan.target.identity.start_id,
+            "expertkit.token_count": plan.batch.token_count,
+        }
+    )
     try:
         async with pool.lease(monotonic_deadline=monotonic_deadline) as lease:
             await plan.target.transport.execute(
@@ -55,21 +64,23 @@ async def _dispatch_plan(
                 lease.tensor[: plan.batch.token_count],
                 monotonic_deadline=monotonic_deadline,
             )
-            partial = lease.tensor[: plan.batch.token_count]
-            token_indices = plan.batch.token_indices
-            if token_indices is None:
-                token_indices = torch.arange(
-                    plan.batch.token_count,
-                    dtype=torch.int64,
-                    device=accumulator.device,
-                )
-            accumulator.index_add_(0, token_indices, partial.to(torch.float32))
-            lease.mark_consumed()
+            with trace_span("transport.aggregate"):
+                partial = lease.tensor[: plan.batch.token_count]
+                token_indices = plan.batch.token_indices
+                if token_indices is None:
+                    token_indices = torch.arange(
+                        plan.batch.token_count,
+                        dtype=torch.int64,
+                        device=accumulator.device,
+                    )
+                accumulator.index_add_(0, token_indices, partial.to(torch.float32))
+                lease.mark_consumed()
     except TransportError as error:
         return FailedWorkerBatch(plan=plan, error=error)
     return None
 
 
+@traced("transport.worker")
 async def dispatch_complete_plan(
     plan: WorkerBatchPlan,
     *,
@@ -77,6 +88,13 @@ async def dispatch_complete_plan(
 ) -> tuple[torch.Tensor | None, FailedWorkerBatch | None]:
     """Return one complete Worker result without FP32 scatter aggregation."""
 
+    trace_attributes(
+        {
+            "expertkit.worker_id": plan.target.identity.worker_id,
+            "expertkit.start_id": plan.target.identity.start_id,
+            "expertkit.token_count": plan.batch.token_count,
+        }
+    )
     batch = plan.batch
     if batch.token_indices is not None:
         raise ValueError("a complete Worker plan must select every source token")
@@ -92,6 +110,7 @@ async def dispatch_complete_plan(
     return result, None
 
 
+@traced("transport.dispatch")
 async def dispatch_once(
     plans: tuple[WorkerBatchPlan, ...],
     pools: Mapping[WorkerIdentity, OutputPool],

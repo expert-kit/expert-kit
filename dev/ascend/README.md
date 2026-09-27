@@ -80,6 +80,7 @@ topology keeps attention and control together and uses one pool per expert node.
 - model identity, shape, dtypes, and `path_ref`;
 - dataset parser, label name, and optional `path_ref`;
 - vLLM serving limits;
+- optional `tracing` settings for Frontend and Worker traces;
 - prompt count, concurrency, output length, warmups, and sampling settings.
 
 `model.path_ref` indexes `cluster.paths.models`. A file-backed dataset's
@@ -93,6 +94,14 @@ topology keeps attention and control together and uses one pool per expert node.
 
 `dataset.name` is a human-readable result-label component. `dataset.type`
 selects the benchmark parser.
+
+`tracing.enabled` defaults to false. When enabled, supply a plaintext OTLP/gRPC
+`tracing.endpoint` reachable from the attention and Worker containers. The
+generator applies the same `tracing.sample_ratio` to both roles and enables
+vLLM eager execution. See the [tracing tutorial](../../doc/tutorial/inference-tracing.md)
+for the short run and Jaeger UI procedure. `serve.enforce_eager` independently
+keeps eager execution on when tracing is disabled, which is useful for an
+overhead comparison.
 
 ## File tree
 

@@ -27,6 +27,7 @@ from expertkit_transport.routing.topology import (
     TopologyProvider,
     WorkerIdentity,
 )
+from expertkit_transport.tracing import trace_span
 
 _DEFAULT_SAME_WORKER_RETRY_DELAY_SECONDS = 0.001
 
@@ -187,27 +188,28 @@ async def execute_routed_layer(
         return torch.zeros_like(batch.hidden_states)
 
     accumulator: torch.Tensor | None = None
-    if len(plans) == 1 and plans[0].batch.token_indices is None:
-        direct_result, direct_failure = await dispatch_complete_plan(
-            plans[0],
-            monotonic_deadline=monotonic_deadline,
-        )
-        if direct_failure is None:
-            assert direct_result is not None
-            return direct_result
-        failures = (direct_failure,)
-    else:
-        accumulator = torch.zeros(
-            (batch.token_count, batch.hidden_dim),
-            dtype=torch.float32,
-            device=batch.hidden_states.device,
-        )
-        failures = await dispatch_once(
-            plans,
-            pools,
-            accumulator,
-            monotonic_deadline=monotonic_deadline,
-        )
+    with trace_span("transport.attempt", attributes={"expertkit.attempt": 1}):
+        if len(plans) == 1 and plans[0].batch.token_indices is None:
+            direct_result, direct_failure = await dispatch_complete_plan(
+                plans[0],
+                monotonic_deadline=monotonic_deadline,
+            )
+            if direct_failure is None:
+                assert direct_result is not None
+                return direct_result
+            failures = (direct_failure,)
+        else:
+            accumulator = torch.zeros(
+                (batch.token_count, batch.hidden_dim),
+                dtype=torch.float32,
+                device=batch.hidden_states.device,
+            )
+            failures = await dispatch_once(
+                plans,
+                pools,
+                accumulator,
+                monotonic_deadline=monotonic_deadline,
+            )
     if not failures:
         assert accumulator is not None
         return accumulator.to(batch.hidden_states.dtype)
@@ -220,11 +222,12 @@ async def execute_routed_layer(
         raise nonretryable
 
     unfinished, failed_workers = _unfinished_batch(batch, failures)
-    refreshed = await topology.refresh(
-        batch.instance_id,
-        observed_version=snapshot.version,
-        monotonic_deadline=monotonic_deadline,
-    )
+    with trace_span("transport.topology.refresh"):
+        refreshed = await topology.refresh(
+            batch.instance_id,
+            observed_version=snapshot.version,
+            monotonic_deadline=monotonic_deadline,
+        )
     if monotonic_deadline - clock() <= 0:
         raise _deadline_error("the Routed layer deadline expired during Topology refresh")
 
@@ -254,12 +257,13 @@ async def execute_routed_layer(
             dtype=torch.float32,
             device=batch.hidden_states.device,
         )
-    retry_failures = await dispatch_once(
-        retry_plans,
-        pools,
-        accumulator,
-        monotonic_deadline=monotonic_deadline,
-    )
+    with trace_span("transport.retry", attributes={"expertkit.attempt": 2}):
+        retry_failures = await dispatch_once(
+            retry_plans,
+            pools,
+            accumulator,
+            monotonic_deadline=monotonic_deadline,
+        )
     if retry_failures:
         raise retry_failures[-1].error
     return accumulator.to(batch.hidden_states.dtype)

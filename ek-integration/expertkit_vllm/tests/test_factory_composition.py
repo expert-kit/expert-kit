@@ -198,3 +198,18 @@ def test_vllm_factory_rejects_native_tensor_parallel_under_global_dp(
 
     with pytest.raises(ValueError, match="tensor_parallel"):
         cast(Callable[..., MoERunnerInterface], wrapped)(**_remote_factory_kwargs())
+
+
+@pytest.mark.parametrize("enforce_eager", [False, True])
+def test_frontend_tracing_requires_eager_execution(monkeypatch, enforce_eager: bool) -> None:
+    config = _vllm_factory_config()
+    config.model_config.enforce_eager = enforce_eager
+    _patch_vllm_config(monkeypatch, config)
+    monkeypatch.setenv("EK_TRACE_ENDPOINT", "http://collector:4317")
+    wrapped = wrap_fused_moe_factory(fused_moe_layer.FusedMoE)
+    if enforce_eager:
+        runner = cast(Callable[..., MoERunnerInterface], wrapped)(**_remote_factory_kwargs())
+        assert isinstance(runner, RemoteMoERunner)
+    else:
+        with pytest.raises(ValueError, match="enforce-eager"):
+            cast(Callable[..., MoERunnerInterface], wrapped)(**_remote_factory_kwargs())

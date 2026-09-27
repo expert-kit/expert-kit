@@ -12,7 +12,7 @@ from functools import partial
 
 import structlog
 from expertkit_transport.errors import TransportError, TransportErrorCode
-from expertkit_transport.tracing import Tracer, TraceSpan
+from expertkit_transport.tracing import Tracer, TraceSpan, use_tracer
 from expertkit_transport.transports.base import (
     BatchBufferConfig,
     ReceivedBatch,
@@ -228,7 +228,7 @@ class WorkerExecutor:
             context=received.trace_context,
             attributes=attributes,
         )
-        with span_context as span:
+        with use_tracer(self._tracer), span_context as span:
             return await self._process_batch(received, slot, span)
 
     async def _process_batch(

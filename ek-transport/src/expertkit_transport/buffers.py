@@ -13,6 +13,7 @@ import torch
 from expertkit_transport._accelerator import TorchAccelerator, accelerator_for
 from expertkit_transport.batches import ACTIVATION_DTYPES
 from expertkit_transport.errors import TransportError, TransportErrorCode
+from expertkit_transport.tracing import traced
 
 
 def _deadline_error() -> TransportError:
@@ -133,6 +134,7 @@ class OutputPool:
 
         return _LeaseContext(self, monotonic_deadline)
 
+    @traced("transport.output_pool.wait")
     async def _acquire(self, monotonic_deadline: float) -> OutputLease:
         async with self._condition:
             if monotonic_deadline - self._clock() <= 0:
