@@ -173,7 +173,7 @@ batch advances it by the batch's actual size, including a smaller final batch.
 uv run --package expertkit-torch ek-torch-benchmark run \
   --model-path /models/DeepSeek-V2-Lite-Chat \
   --mode expertkit \
-  --controller-endpoint 10.0.0.10:5002 \
+  --controller-endpoint 192.0.2.10:5002 \
   --dataset-path /datasets/ShareGPT.json \
   --device-platform cuda \
   --device-ids 0 \
@@ -261,13 +261,13 @@ configured:
 
 ```bash
 EK_QWEN_MODEL_PATH=/models/Qwen3-30B-A3B \
-EK_QWEN_CONTROLLER_ENDPOINT=10.0.0.10:5002 \
+EK_QWEN_CONTROLLER_ENDPOINT=192.0.2.10:5002 \
 EK_BENCHMARK_DATASET_PATH=/datasets/ShareGPT.json \
 uv run --package expertkit-torch pytest \
   ek-integration/expertkit_torch/tests/test_deployment_benchmark.py -m qwen
 
 EK_DEEPSEEK_V2_MODEL_PATH=/models/DeepSeek-V2-Lite-Chat \
-EK_DEEPSEEK_V2_CONTROLLER_ENDPOINT=10.0.0.10:5002 \
+EK_DEEPSEEK_V2_CONTROLLER_ENDPOINT=192.0.2.10:5002 \
 EK_BENCHMARK_DATASET_PATH=/datasets/ShareGPT.json \
 uv run --package expertkit-torch pytest \
   ek-integration/expertkit_torch/tests/test_deployment_benchmark.py -m deepseek_v2

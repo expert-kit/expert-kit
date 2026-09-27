@@ -36,7 +36,7 @@ def test_config_cannot_override_the_framework_device(tmp_path, monkeypatch) -> N
     path = tmp_path / "transport.json"
     path.write_text(json.dumps({"transfer_engine": {"device": "cuda:0"}}))
     monkeypatch.setenv("EK_TRANSPORT_CONFIG", str(path))
-    with pytest.raises(ValueError, match="unsupported.*device"):
+    with pytest.raises(ValueError, match=r"unsupported.*device"):
         runtimes_from_environment(torch.device("cpu"))
 
 

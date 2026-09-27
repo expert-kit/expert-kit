@@ -30,8 +30,8 @@ from expertkit_worker.backends import (
     ComputeBackend,
 )
 from expertkit_worker.execution import WorkerExecutor
-from expertkit_worker.factory import _create_device_wiring
 from expertkit_worker.execution import executor as executor_module
+from expertkit_worker.factory import _create_device_wiring
 from expertkit_worker.observability.api import WorkerMetrics
 
 

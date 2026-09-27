@@ -229,9 +229,7 @@ class TransferArena:
                 (spec.max_batch_tokens, spec.hidden_dim),
             ),
             copy_event=(
-                accelerator_for(self._device).create_event()
-                if self._device.type != "cpu"
-                else None
+                accelerator_for(self._device).create_event() if self._device.type != "cpu" else None
             ),
         )
 

@@ -40,7 +40,8 @@ def _blocking_ownership_error(
         retryable=False,
         unsafe_tensor_ownership=True,
         diagnostic=(
-            f"{diagnostic}; caller-owned accelerator storage is retained and the process must restart"
+            f"{diagnostic}; caller-owned accelerator storage is retained "
+            "and the process must restart"
         ),
     )
 
