@@ -14,6 +14,9 @@ from expertkit_transport.errors import TransportError, TransportErrorCode
 from expertkit_transport.tracing import TraceAttribute, TraceContext, TraceSpan
 from expertkit_transport.transports.base import BatchBufferConfig, ReceivedBatch
 from expertkit_transport.transports.grpc.worker_buffers import GrpcWorkerBatchBuffers
+from expertkit_transport.transports.transfer_engine.worker_buffers import (
+    TransferEngineWorkerBatchBuffers,
+)
 
 from expertkit_worker.backends import (
     BackendBatch,
@@ -186,6 +189,35 @@ def worker_batch(dtype: torch.dtype = torch.float32) -> WorkerBatch:
         routing_weights=torch.tensor([[0.25, 0.0], [0.75, 0.25]], dtype=torch.float32),
         distinct_expert_ids=(1, 3),
     )
+
+
+def test_transfer_engine_slot_borrows_registered_inputs_and_output_until_release() -> None:
+    batch = worker_batch()
+    expected = batch.hidden_states * 2
+    destination = torch.empty_like(batch.hidden_states)
+
+    class ArenaReceivedBatch(FakeReceivedBatch):
+        @property
+        def output_destination(self) -> torch.Tensor:
+            return destination
+
+    spec = BatchBufferConfig(4, 3, 2, torch.float32, torch.device("cpu"))
+    buffers = TransferEngineWorkerBatchBuffers(spec, experts_per_layer=8)
+    slot = CpuExecutionSlot(spec, buffers, runtime=CpuWorkerRuntime(spec.device))
+    backend = DoublingBackend()
+    received = ArenaReceivedBatch(batch)
+    result = slot.execute(received, backend)
+    try:
+        assert received.input_released
+        assert backend.input_pointers == [batch.hidden_states.data_ptr()]
+        assert backend.output_pointers == [destination.data_ptr()]
+        torch.testing.assert_close(result.output, expected)
+        assert slot.busy
+        with pytest.raises(RuntimeError, match="already in use"):
+            slot.execute(ArenaReceivedBatch(worker_batch()), backend)
+    finally:
+        result.release()
+        slot.close()
 
 
 def make_slot(

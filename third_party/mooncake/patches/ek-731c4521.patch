@@ -1,0 +1,708 @@
+diff --git a/mooncake-integration/transfer_engine/transfer_engine_py.cpp b/mooncake-integration/transfer_engine/transfer_engine_py.cpp
+index 58eebe33..a5e69d22 100644
+--- a/mooncake-integration/transfer_engine/transfer_engine_py.cpp
++++ b/mooncake-integration/transfer_engine/transfer_engine_py.cpp
+@@ -17,6 +17,7 @@
+ #include <cassert>
+ #include <numeric>
+ #include <fstream>
++#include <stdexcept>
+ 
+ #include <pybind11/stl.h>
+ #include "transport/rpc_communicator/rpc_interface.h"
+@@ -190,6 +191,17 @@ int TransferEnginePy::initializeExt(const char* local_hostname,
+     std::string proto = protocol ? std::string(protocol) : "";
+     std::string conn_string = buildConnString(metadata_type, metadata_server);
+ 
++#ifdef USE_INTRA_NVLINK
++    const bool use_intra_nvlink = (proto == "nvlink_intra");
++#else
++    const bool use_intra_nvlink = false;
++    if (proto == "nvlink_intra") {
++        LOG(ERROR) << "Protocol 'nvlink_intra' was requested but this build "
++                      "does not include USE_INTRA_NVLINK";
++        return -1;
++    }
++#endif
++
+     auto device_name_safe = device_name ? std::string(device_name) : "";
+     auto device_filter = buildDeviceFilter(device_name_safe);
+ 
+@@ -218,7 +230,8 @@ int TransferEnginePy::initializeExt(const char* local_hostname,
+                   << " devices.";
+     }
+ #else
+-    engine_ = std::make_unique<TransferEngine>(true, device_filter);
++    engine_ =
++        std::make_unique<TransferEngine>(!use_intra_nvlink, device_filter);
+ #endif
+ 
+     if (getenv("MC_LEGACY_RPC_PORT_BINDING")) {
+@@ -244,7 +257,7 @@ int TransferEnginePy::initializeExt(const char* local_hostname,
+             return -1;
+         }
+         LOG(INFO) << "EFA transport installed successfully";
+-    } else {
++    } else if (!use_intra_nvlink) {
+         // For non-EFA protocols (e.g. TCP), manually install TCP transport
+         // since auto_discover is disabled to prevent RDMA installation
+         // (RDMA QP creation fails on EFA devices).
+@@ -267,7 +280,7 @@ int TransferEnginePy::initializeExt(const char* local_hostname,
+             return -1;
+         }
+         LOG(INFO) << "CXI transport installed successfully";
+-    } else {
++    } else if (!use_intra_nvlink) {
+         // For non-EFA protocols (e.g. TCP), manually install TCP transport
+         // since auto_discover is disabled to prevent RDMA installation
+         // (RDMA QP creation fails on EFA devices).
+@@ -282,6 +295,21 @@ int TransferEnginePy::initializeExt(const char* local_hostname,
+     }
+ #endif
+ 
++#ifdef USE_INTRA_NVLINK
++    if (use_intra_nvlink) {
++        LOG(INFO) << "Installing nvlink_intra as the only configured "
++                     "data transport";
++        auto transport = engine_->installTransport("nvlink_intra", nullptr);
++        if (!transport) {
++            LOG(ERROR) << "Failed to install requested nvlink_intra "
++                          "transport; refusing silent fallback";
++            engine_.reset();
++            return -1;
++        }
++        LOG(INFO) << "nvlink_intra transport installed successfully";
++    }
++#endif
++
+     free_list_.resize(kSlabSizeKBTabLen);
+     return 0;
+ }
+@@ -482,11 +510,10 @@ int TransferEnginePy::transferSync(const char* target_hostname,
+             if (!segment_status.ok()) {
+                 LOG(WARNING)
+                     << "submitTransfer failed with target " << target_hostname
+-                    << ", CheckSegmentStatus not ok, ready to closeSegment";
++                    << ", CheckSegmentStatus not ok, invalidating local cache";
+                 std::lock_guard<std::mutex> guard(mutex_);
+-                engine_->closeSegment(handle);
+-                engine_->getMetadata()->removeSegmentDesc(target_hostname);
+                 handle_map_.erase(target_hostname);
++                engine_->invalidateLocalSegment(target_hostname, handle);
+             }
+             return -1;
+         }
+@@ -547,8 +574,6 @@ int TransferEnginePy::batchTransferSync(
+     }
+ 
+     const int max_retry = engine_->numContexts() + 1;
+-    auto start_ts = getCurrentTimeInNano();
+-    auto total_length = std::accumulate(lengths.begin(), lengths.end(), 0ull);
+     auto batch_size = buffers.size();
+     std::vector<TransferRequest> entries;
+     for (size_t i = 0; i < batch_size; ++i) {
+@@ -581,45 +606,54 @@ int TransferEnginePy::batchTransferSync(
+             if (!segment_status.ok()) {
+                 LOG(WARNING)
+                     << "submitTransfer failed with target " << target_hostname
+-                    << ", CheckSegmentStatus not ok, ready to closeSegment";
++                    << ", CheckSegmentStatus not ok, invalidating local cache";
+                 std::lock_guard<std::mutex> guard(mutex_);
+-                engine_->closeSegment(handle);
+-                engine_->getMetadata()->removeSegmentDesc(target_hostname);
+                 handle_map_.erase(target_hostname);
++                engine_->invalidateLocalSegment(target_hostname, handle);
+             }
+             return -1;
+         }
+ 
+         TransferStatus status;
+-        bool completed = false;
+-        bool already_freed = false;
+-        while (!completed) {
++        bool retry_transfer = false;
++        bool terminal_wait_logged = false;
++        while (!retry_transfer) {
+             Status s = engine_->getBatchTransferStatus(batch_id, status);
+             LOG_ASSERT(s.ok());
+             if (status.s == TransferStatusEnum::COMPLETED) {
+-                engine_->freeBatchID(batch_id);
+-                return 0;
+-            } else if (status.s == TransferStatusEnum::FAILED) {
+-                engine_->freeBatchID(batch_id);
+-                already_freed = true;
+-                completed = true;
+-            } else if (status.s == TransferStatusEnum::TIMEOUT) {
+-                LOG(INFO) << "Sync data transfer timeout";
+-                completed = true;
+-            }
+-            auto current_ts = getCurrentTimeInNano();
+-            const int64_t timeout =
+-                transfer_timeout_nsec_ + total_length;  // 1GiB per second
+-            if (current_ts - start_ts > timeout) {
+-                LOG(INFO) << "Sync batch data transfer timeout after "
+-                          << current_ts - start_ts << "ns";
+-                // TODO: as @doujiang24 mentioned, early free(while there are
+-                // still waiting tasks) the batch_id may fail and cause memory
+-                // leak(a known issue).
+-                if (!already_freed) {
+-                    engine_->freeBatchID(batch_id);
++                Status free_status = engine_->freeBatchID(batch_id);
++                if (free_status.ok()) {
++                    return 0;
++                }
++                // A status must not be exposed to Python as terminal while
++                // the engine still owns tasks in this batch.  Keep polling
++                // instead of allowing callers to reuse registered buffers.
++                if (!terminal_wait_logged) {
++                    LOG(ERROR) << "Completed batch is still busy: "
++                               << free_status.ToString();
++                    terminal_wait_logged = true;
++                }
++            } else if (status.s == TransferStatusEnum::FAILED ||
++                       status.s == TransferStatusEnum::TIMEOUT) {
++                // TIMEOUT currently means that the timeout was observed; it
++                // does not necessarily cancel or drain in-flight work.  The
++                // authoritative terminal predicate is therefore whether the
++                // engine accepts freeBatchID().  BatchBusy means we must keep
++                // polling and must not return control to a caller that could
++                // recycle the registered memory.
++                Status free_status = engine_->freeBatchID(batch_id);
++                if (free_status.ok()) {
++                    if (status.s == TransferStatusEnum::TIMEOUT) {
++                        LOG(WARNING) << "Batch reached a drained timeout state";
++                    }
++                    retry_transfer = true;
++                } else if (!terminal_wait_logged) {
++                    LOG(WARNING)
++                        << "Observed transfer failure/timeout while batch is "
++                           "still busy; waiting for the engine to drain it: "
++                        << free_status.ToString();
++                    terminal_wait_logged = true;
+                 }
+-                return -1;
+             }
+         }
+     }
+@@ -845,6 +879,18 @@ int TransferEnginePy::unregisterMemory(uintptr_t buffer_addr) {
+ 
+ #ifdef USE_CUDA
+ 
++void TransferEnginePy::flushGPUDirectWrites() {
++    pybind11::gil_scoped_release release;
++    cudaError_t error = cudaDeviceFlushGPUDirectRDMAWrites(
++        cudaFlushGPUDirectRDMAWritesTargetCurrentDevice,
++        cudaFlushGPUDirectRDMAWritesToOwner);
++    if (error != cudaSuccess) {
++        throw std::runtime_error(
++            std::string("cudaDeviceFlushGPUDirectRDMAWrites failed: ") +
++            cudaGetErrorString(error));
++    }
++}
++
+ /**
+  * @brief Context structure for CUDA-stream-synchronized transfers.
+  *
+@@ -1064,6 +1110,21 @@ uintptr_t TransferEnginePy::getFirstBufferAddress(
+     return segment_desc->buffers[0].addr;
+ }
+ 
++int TransferEnginePy::invalidateDrainedNvlinkIntraSegment(
++    const std::string& segment_name) {
++    Transport::SegmentHandle expected_handle =
++        (Transport::SegmentHandle)-1;
++    {
++        std::lock_guard<std::mutex> guard(mutex_);
++        auto handle = handle_map_.find(segment_name);
++        if (handle != handle_map_.end()) {
++            expected_handle = handle->second;
++            handle_map_.erase(handle);
++        }
++    }
++    return engine_->invalidateLocalSegment(segment_name, expected_handle);
++}
++
+ std::string TransferEnginePy::getLocalTopology(const char* device_name) {
+     pybind11::gil_scoped_release release;
+     auto device_name_safe = device_name ? std::string(device_name) : "";
+@@ -1136,15 +1197,23 @@ PYBIND11_MODULE(engine, m) {
+ 
+ #ifdef USE_INTRA_NVLINK
+     m.attr("SUPPORT_INTRA_NVLINK") = true;
++    m.attr("EK_INTRA_NVLINK_REGISTRATION_REFCOUNT") = true;
++    m.attr("EK_FORCE_CONFIGURED_TRANSPORT") = true;
+ #else
+     m.attr("SUPPORT_INTRA_NVLINK") = false;
++    m.attr("EK_INTRA_NVLINK_REGISTRATION_REFCOUNT") = false;
++    m.attr("EK_FORCE_CONFIGURED_TRANSPORT") = false;
+ #endif
+ 
+ #ifdef USE_CUDA
+     m.attr("SUPPORT_CUDA") = true;
++    m.attr("EK_HAS_GPUDIRECT_ACQUIRE") = true;
+ #else
+     m.attr("SUPPORT_CUDA") = false;
++    m.attr("EK_HAS_GPUDIRECT_ACQUIRE") = false;
+ #endif
++    m.attr("EK_SAFE_TERMINAL_BATCH_SYNC") = true;
++    m.attr("EK_DRAINED_NVLINK_INTRA_LOCAL_INVALIDATION") = true;
+ 
+     py::enum_<TransferEnginePy::TransferOpcode> transfer_opcode(
+         m, "TransferOpcode", py::arithmetic());
+@@ -1230,6 +1299,10 @@ PYBIND11_MODULE(engine, m) {
+                  py::arg("target_hostname"), py::arg("buffers"),
+                  py::arg("peer_buffer_addresses"), py::arg("lengths"),
+                  py::arg("stream_ptr") = 0, py::arg("transport_hint") = "")
++            .def("flush_gpudirect_writes",
++                 &TransferEnginePy::flushGPUDirectWrites,
++                 "Acquire visibility of GPUDirect RDMA writes targeting the "
++                 "current CUDA device")
+ #endif
+             .def("get_batch_transfer_status",
+                  &TransferEnginePy::getBatchTransferStatus)
+@@ -1257,6 +1330,12 @@ PYBIND11_MODULE(engine, m) {
+                  py::arg("device_name") = nullptr)
+             .def("get_first_buffer_address",
+                  &TransferEnginePy::getFirstBufferAddress)
++            .def("invalidate_drained_nvlink_intra_segment",
++                 &TransferEnginePy::invalidateDrainedNvlinkIntraSegment,
++                 py::arg("target_session"),
++                 "After the caller drains a forced nvlink_intra target "
++                 "session, close its CUDA IPC mappings and evict only this "
++                 "process's cached descriptor.")
+             .def("warmup_efa_segment", &TransferEnginePy::warmupEfaSegment,
+                  py::arg("segment_name"))
+             .def("get_notifies", &TransferEnginePy::getNotifies)
+diff --git a/mooncake-integration/transfer_engine/transfer_engine_py.h b/mooncake-integration/transfer_engine/transfer_engine_py.h
+index d4af71af..e503faac 100644
+--- a/mooncake-integration/transfer_engine/transfer_engine_py.h
++++ b/mooncake-integration/transfer_engine/transfer_engine_py.h
+@@ -154,6 +154,10 @@ class TransferEnginePy {
+         const std::vector<size_t> &lengths, uintptr_t stream_ptr = 0,
+         const std::string &transport_hint = "");
+ 
++    // Acquire visibility of writes issued to the current CUDA device by a
++    // GPUDirect RDMA peer before the application consumes the destination.
++    void flushGPUDirectWrites();
++
+     void batchTransferReadOnCuda(
+         const char *target_hostname, const std::vector<uintptr_t> &buffers,
+         const std::vector<uintptr_t> &peer_buffer_addresses,
+@@ -163,6 +167,9 @@ class TransferEnginePy {
+ 
+     uintptr_t getFirstBufferAddress(const std::string &segment_name);
+ 
++    int invalidateDrainedNvlinkIntraSegment(
++        const std::string &segment_name);
++
+     // Pre-connect every (local_ctx, peer_nic) pair for `segment_name` so the
+     // first submitTransfer does not stall on handshake RPC + fi_av_insert.
+     // No-op on non-EFA builds or when the EFA transport is not installed.
+diff --git a/mooncake-transfer-engine/include/multi_transport.h b/mooncake-transfer-engine/include/multi_transport.h
+index 541a7391..93f6917e 100644
+--- a/mooncake-transfer-engine/include/multi_transport.h
++++ b/mooncake-transfer-engine/include/multi_transport.h
+@@ -59,6 +59,8 @@ class MultiTransport {
+ 
+     Transport *getTransport(const std::string &proto);
+ 
++    int invalidateRemoteSegment(Transport::SegmentID segment_id);
++
+     /**
+      * @brief Check if TCP is the only installed transport.
+      *
+diff --git a/mooncake-transfer-engine/include/transfer_engine.h b/mooncake-transfer-engine/include/transfer_engine.h
+index ca83bce3..1f7629a8 100644
+--- a/mooncake-transfer-engine/include/transfer_engine.h
++++ b/mooncake-transfer-engine/include/transfer_engine.h
+@@ -105,6 +105,10 @@ class TransferEngine {
+ 
+     int closeSegment(SegmentHandle handle);
+ 
++    int invalidateLocalSegment(
++        const std::string& segment_name,
++        SegmentHandle expected_handle = (SegmentHandle)-1);
++
+     int removeLocalSegment(const std::string& segment_name);
+ 
+     int registerLocalMemory(void* addr, size_t length,
+diff --git a/mooncake-transfer-engine/include/transfer_engine_impl.h b/mooncake-transfer-engine/include/transfer_engine_impl.h
+index a4048514..5f060e8e 100644
+--- a/mooncake-transfer-engine/include/transfer_engine_impl.h
++++ b/mooncake-transfer-engine/include/transfer_engine_impl.h
+@@ -112,6 +112,9 @@ class TransferEngineImpl {
+ 
+     int closeSegment(SegmentHandle handle);
+ 
++    int invalidateLocalSegment(const std::string& segment_name,
++                               SegmentHandle expected_handle);
++
+     int removeLocalSegment(const std::string& segment_name);
+ 
+     int registerLocalMemory(void* addr, size_t length,
+diff --git a/mooncake-transfer-engine/include/transfer_metadata.h b/mooncake-transfer-engine/include/transfer_metadata.h
+index 0761a2c9..e28ee2de 100644
+--- a/mooncake-transfer-engine/include/transfer_metadata.h
++++ b/mooncake-transfer-engine/include/transfer_metadata.h
+@@ -206,6 +206,10 @@ class TransferMetadata {
+ 
+     SegmentID getSegmentID(const std::string &segment_name);
+ 
++    // Local-cache lookup only. Never fetches from or mutates the authoritative
++    // metadata backend. Returns -1 when the name is not cached.
++    SegmentID getCachedSegmentID(const std::string &segment_name);
++
+     int syncSegmentCache(const std::string &segment_name);
+ 
+     int removeSegmentDesc(const std::string &segment_name);
+diff --git a/mooncake-transfer-engine/include/transport/intranode_nvlink_transport/intranode_nvlink_transport.h b/mooncake-transfer-engine/include/transport/intranode_nvlink_transport/intranode_nvlink_transport.h
+index 12eab425..6741908a 100644
+--- a/mooncake-transfer-engine/include/transport/intranode_nvlink_transport/intranode_nvlink_transport.h
++++ b/mooncake-transfer-engine/include/transport/intranode_nvlink_transport/intranode_nvlink_transport.h
+@@ -11,7 +11,7 @@
+ #include <mutex>
+ #include <queue>
+ #include <string>
+-#include <unordered_set>
++#include <unordered_map>
+ #include <vector>
+ #include <utility>
+ 
+@@ -39,6 +39,8 @@ class IntraNodeNvlinkTransport : public Transport {
+     Status getTransferStatus(BatchID batch_id, size_t task_id,
+                              TransferStatus& status) override;
+ 
++    int invalidateRemoteSegment(SegmentID segment_id) override;
++
+     static void* allocatePinnedLocalMemory(size_t length);
+ 
+     static void freePinnedLocalMemory(void* addr);
+@@ -71,6 +73,7 @@ class IntraNodeNvlinkTransport : public Transport {
+     struct OpenedShmEntry {
+         void* shm_addr;
+         uint64_t length;
++        int device_id;
+     };
+ 
+     std::unordered_map<std::pair<uint64_t, uint64_t>, OpenedShmEntry, PairHash>
+@@ -79,7 +82,9 @@ class IntraNodeNvlinkTransport : public Transport {
+     // bool use_fabric_mem_;
+ 
+     std::mutex register_mutex_;
+-    std::unordered_set<uint64_t> registered_base_addrs_;
++    // Logical registrations may be slices of the same cudaMalloc allocation.
++    // Keep the allocation metadata published until its final logical owner exits.
++    std::unordered_map<uint64_t, size_t> registered_base_addrs_;
+ };
+ 
+ }  // namespace mooncake
+diff --git a/mooncake-transfer-engine/include/transport/transport.h b/mooncake-transfer-engine/include/transport/transport.h
+index 10010821..b79a9671 100644
+--- a/mooncake-transfer-engine/include/transport/transport.h
++++ b/mooncake-transfer-engine/include/transport/transport.h
+@@ -402,6 +402,13 @@ class Transport {
+     }
+     virtual Status CheckStatus(SegmentID sid) { return Status::OK(); }
+ 
++    // Drop transport-local state for a remote segment. Callers must ensure
++    // that no transfer for this segment is active before invalidating it.
++    virtual int invalidateRemoteSegment(SegmentID sid) {
++        (void)sid;
++        return 0;
++    }
++
+    protected:
+     virtual int install(std::string &local_server_name,
+                         std::shared_ptr<TransferMetadata> meta,
+diff --git a/mooncake-transfer-engine/src/multi_transport.cpp b/mooncake-transfer-engine/src/multi_transport.cpp
+index 81cb0174..a35b375a 100644
+--- a/mooncake-transfer-engine/src/multi_transport.cpp
++++ b/mooncake-transfer-engine/src/multi_transport.cpp
+@@ -612,6 +612,15 @@ bool MultiTransport::isTcpOnly() const {
+     return transport_map_.size() == 1 && transport_map_.count("tcp") == 1;
+ }
+ 
++int MultiTransport::invalidateRemoteSegment(Transport::SegmentID segment_id) {
++    int first_error = 0;
++    for (auto& entry : transport_map_) {
++        int ret = entry.second->invalidateRemoteSegment(segment_id);
++        if (ret != 0 && first_error == 0) first_error = ret;
++    }
++    return first_error;
++}
++
+ std::vector<Transport*> MultiTransport::listTransports() {
+     std::vector<Transport*> transport_list;
+     for (auto& entry : transport_map_)
+diff --git a/mooncake-transfer-engine/src/transfer_engine.cpp b/mooncake-transfer-engine/src/transfer_engine.cpp
+index b9661478..1d790d63 100644
+--- a/mooncake-transfer-engine/src/transfer_engine.cpp
++++ b/mooncake-transfer-engine/src/transfer_engine.cpp
+@@ -143,6 +143,11 @@ int TransferEngine::closeSegment(SegmentHandle handle) {
+     return impl_->closeSegment(handle);
+ }
+ 
++int TransferEngine::invalidateLocalSegment(
++    const std::string& segment_name, SegmentHandle expected_handle) {
++    return impl_->invalidateLocalSegment(segment_name, expected_handle);
++}
++
+ int TransferEngine::removeLocalSegment(const std::string& segment_name) {
+     return impl_->removeLocalSegment(segment_name);
+ }
+@@ -533,6 +538,20 @@ int TransferEngine::closeSegment(SegmentHandle handle) {
+         return impl_->closeSegment(handle);
+ }
+ 
++int TransferEngine::invalidateLocalSegment(
++    const std::string& segment_name, SegmentHandle expected_handle) {
++    if (use_tent_) {
++        SegmentHandle handle = expected_handle;
++        if (handle == (SegmentHandle)-1) {
++            auto open_status = impl_tent_->openSegment(handle, segment_name);
++            if (!open_status.ok()) return (int)open_status.code();
++        }
++        auto close_status = impl_tent_->closeSegment(handle);
++        return (int)close_status.code();
++    }
++    return impl_->invalidateLocalSegment(segment_name, expected_handle);
++}
++
+ int TransferEngine::removeLocalSegment(const std::string& segment_name) {
+     if (use_tent_)
+         return 0;
+diff --git a/mooncake-transfer-engine/src/transfer_engine_impl.cpp b/mooncake-transfer-engine/src/transfer_engine_impl.cpp
+index fc1cc2f9..65c69229 100644
+--- a/mooncake-transfer-engine/src/transfer_engine_impl.cpp
++++ b/mooncake-transfer-engine/src/transfer_engine_impl.cpp
+@@ -569,6 +569,49 @@ int TransferEngineImpl::closeSegment(Transport::SegmentHandle handle) {
+     return 0;
+ }
+ 
++int TransferEngineImpl::invalidateLocalSegment(
++    const std::string& segment_name,
++    Transport::SegmentHandle expected_handle) {
++    if (segment_name.empty()) return ERR_INVALID_ARGUMENT;
++    std::string trimmed_segment_name = segment_name;
++    while (!trimmed_segment_name.empty() && trimmed_segment_name[0] == '/')
++        trimmed_segment_name.erase(0, 1);
++    if (trimmed_segment_name.empty()) return ERR_INVALID_ARGUMENT;
++
++    const SegmentID missing_handle = (SegmentID)-1;
++    SegmentID cached_handle =
++        metadata_->getCachedSegmentID(trimmed_segment_name);
++    std::vector<SegmentID> handles_to_invalidate;
++    if (cached_handle != missing_handle) {
++        handles_to_invalidate.push_back(cached_handle);
++    }
++    if (expected_handle != (Transport::SegmentHandle)-1 &&
++        expected_handle != cached_handle) {
++        handles_to_invalidate.push_back(expected_handle);
++    }
++    if (handles_to_invalidate.empty()) return 0;
++
++    for (SegmentID handle : handles_to_invalidate) {
++        if (handle == LOCAL_SEGMENT_ID) {
++            LOG(ERROR) << "Refusing to invalidate the local segment "
++                       << trimmed_segment_name;
++            return ERR_INVALID_ARGUMENT;
++        }
++        int ret = multi_transports_->invalidateRemoteSegment(handle);
++        if (ret != 0) {
++            LOG(ERROR) << "Failed to invalidate transport state for segment "
++                       << trimmed_segment_name << " (#" << handle
++                       << "); retaining the local descriptor cache";
++            return ret;
++        }
++    }
++
++    // This is deliberately local-only. removeSegmentDesc() may delete the
++    // remote owner's authoritative etcd/Redis metadata and must not be used
++    // for client-side generation invalidation.
++    return metadata_->removeLocalSegment(trimmed_segment_name);
++}
++
+ int TransferEngineImpl::removeLocalSegment(const std::string& segment_name) {
+     if (segment_name.empty()) return ERR_INVALID_ARGUMENT;
+     std::string trimmed_segment_name = segment_name;
+diff --git a/mooncake-transfer-engine/src/transfer_metadata.cpp b/mooncake-transfer-engine/src/transfer_metadata.cpp
+index 59dc6c35..0ea9dd82 100644
+--- a/mooncake-transfer-engine/src/transfer_metadata.cpp
++++ b/mooncake-transfer-engine/src/transfer_metadata.cpp
+@@ -1224,6 +1224,14 @@ TransferMetadata::SegmentID TransferMetadata::getSegmentID(
+     return id;
+ }
+ 
++TransferMetadata::SegmentID TransferMetadata::getCachedSegmentID(
++    const std::string &segment_name) {
++    RWSpinlock::ReadGuard guard(segment_lock_);
++    auto iter = segment_name_to_id_map_.find(segment_name);
++    if (iter == segment_name_to_id_map_.end()) return (SegmentID)-1;
++    return iter->second;
++}
++
+ int TransferMetadata::updateLocalSegmentDesc(uint64_t segment_id) {
+     std::shared_ptr<SegmentDesc> desc;
+     {
+diff --git a/mooncake-transfer-engine/src/transport/intranode_nvlink_transport/intranode_nvlink_transport.cpp b/mooncake-transfer-engine/src/transport/intranode_nvlink_transport/intranode_nvlink_transport.cpp
+index 52ca987a..688bcc16 100644
+--- a/mooncake-transfer-engine/src/transport/intranode_nvlink_transport/intranode_nvlink_transport.cpp
++++ b/mooncake-transfer-engine/src/transport/intranode_nvlink_transport/intranode_nvlink_transport.cpp
+@@ -395,10 +395,77 @@ IntraNodeNvlinkTransport::IntraNodeNvlinkTransport() {}
+ // }
+ 
+ IntraNodeNvlinkTransport::~IntraNodeNvlinkTransport() {
+-    for (auto &entry : remap_entries_) {
+-        cudaIpcCloseMemHandle(entry.second.shm_addr);
++    std::vector<SegmentID> segment_ids;
++    for (const auto &entry : remap_entries_) {
++        if (std::find(segment_ids.begin(), segment_ids.end(), entry.first.first) ==
++            segment_ids.end()) {
++            segment_ids.push_back(entry.first.first);
++        }
++    }
++    for (SegmentID segment_id : segment_ids) {
++        invalidateRemoteSegment(segment_id);
++    }
++    if (!remap_entries_.empty()) {
++        LOG(ERROR) << "IntraNodeNvlinkTransport: " << remap_entries_.size()
++                   << " CUDA IPC mappings could not be closed during teardown";
+     }
+-    remap_entries_.clear();
++}
++
++int IntraNodeNvlinkTransport::invalidateRemoteSegment(SegmentID segment_id) {
++    RWSpinlock::WriteGuard guard(remap_lock_);
++    int saved_device = -1;
++    cudaError_t saved_device_error = cudaGetDevice(&saved_device);
++    int first_error = 0;
++    size_t closed_count = 0;
++
++    for (auto entry = remap_entries_.begin(); entry != remap_entries_.end();) {
++        if (entry->first.first != segment_id) {
++            ++entry;
++            continue;
++        }
++
++        if (entry->second.device_id >= 0) {
++            cudaError_t set_error = cudaSetDevice(entry->second.device_id);
++            if (set_error != cudaSuccess) {
++                LOG(ERROR) << "IntraNodeNvlinkTransport: cudaSetDevice failed "
++                              "while invalidating segment "
++                           << segment_id << ": "
++                           << cudaGetErrorString(set_error);
++                first_error = -1;
++                ++entry;
++                continue;
++            }
++        }
++
++        cudaError_t close_error =
++            cudaIpcCloseMemHandle(entry->second.shm_addr);
++        if (close_error != cudaSuccess) {
++            LOG(ERROR) << "IntraNodeNvlinkTransport: failed to close CUDA IPC "
++                          "mapping for segment "
++                       << segment_id << ": "
++                       << cudaGetErrorString(close_error);
++            first_error = -1;
++            ++entry;
++            continue;
++        }
++        entry = remap_entries_.erase(entry);
++        ++closed_count;
++    }
++
++    if (saved_device_error == cudaSuccess && saved_device >= 0) {
++        cudaError_t restore_error = cudaSetDevice(saved_device);
++        if (restore_error != cudaSuccess) {
++            LOG(ERROR) << "IntraNodeNvlinkTransport: failed to restore CUDA "
++                          "device after invalidating segment "
++                       << segment_id << ": "
++                       << cudaGetErrorString(restore_error);
++            first_error = -1;
++        }
++    }
++
++    LOG(INFO) << "IntraNodeNvlinkTransport: invalidated segment " << segment_id
++              << ", closed " << closed_count << " CUDA IPC mapping(s)";
++    return first_error;
+ }
+ 
+ int IntraNodeNvlinkTransport::install(
+@@ -654,8 +721,10 @@ int IntraNodeNvlinkTransport::registerLocalMemory(void *addr, size_t length,
+         return -1;
+     }
+ 
+-    // Skip if this cudaMalloc block is already registered
+-    if (registered_base_addrs_.count((uint64_t)base_ptr)) {
++    // Multiple logical buffers can share one framework allocator segment.
++    auto registered = registered_base_addrs_.find((uint64_t)base_ptr);
++    if (registered != registered_base_addrs_.end()) {
++        ++registered->second;
+         return 0;
+     }
+ 
+@@ -674,7 +743,7 @@ int IntraNodeNvlinkTransport::registerLocalMemory(void *addr, size_t length,
+     desc.shm_name = serializeBinaryData(&handle, sizeof(cudaIpcMemHandle_t));
+     int rc = metadata_->addLocalMemoryBuffer(desc, true);
+     if (rc == 0) {
+-        registered_base_addrs_.insert((uint64_t)base_ptr);
++        registered_base_addrs_.emplace((uint64_t)base_ptr, 1);
+     }
+     return rc;
+ }
+@@ -696,11 +765,22 @@ int IntraNodeNvlinkTransport::unregisterLocalMemory(void *addr,
+             << "). Memory may already be freed, using provided address.";
+     }
+ 
+-    {
+-        std::lock_guard<std::mutex> lock(register_mutex_);
+-        registered_base_addrs_.erase((uint64_t)key_ptr);
++    std::lock_guard<std::mutex> lock(register_mutex_);
++    auto registered = registered_base_addrs_.find((uint64_t)key_ptr);
++    if (registered != registered_base_addrs_.end() &&
++        registered->second > 1) {
++        --registered->second;
++        return 0;
+     }
+-    return metadata_->removeLocalMemoryBuffer(key_ptr, update_metadata);
++
++    // Serialize the final metadata removal with registration.  If removal
++    // fails, retain one reference so a later unregister can retry without a
++    // concurrent register publishing a duplicate descriptor.
++    int rc = metadata_->removeLocalMemoryBuffer(key_ptr, update_metadata);
++    if (rc == 0 && registered != registered_base_addrs_.end()) {
++        registered_base_addrs_.erase(registered);
++    }
++    return rc;
+ }
+ 
+ int IntraNodeNvlinkTransport::relocateSharedMemoryAddress(uint64_t &dest_addr,
+@@ -740,6 +820,14 @@ int IntraNodeNvlinkTransport::relocateSharedMemoryAddress(uint64_t &dest_addr,
+                     OpenedShmEntry shm_entry;
+                     shm_entry.shm_addr = shm_addr;
+                     shm_entry.length = entry.length;
++                    err = cudaGetDevice(&shm_entry.device_id);
++                    if (err != cudaSuccess) {
++                        LOG(ERROR) << "IntraNodeNvlinkTransport: cudaGetDevice "
++                                      "failed after opening CUDA IPC handle: "
++                                   << cudaGetErrorString(err);
++                        cudaIpcCloseMemHandle(shm_addr);
++                        return -1;
++                    }
+                     remap_entries_[std::make_pair(target_id, entry.addr)] =
+                         shm_entry;
+                 } else {
+diff --git a/mooncake-wheel/pyproject.toml b/mooncake-wheel/pyproject.toml
+index cff69ce9..6aa92a75 100644
+--- a/mooncake-wheel/pyproject.toml
++++ b/mooncake-wheel/pyproject.toml
+@@ -22,7 +22,7 @@ build-backend = "setuptools.build_meta"
+ 
+ [project]
+ name = "mooncake-transfer-engine"
+-version = "0.3.11.post1"
++version = "0.3.12.dev20260811+ek.731c4521"
+ description = "A KVCache-centric Disaggregated Architecture for large-scale LLM inference and training."
+ authors = [
+     { name = "Mooncake Authors" }

@@ -31,6 +31,14 @@ class FakeClient:
         self.closed = True
 
 
+class FakeRuntime:
+    async def start(self) -> None:
+        pass
+
+    async def close(self) -> None:
+        pass
+
+
 class FakeModel:
     def __init__(self) -> None:
         self.device: object | None = None
@@ -89,10 +97,12 @@ def test_expertkit_load_uses_real_layer_ids_and_restores_transformers_class(
 
     monkeypatch.setattr(loader.AutoModelForCausalLM, "from_pretrained", from_pretrained)
 
+    transport_runtime = FakeRuntime()
     loaded = loader.load_model(
         "/models/qwen",
         controller_endpoint="127.0.0.1:5002",
         device="cpu",
+        transport_runtime=transport_runtime,
     )
 
     assert modeling_qwen3_moe.Qwen3MoeSparseMoeBlock is original
@@ -113,6 +123,9 @@ def test_expertkit_load_uses_real_layer_ids_and_restores_transformers_class(
         "experts_per_layer": 4,
         "hidden_dim": 4,
         "top_k": 2,
+        "timeout_seconds": 6.0,
+        "transport_runtime": transport_runtime,
+        "transport_runtimes": None,
     }
     loaded.close()
     loaded.close()
@@ -160,6 +173,15 @@ def test_local_load_keeps_native_transformers_model(
         assert loaded.model_type == "qwen3_moe"
 
     assert not FakeClient.instances
+
+
+def test_local_load_rejects_transport_runtime() -> None:
+    with pytest.raises(ValueError, match="transport_runtime"):
+        loader.load_model(
+            "/models/qwen",
+            mode="local",
+            transport_runtime=FakeRuntime(),
+        )
 
 
 @pytest.mark.parametrize(
@@ -315,6 +337,7 @@ def test_routed_expert_weight_pattern_keeps_frontend_keys(
         ({"model_path": "/m", "controller_endpoint": ""}, "controller_endpoint"),
         ({"model_path": "/m", "instance_id": 0}, "instance_id"),
         ({"model_path": "/m", "dtype": "int8"}, "dtype"),
+        ({"model_path": "/m", "timeout_seconds": 0}, "timeout_seconds"),
     ],
 )
 def test_load_model_rejects_invalid_arguments(

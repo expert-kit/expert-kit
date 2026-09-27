@@ -30,6 +30,8 @@ _DTYPE_TO_PROTO = {
 _TRANSPORT_TO_PROTO = {
     "grpc": lifecycle_pb2.WORKER_TRANSPORT_GRPC,
     "shm": lifecycle_pb2.WORKER_TRANSPORT_SHM,
+    "nccl": lifecycle_pb2.WORKER_TRANSPORT_NCCL,
+    "transfer_engine": lifecycle_pb2.WORKER_TRANSPORT_TRANSFER_ENGINE,
 }
 
 
@@ -88,7 +90,7 @@ class WorkerRegistration:
         if self.activation_dtype not in ACTIVATION_DTYPES:
             raise ValueError("activation_dtype must be FP16, BF16, or FP32")
         if self.transport_type not in _TRANSPORT_TO_PROTO:
-            raise ValueError("transport_type must be grpc or shm")
+            raise ValueError("transport_type must be grpc, shm, nccl, or transfer_engine")
 
     def to_protobuf(self) -> lifecycle_pb2.RegisterWorkerRequest:
         """Encode the v2 registration request."""

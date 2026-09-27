@@ -7,9 +7,11 @@ from expertkit_worker.config.models import (
     GrpcTransportConfig,
     LogFormat,
     LogLevel,
+    NcclTransportConfig,
     QuantizationConfig,
     QuantizationType,
     ShmTransportConfig,
+    TransferEngineTransportConfig,
     WorkerConfig,
 )
 from expertkit_worker.config.resources import (
@@ -26,9 +28,11 @@ __all__ = [
     "GrpcTransportConfig",
     "LogFormat",
     "LogLevel",
+    "NcclTransportConfig",
     "QuantizationConfig",
     "QuantizationType",
     "ShmTransportConfig",
+    "TransferEngineTransportConfig",
     "WorkerConfig",
     "load_config",
     "plan_device_resources",

@@ -25,10 +25,20 @@ services:
       - /usr/local/bin/npu-smi:/usr/local/bin/npu-smi:ro
       - /usr/local/dcmi:/usr/local/dcmi:ro
       - /dev/devmm_svm:/dev/devmm_svm
+{% if transport.type == "transfer_engine" %}
+      - /etc/hccn.conf:/etc/hccn.conf:ro
+{% endif %}
     environment:
       RUST_LOG: info
+{% if transport.type == "transfer_engine" %}
+      ASCEND_USE_ASYNC_TRANSFER: "0"
+      ASCEND_BUFFER_POOL: "0:0"
+      ASCEND_USE_SHORT_CONNECTION: "0"
+    network_mode: host
+{% else %}
     networks:
       - expert-kit-network
+{% endif %}
 {% endfor %}
 
 networks:

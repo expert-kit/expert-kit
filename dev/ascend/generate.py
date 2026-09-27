@@ -55,6 +55,13 @@ def generate_root_config(
             **template_context,
         )
 
+    if context.transport.type == "transfer_engine":
+        renderer.render_to_file(
+            output / "a-transport.toml",
+            "a-transport.toml.jinja",
+            **template_context,
+        )
+
     if context.dataset.config.type is DatasetType.SHAREGPT:
         spec = create_render_spec(output, ConfigFileNames.TORCH_BENCH)
         renderer.render_to_file(

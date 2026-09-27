@@ -5,7 +5,12 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from expertkit_worker.config import ShmTransportConfig, WorkerConfig
+from expertkit_worker.config import (
+    NcclTransportConfig,
+    ShmTransportConfig,
+    TransferEngineTransportConfig,
+    WorkerConfig,
+)
 
 
 def _config(cache_path: Path, *, backend: str, device: str) -> dict[str, object]:
@@ -160,6 +165,144 @@ def test_shm_transport_uses_only_notification_rpc_fields(tmp_path: Path) -> None
     assert config.transport.shared_memory_dir == "/dev/shm"
 
 
+def test_nccl_transport_validates_static_process_group(tmp_path: Path) -> None:
+    raw = _config(tmp_path, backend="torch", device="cuda:0")
+    raw["transport"] = {
+        "type": "nccl",
+        "control_listen": "127.0.0.1:50051",
+        "control_advertise": "worker:50051",
+        "rank": 1,
+        "world_size": 2,
+        "rendezvous_endpoint": "controller:29500",
+        "group_name": "expert-kit",
+    }
+
+    config = WorkerConfig.model_validate(raw)
+
+    assert isinstance(config.transport, NcclTransportConfig)
+    assert config.transport.max_pending_batches_per_device == 1
+    assert config.transport.rank == 1
+    assert config.transport.world_size == 2
+
+    raw["transport"]["rank"] = 2  # type: ignore[index]
+    with pytest.raises(ValidationError, match="rank must be less than"):
+        WorkerConfig.model_validate(raw)
+
+
+def test_transfer_engine_transport_validates_control_and_segment_settings(
+    tmp_path: Path,
+) -> None:
+    raw = _config(tmp_path, backend="torch", device="cuda:0")
+    raw["transport"] = {
+        "type": "transfer_engine",
+        "control_listen": "127.0.0.1:50051",
+        "control_advertise": "worker:50051",
+        "segment_advertise": "192.0.2.32",
+        "metadata_server": "P2PHANDSHAKE",
+        "protocol": "nvlink_intra",
+        "device_name": "auto-discovery",
+    }
+
+    config = WorkerConfig.model_validate(raw)
+
+    assert isinstance(config.transport, TransferEngineTransportConfig)
+    assert config.transport.max_pending_batches_per_device == 1
+    assert config.transport.segment_advertise == "192.0.2.32"
+    assert config.transport.protocol == "nvlink_intra"
+    assert config.transport.max_workers == 2
+
+
+def test_transfer_engine_nvlink_requires_cuda(tmp_path: Path) -> None:
+    raw = _config(tmp_path, backend="ggml", device="cpu")
+    worker = raw["worker"]
+    assert isinstance(worker, dict)
+    worker["ggml"] = {"cpu_threads": 1}
+    raw["transport"] = {
+        "type": "transfer_engine",
+        "max_pending_batches_per_device": 1,
+        "control_listen": "127.0.0.1:50051",
+        "control_advertise": "worker:50051",
+        "segment_advertise": "127.0.0.1:12011",
+        "protocol": "nvlink_intra",
+    }
+
+    with pytest.raises(ValidationError, match="NVLink transports require a CUDA"):
+        WorkerConfig.model_validate(raw)
+
+    raw["transport"]["segment_advertise"] = "http://192.0.2.32"  # type: ignore[index]
+    raw["transport"]["protocol"] = "tcp"  # type: ignore[index]
+    with pytest.raises(ValidationError, match="URL scheme"):
+        WorkerConfig.model_validate(raw)
+
+
+def test_transfer_engine_rdma_requires_explicit_gpu_configuration(tmp_path: Path) -> None:
+    raw = _config(tmp_path, backend="torch", device="cuda:0")
+    raw["transport"] = {
+        "type": "transfer_engine",
+        "control_listen": "0.0.0.0:52051",
+        "control_advertise": "192.0.2.11:52051",
+        "segment_advertise": "192.0.2.11:12011",
+        "metadata_server": "P2PHANDSHAKE",
+        "protocol": "rdma",
+        "device_name": "mlx5_0",
+        "enable_experimental_rdma": True,
+    }
+
+    config = WorkerConfig.model_validate(raw)
+    assert isinstance(config.transport, TransferEngineTransportConfig)
+    assert config.transport.protocol == "rdma"
+    assert config.transport.device_name == "mlx5_0"
+    assert config.transport.enable_experimental_rdma is True
+
+    raw["transport"]["enable_experimental_rdma"] = False  # type: ignore[index]
+    with pytest.raises(ValidationError, match="must be true for RDMA"):
+        WorkerConfig.model_validate(raw)
+
+    raw["transport"]["enable_experimental_rdma"] = True  # type: ignore[index]
+    raw["transport"]["device_name"] = ""  # type: ignore[index]
+    with pytest.raises(ValidationError, match="device_name is required"):
+        WorkerConfig.model_validate(raw)
+
+    raw["transport"]["device_name"] = "mlx5_0"  # type: ignore[index]
+    raw["transport"]["metadata_server"] = "etcd://192.0.2.12:2379"  # type: ignore[index]
+    with pytest.raises(ValidationError, match="must be P2PHANDSHAKE"):
+        WorkerConfig.model_validate(raw)
+
+
+def test_transfer_engine_rdma_requires_a_cuda_worker(tmp_path: Path) -> None:
+    raw = _config(tmp_path, backend="ggml", device="cpu")
+    worker = raw["worker"]
+    assert isinstance(worker, dict)
+    worker["ggml"] = {"cpu_threads": 1}
+    raw["transport"] = {
+        "type": "transfer_engine",
+        "control_listen": "0.0.0.0:52051",
+        "control_advertise": "192.0.2.11:52051",
+        "segment_advertise": "192.0.2.11:12011",
+        "protocol": "rdma",
+        "device_name": "mlx5_0",
+        "enable_experimental_rdma": True,
+    }
+
+    with pytest.raises(ValidationError, match=r"RDMA transport requires a CUDA Worker"):
+        WorkerConfig.model_validate(raw)
+
+
+def test_transfer_engine_rejects_rdma_gate_for_nvlink(tmp_path: Path) -> None:
+    raw = _config(tmp_path, backend="torch", device="cuda:0")
+    raw["transport"] = {
+        "type": "transfer_engine",
+        "control_listen": "127.0.0.1:52051",
+        "control_advertise": "127.0.0.1:52051",
+        "segment_advertise": "127.0.0.1:12011",
+        "protocol": "nvlink_intra",
+        "enable_experimental_rdma": True,
+    }
+
+    with pytest.raises(ValidationError, match="valid only for RDMA"):
+        WorkerConfig.model_validate(raw)
+
+
 @pytest.mark.parametrize(
     "transport",
     [
@@ -174,6 +317,23 @@ def test_shm_transport_uses_only_notification_rpc_fields(tmp_path: Path) -> None
             "type": "shm",
             "rpc_listen": "127.0.0.1:50051",
             "rpc_advertise": "worker:50051",
+            "listen": "127.0.0.1:50052",
+        },
+        {
+            "type": "nccl",
+            "control_listen": "127.0.0.1:50051",
+            "control_advertise": "worker:50051",
+            "rank": 1,
+            "world_size": 2,
+            "rendezvous_endpoint": "controller:29500",
+            "group_name": "expert-kit",
+            "listen": "127.0.0.1:50052",
+        },
+        {
+            "type": "transfer_engine",
+            "control_listen": "127.0.0.1:50051",
+            "control_advertise": "worker:50051",
+            "segment_advertise": "192.0.2.32",
             "listen": "127.0.0.1:50052",
         },
     ],

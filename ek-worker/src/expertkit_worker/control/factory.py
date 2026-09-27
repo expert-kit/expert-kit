@@ -10,7 +10,6 @@ from expertkit_worker.control.lifecycle import (
     ControllerConnection,
     HeartbeatSender,
     WorkerRegistration,
-    new_start_id,
 )
 from expertkit_worker.control.state_reporter import ExpertStateReporter
 from expertkit_worker.control.supervisor import ControllerSupervisor
@@ -28,10 +27,10 @@ def create_controller_supervisor(
     reporter: ExpertStateReporter,
     computation_endpoint: str,
     transport_type: str,
+    start_id: str,
 ) -> ControllerSupervisor:
     """Create the complete Controller-facing control path for one Worker."""
 
-    start_id = new_start_id()
     connection = ControllerConnection(config.controller.endpoint)
     heartbeat = HeartbeatSender(
         worker_id=config.worker.id,

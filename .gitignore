@@ -3,6 +3,14 @@ target/
 build/
 dist/
 
+# Locally reproduced Mooncake native artifacts
+*.whl
+*.receipt.json
+.artifacts/
+artifacts/
+third_party/mooncake/work/
+third_party/mooncake/dist/
+
 # Envs
 .vscode/
 .venv

@@ -31,6 +31,7 @@ type AcquireFusedWeights = Callable[
 ]
 
 _SUPPORTED_DTYPES = {torch.float16, torch.bfloat16}
+_QUARANTINED_COMPLETIONS: list[object] = []
 
 
 class _FusedCompletion(BackendCompletion):
@@ -71,23 +72,26 @@ class _FusedCompletion(BackendCompletion):
         with self._lock:
             if self._closed:
                 return
+            if self._failed:
+                _QUARANTINED_COMPLETIONS.append(self)
+                return
             self._closed = True
             waited = self._waited
-            failed = self._failed
 
         close_error: BaseException | None = None
-        if not waited and not failed:
+        if not waited:
             try:
                 self._stream.synchronize()
             except BaseException as error:
                 close_error = error
-        self._workspace = None
-        self._lease.close()
         if close_error is not None:
+            _QUARANTINED_COMPLETIONS.append(self)
             raise BackendFatalError(
                 BackendFatalReason.ASYNC_EXECUTION,
                 str(close_error),
             ) from close_error
+        self._workspace = None
+        self._lease.close()
 
 
 class FusedBackend(ComputeBackend):
@@ -136,6 +140,7 @@ class FusedBackend(ComputeBackend):
         self._dtype = dtype
         self._device = resolved_device
         self._acquire_many = acquire_many
+        self._unsafe_leases: list[ReadyWeightLease[FusedExpertWeights]] = []
         self._capabilities = BackendCapabilities(
             supports_dynamic_tokens=True,
             supports_concurrent_batches=True,
@@ -300,9 +305,10 @@ class FusedBackend(ComputeBackend):
             torch.cuda.current_stream(self._device).synchronize()
         except BaseException as error:
             synchronization_error = error
-        lease.close()
         if synchronization_error is not None:
+            self._unsafe_leases.append(lease)
             raise BackendFatalError(
                 BackendFatalReason.ASYNC_EXECUTION,
                 str(synchronization_error),
             ) from synchronization_error
+        lease.close()

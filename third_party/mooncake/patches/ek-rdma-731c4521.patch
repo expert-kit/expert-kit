@@ -1,0 +1,388 @@
+diff --git a/mooncake-integration/transfer_engine/transfer_engine_py.cpp b/mooncake-integration/transfer_engine/transfer_engine_py.cpp
+index a5e69d22..6cfb3d27 100644
+--- a/mooncake-integration/transfer_engine/transfer_engine_py.cpp
++++ b/mooncake-integration/transfer_engine/transfer_engine_py.cpp
+@@ -182,6 +182,7 @@ int TransferEnginePy::initializeExt(const char* local_hostname,
+                                     const char* protocol,
+                                     const char* device_name,
+                                     const char* metadata_type) {
++    configured_backend_.clear();
+     if (strcmp(protocol, "xgmi") == 0) {
+         LOG(ERROR) << "Protocol 'xgmi' is not exposed in the Python API. "
+                    << "Use 'hip' instead.";
+@@ -190,6 +191,17 @@ int TransferEnginePy::initializeExt(const char* local_hostname,
+
+     std::string proto = protocol ? std::string(protocol) : "";
+     std::string conn_string = buildConnString(metadata_type, metadata_server);
++    const bool use_forced_rdma = (proto == "rdma");
++    if (use_forced_rdma && getenv("MC_FORCE_TCP")) {
++        LOG(ERROR) << "Protocol 'rdma' conflicts with MC_FORCE_TCP; refusing "
++                      "a mixed or silently downgraded transport set";
++        return -1;
++    }
++    if (use_forced_rdma && conn_string != P2PHANDSHAKE) {
++        LOG(ERROR) << "Protocol 'rdma' is supported by the Expert Kit binding "
++                      "only with P2PHANDSHAKE metadata";
++        return -1;
++    }
+
+ #ifdef USE_INTRA_NVLINK
+     const bool use_intra_nvlink = (proto == "nvlink_intra");
+@@ -230,10 +242,23 @@ int TransferEnginePy::initializeExt(const char* local_hostname,
+                   << " devices.";
+     }
+ #else
+-    engine_ =
+-        std::make_unique<TransferEngine>(!use_intra_nvlink, device_filter);
++    engine_ = std::make_unique<TransferEngine>(
++        !use_intra_nvlink && !use_forced_rdma, device_filter);
+ #endif
+
++    if (use_forced_rdma) {
++        engine_->getLocalTopology()->discover(device_filter);
++        if (engine_->getLocalTopology()->getHcaList().empty()) {
++            LOG(ERROR) << "Protocol 'rdma' was requested but no usable HCA "
++                          "was discovered";
++            engine_.reset();
++            return -1;
++        }
++        LOG(INFO) << "Topology discovery complete for forced RDMA. Found "
++                  << engine_->getLocalTopology()->getHcaList().size()
++                  << " device(s).";
++    }
++
+     if (getenv("MC_LEGACY_RPC_PORT_BINDING")) {
+         auto hostname_port = parseHostNameWithPort(local_hostname);
+         int ret =
+@@ -257,7 +282,7 @@ int TransferEnginePy::initializeExt(const char* local_hostname,
+             return -1;
+         }
+         LOG(INFO) << "EFA transport installed successfully";
+-    } else if (!use_intra_nvlink) {
++    } else if (!use_intra_nvlink && !use_forced_rdma) {
+         // For non-EFA protocols (e.g. TCP), manually install TCP transport
+         // since auto_discover is disabled to prevent RDMA installation
+         // (RDMA QP creation fails on EFA devices).
+@@ -280,7 +305,7 @@ int TransferEnginePy::initializeExt(const char* local_hostname,
+             return -1;
+         }
+         LOG(INFO) << "CXI transport installed successfully";
+-    } else if (!use_intra_nvlink) {
++    } else if (!use_intra_nvlink && !use_forced_rdma) {
+         // For non-EFA protocols (e.g. TCP), manually install TCP transport
+         // since auto_discover is disabled to prevent RDMA installation
+         // (RDMA QP creation fails on EFA devices).
+@@ -295,6 +320,25 @@ int TransferEnginePy::initializeExt(const char* local_hostname,
+     }
+ #endif
+
++    if (use_forced_rdma) {
++        LOG(INFO) << "Installing rdma as the only configured data transport";
++        auto transport = engine_->installTransport("rdma", nullptr);
++        if (!transport) {
++            LOG(ERROR) << "Failed to install requested rdma transport; "
++                          "refusing silent fallback";
++            engine_.reset();
++            return -1;
++        }
++        LOG(INFO) << "rdma transport installed successfully";
++        if (!engine_->isTransportOnly("rdma")) {
++            LOG(ERROR) << "Requested forced RDMA but the installed transport "
++                          "set is not exactly {rdma}; refusing mixed state";
++            engine_.reset();
++            return -1;
++        }
++        configured_backend_ = "rdma";
++    }
++
+ #ifdef USE_INTRA_NVLINK
+     if (use_intra_nvlink) {
+         LOG(INFO) << "Installing nvlink_intra as the only configured "
+@@ -307,6 +351,13 @@ int TransferEnginePy::initializeExt(const char* local_hostname,
+             return -1;
+         }
+         LOG(INFO) << "nvlink_intra transport installed successfully";
++        if (!engine_->isTransportOnly("nvlink_intra")) {
++            LOG(ERROR) << "Requested forced nvlink_intra but the installed "
++                          "transport set is not exactly {nvlink_intra}";
++            engine_.reset();
++            return -1;
++        }
++        configured_backend_ = "nvlink_intra";
+     }
+ #endif
+
+@@ -1125,6 +1176,22 @@ int TransferEnginePy::invalidateDrainedNvlinkIntraSegment(
+     return engine_->invalidateLocalSegment(segment_name, expected_handle);
+ }
+
++int TransferEnginePy::invalidateDrainedRdmaSegment(
++    const std::string& segment_name) {
++    pybind11::gil_scoped_release release;
++    {
++        std::lock_guard<std::mutex> guard(mutex_);
++        auto handle = handle_map_.find(segment_name);
++        if (handle != handle_map_.end()) {
++            handle_map_.erase(handle);
++        }
++    }
++    // The caller owns the target-wide gate and has synchronously drained DMA.
++    // RDMA endpoints/QPs may be shared by other remote targets, so graceful
++    // close evicts only this process's cached remote descriptor.
++    return engine_->removeLocalSegment(segment_name);
++}
++
+ std::string TransferEnginePy::getLocalTopology(const char* device_name) {
+     pybind11::gil_scoped_release release;
+     auto device_name_safe = device_name ? std::string(device_name) : "";
+@@ -1214,6 +1281,8 @@ PYBIND11_MODULE(engine, m) {
+ #endif
+     m.attr("EK_SAFE_TERMINAL_BATCH_SYNC") = true;
+     m.attr("EK_DRAINED_NVLINK_INTRA_LOCAL_INVALIDATION") = true;
++    m.attr("EK_FORCE_CONFIGURED_RDMA_TRANSPORT") = true;
++    m.attr("EK_DRAINED_RDMA_REMOTE_DESCRIPTOR_INVALIDATION") = true;
+
+     py::enum_<TransferEnginePy::TransferOpcode> transfer_opcode(
+         m, "TransferOpcode", py::arithmetic());
+@@ -1234,6 +1303,9 @@ PYBIND11_MODULE(engine, m) {
+             .def("initialize", &TransferEnginePy::initialize)
+             .def("initialize_ext", &TransferEnginePy::initializeExt)
+             .def("get_rpc_port", &TransferEnginePy::getRpcPort)
++            .def("get_configured_backend",
++                 &TransferEnginePy::getConfiguredBackend,
++                 "Return the exact backend installed by forced configuration")
+             .def("allocate_managed_buffer",
+                  &TransferEnginePy::allocateManagedBuffer)
+             .def("free_managed_buffer", &TransferEnginePy::freeManagedBuffer)
+@@ -1336,6 +1408,12 @@ PYBIND11_MODULE(engine, m) {
+                  "After the caller drains a forced nvlink_intra target "
+                  "session, close its CUDA IPC mappings and evict only this "
+                  "process's cached descriptor.")
++            .def("invalidate_drained_rdma_segment",
++                 &TransferEnginePy::invalidateDrainedRdmaSegment,
++                 py::arg("target_session"),
++                 "After the caller drains a forced RDMA target session, "
++                 "evict only this process's cached remote descriptor. Shared "
++                 "RDMA endpoints and QPs remain installed.")
+             .def("warmup_efa_segment", &TransferEnginePy::warmupEfaSegment,
+                  py::arg("segment_name"))
+             .def("get_notifies", &TransferEnginePy::getNotifies)
+diff --git a/mooncake-integration/transfer_engine/transfer_engine_py.h b/mooncake-integration/transfer_engine/transfer_engine_py.h
+index e503faac..2c1b8c7e 100644
+--- a/mooncake-integration/transfer_engine/transfer_engine_py.h
++++ b/mooncake-integration/transfer_engine/transfer_engine_py.h
+@@ -65,6 +65,8 @@ class TransferEnginePy {
+
+     int getRpcPort();
+
++    std::string getConfiguredBackend() const { return configured_backend_; }
++
+     uintptr_t allocateManagedBuffer(size_t length);
+
+     int freeManagedBuffer(uintptr_t user_tensor, size_t length);
+@@ -170,6 +172,8 @@ class TransferEnginePy {
+     int invalidateDrainedNvlinkIntraSegment(
+         const std::string &segment_name);
+
++    int invalidateDrainedRdmaSegment(const std::string &segment_name);
++
+     // Pre-connect every (local_ctx, peer_nic) pair for `segment_name` so the
+     // first submitTransfer does not stall on handshake RPC + fi_av_insert.
+     // No-op on non-EFA builds or when the EFA transport is not installed.
+@@ -227,6 +231,7 @@ class TransferEnginePy {
+     std::vector<char *> buffer_list_;
+     std::unordered_set<char *> large_buffer_list_;
+     std::unordered_map<std::string, Transport::SegmentHandle> handle_map_;
++    std::string configured_backend_;
+     bool auto_discovery_;
+
+     uint64_t transfer_timeout_nsec_;
+diff --git a/mooncake-transfer-engine/include/multi_transport.h b/mooncake-transfer-engine/include/multi_transport.h
+index 93f6917e..754ae103 100644
+--- a/mooncake-transfer-engine/include/multi_transport.h
++++ b/mooncake-transfer-engine/include/multi_transport.h
+@@ -61,6 +61,9 @@ class MultiTransport {
+
+     int invalidateRemoteSegment(Transport::SegmentID segment_id);
+
++    /** Return true only when exactly one transport named `proto` is installed. */
++    bool isTransportOnly(const std::string &proto) const;
++
+     /**
+      * @brief Check if TCP is the only installed transport.
+      *
+diff --git a/mooncake-transfer-engine/include/transfer_engine.h b/mooncake-transfer-engine/include/transfer_engine.h
+index 1f7629a8..a4274b49 100644
+--- a/mooncake-transfer-engine/include/transfer_engine.h
++++ b/mooncake-transfer-engine/include/transfer_engine.h
+@@ -184,6 +184,11 @@ class TransferEngine {
+         const std::vector<std::string>& device_filter = {});
+ #endif
+
++    /**
++     * @brief Check whether `proto` is the exact installed transport set.
++     */
++    bool isTransportOnly(const std::string& proto) const;
++
+     /**
+      * @brief Check if TCP is the only installed transport.
+      *
+diff --git a/mooncake-transfer-engine/include/transfer_engine_impl.h b/mooncake-transfer-engine/include/transfer_engine_impl.h
+index 5f060e8e..69f17618 100644
+--- a/mooncake-transfer-engine/include/transfer_engine_impl.h
++++ b/mooncake-transfer-engine/include/transfer_engine_impl.h
+@@ -361,7 +361,11 @@ class TransferEngineImpl {
+         const std::vector<std::string>& device_filter = {});
+ #endif
+
+-    bool isTcpOnly() const { return multi_transports_->isTcpOnly(); }
++    bool isTransportOnly(const std::string& proto) const {
++        return multi_transports_ && multi_transports_->isTransportOnly(proto);
++    }
++
++    bool isTcpOnly() const { return isTransportOnly("tcp"); }
+
+     int syncSegmentCache(const std::string& segment_name = "") {
+         return metadata_->syncSegmentCache(segment_name);
+diff --git a/mooncake-transfer-engine/src/multi_transport.cpp b/mooncake-transfer-engine/src/multi_transport.cpp
+index a35b375a..32352599 100644
+--- a/mooncake-transfer-engine/src/multi_transport.cpp
++++ b/mooncake-transfer-engine/src/multi_transport.cpp
+@@ -608,10 +608,12 @@ Transport* MultiTransport::getTransport(const std::string& proto) {
+     return transport_map_[proto].get();
+ }
+
+-bool MultiTransport::isTcpOnly() const {
+-    return transport_map_.size() == 1 && transport_map_.count("tcp") == 1;
++bool MultiTransport::isTransportOnly(const std::string& proto) const {
++    return transport_map_.size() == 1 && transport_map_.count(proto) == 1;
+ }
+
++bool MultiTransport::isTcpOnly() const { return isTransportOnly("tcp"); }
++
+ int MultiTransport::invalidateRemoteSegment(Transport::SegmentID segment_id) {
+     int first_error = 0;
+     for (auto& entry : transport_map_) {
+diff --git a/mooncake-transfer-engine/src/transfer_engine.cpp b/mooncake-transfer-engine/src/transfer_engine.cpp
+index 1d790d63..f9e3fa5f 100644
+--- a/mooncake-transfer-engine/src/transfer_engine.cpp
++++ b/mooncake-transfer-engine/src/transfer_engine.cpp
+@@ -273,7 +273,11 @@ device::RdmaTransport* TransferEngine::getOrCreateRdmaTransport(
+ }
+ #endif
+
+-bool TransferEngine::isTcpOnly() const { return impl_->isTcpOnly(); }
++bool TransferEngine::isTransportOnly(const std::string& proto) const {
++    return impl_ && impl_->isTransportOnly(proto);
++}
++
++bool TransferEngine::isTcpOnly() const { return isTransportOnly("tcp"); }
+
+ int TransferEngine::syncSegmentCache(const std::string& segment_name) {
+     return impl_->syncSegmentCache(segment_name);
+@@ -810,13 +814,18 @@ device::RdmaTransport* TransferEngine::getOrCreateRdmaTransport(
+ }
+ #endif
+
++bool TransferEngine::isTransportOnly(const std::string& proto) const {
++    if (use_tent_) return false;
++    return impl_ && impl_->isTransportOnly(proto);
++}
++
+ bool TransferEngine::isTcpOnly() const {
+     if (use_tent_)
+         // TENT already rejects TCP loopback transfers when MC_STORE_MEMCPY
+         // is disabled, so auto-enabling memcpy is unnecessary in TENT mode.
+         return false;
+     else
+-        return impl_->isTcpOnly();
++        return isTransportOnly("tcp");
+ }
+
+ int TransferEngine::syncSegmentCache(const std::string& segment_name) {
+diff --git a/mooncake-transfer-engine/tests/transport_uint_test.cpp b/mooncake-transfer-engine/tests/transport_uint_test.cpp
+index cd7097f1..b290e4e2 100644
+--- a/mooncake-transfer-engine/tests/transport_uint_test.cpp
++++ b/mooncake-transfer-engine/tests/transport_uint_test.cpp
+@@ -26,6 +26,7 @@
+ #include <iomanip>
+ #include <memory>
+ #include <mutex>
++#include <optional>
+ #include <utility>
+
+ #include "transfer_engine.h"
+@@ -197,6 +198,27 @@ class TransportTest : public ::testing::Test {
+     void TearDown() override { google::ShutdownGoogleLogging(); }
+ };
+
++class ScopedEnvironmentVariable {
++   public:
++    ScopedEnvironmentVariable(const char* name, const char* value)
++        : name_(name) {
++        const char* previous = getenv(name);
++        if (previous) previous_ = std::string(previous);
++        setenv(name, value, 1);
++    }
++
++    ~ScopedEnvironmentVariable() {
++        if (previous_)
++            setenv(name_.c_str(), previous_->c_str(), 1);
++        else
++            unsetenv(name_.c_str());
++    }
++
++   private:
++    std::string name_;
++    std::optional<std::string> previous_;
++};
++
+ static int CreateTempFile() {
+     char temp_filename[] = "/tmp/testfileXXXXXX";
+     int fd = mkstemp(temp_filename);
+@@ -523,6 +545,32 @@ TEST_F(TransportTest, RegisterLocalMemoryBatchRollsBackAttemptedTransports) {
+         engine.unregisterLocalMemoryBatch({buffer.data(), buffer.data() + 1}),
+         0);
+ }
++
++TEST_F(TransportTest, ExactInstalledTransportQueryRejectsMixedSets) {
++    TransferEngineImpl engine(false);
++    ASSERT_EQ(engine.init(P2PHANDSHAKE, "127.0.0.1:12345"), 0);
++    auto rdma = std::make_shared<BatchResultTransport>();
++    auto tcp = std::make_shared<BatchResultTransport>();
++
++    TransferEngineImplTestPeer::replaceTransports(engine, {{"rdma", rdma}});
++    EXPECT_TRUE(engine.isTransportOnly("rdma"));
++    EXPECT_FALSE(engine.isTransportOnly("tcp"));
++
++    TransferEngineImplTestPeer::replaceTransports(
++        engine, {{"rdma", rdma}, {"tcp", tcp}});
++    EXPECT_FALSE(engine.isTransportOnly("rdma"));
++    EXPECT_FALSE(engine.isTransportOnly("tcp"));
++}
++
++#ifdef USE_TCP
++TEST_F(TransportTest, ForcedTcpCannotPassRdmaOnlyQuery) {
++    ScopedEnvironmentVariable force_tcp("MC_FORCE_TCP", "1");
++    TransferEngine engine(false);
++    ASSERT_EQ(engine.init(P2PHANDSHAKE, "127.0.0.1:12345"), 0);
++    EXPECT_TRUE(engine.isTransportOnly("tcp"));
++    EXPECT_FALSE(engine.isTransportOnly("rdma"));
++}
++#endif
+ }  // namespace mooncake
+
+ int main(int argc, char** argv) {
+diff --git a/mooncake-wheel/pyproject.toml b/mooncake-wheel/pyproject.toml
+index 6aa92a75..b2129467 100644
+--- a/mooncake-wheel/pyproject.toml
++++ b/mooncake-wheel/pyproject.toml
+@@ -22,7 +22,7 @@ build-backend = "setuptools.build_meta"
+
+ [project]
+ name = "mooncake-transfer-engine"
+-version = "0.3.12.dev20260811+ek.731c4521"
++version = "0.3.12.dev20260817+ek.731c4521.rdma2"
+ description = "A KVCache-centric Disaggregated Architecture for large-scale LLM inference and training."
+ authors = [
+     { name = "Mooncake Authors" }

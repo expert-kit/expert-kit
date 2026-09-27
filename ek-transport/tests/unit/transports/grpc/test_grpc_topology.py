@@ -10,6 +10,7 @@ import pytest
 import torch
 from expertkit_proto.ek.control.v2 import lifecycle_pb2, lifecycle_pb2_grpc
 
+from expertkit_transport.controller import topology as topology_module
 from expertkit_transport.controller.messages import (
     TopologyProtocolError,
     WorkerRoute,
@@ -19,12 +20,16 @@ from expertkit_transport.controller.topology import (
     _WorkerConnectionResources,
 )
 from expertkit_transport.errors import TransportError
-from expertkit_transport.routing import WorkerConnection
+from expertkit_transport.routing import WorkerConnection, WorkerIdentity
+from expertkit_transport.transports.base import WorkerTransportRuntimeRegistry
 
 
 class FakeTransport:
     def __init__(self) -> None:
         self.closed = False
+
+    async def start(self) -> None:
+        pass
 
     async def close(self) -> None:
         self.closed = True
@@ -63,14 +68,16 @@ def worker(
     start_id: str = "start-1",
     endpoint: str = "127.0.0.1:50051",
     transport_type: int = lifecycle_pb2.WORKER_TRANSPORT_GRPC,
+    max_active_batches: int = 1,
+    max_pending_batches: int = 2,
 ) -> lifecycle_pb2.WorkerRoute:
     return lifecycle_pb2.WorkerRoute(
         worker_id=worker_id,
         start_id=start_id,
         computation_endpoint=endpoint,
         device="cuda:0",
-        max_active_batches=1,
-        max_pending_batches=2,
+        max_active_batches=max_active_batches,
+        max_pending_batches=max_pending_batches,
         max_batch_tokens=16,
         transport_type=transport_type,
     )
@@ -223,6 +230,118 @@ def test_changed_worker_metadata_replaces_its_resources_atomically() -> None:
 
 
 @pytest.mark.parametrize(
+    "transport_type",
+    [
+        lifecycle_pb2.WORKER_TRANSPORT_NCCL,
+        lifecycle_pb2.WORKER_TRANSPORT_TRANSFER_ENGINE,
+    ],
+)
+def test_runtime_backed_worker_route_is_accepted(transport_type: int) -> None:
+    async def scenario() -> None:
+        factory = FakeWorkerConnectionFactory()
+        topology = provider(factory)
+        await topology._consume(
+            snapshot(
+                1,
+                [
+                    route(
+                        0,
+                        0,
+                        worker(
+                            "worker-a",
+                            transport_type=transport_type,
+                        ),
+                    )
+                ],
+            )
+        )
+
+        assert factory.created[0].route.transport_type == transport_type
+        await topology.close()
+
+    run(scenario())
+
+
+def test_topology_forwards_the_runtime_registry_and_worker_epoch(monkeypatch) -> None:
+    async def scenario() -> None:
+        registry = WorkerTransportRuntimeRegistry()
+        captured: dict[str, object] = {}
+
+        def create_transport(**options):
+            captured.update(options)
+            return FakeTransport()
+
+        monkeypatch.setattr(topology_module, "create_worker_transport", create_transport)
+        topology = ControllerTopologyWatcher(
+            "127.0.0.1:1",
+            instance_id=7,
+            num_layers=2,
+            experts_per_layer=2,
+            hidden_dim=8,
+            top_k=2,
+            dtype=torch.float16,
+            device="cpu",
+            runtime_registry=registry,
+        )
+        resources = await topology._create_worker_resources(
+            WorkerRoute(
+                identity=WorkerIdentity("worker-a", "start-1"),
+                endpoint="127.0.0.1:50051",
+                device="cuda:0",
+                max_active_batches=1,
+                max_pending_batches=2,
+                max_batch_tokens=16,
+                transport_type=lifecycle_pb2.WORKER_TRANSPORT_NCCL,
+            )
+        )
+
+        assert captured["runtime_registry"] is registry
+        assert captured["worker_start_id"] == "start-1"
+        await topology._close_worker_resources(resources)
+
+    run(scenario())
+
+
+def test_close_waits_for_all_worker_resources_before_propagating_an_error() -> None:
+    async def scenario() -> None:
+        factory = FakeWorkerConnectionFactory()
+        topology = provider(factory)
+        await topology._consume(
+            snapshot(
+                1,
+                [route(0, 0, worker("worker-a"), worker("worker-b"))],
+            )
+        )
+        assert len(factory.created) == 2
+        second_started = asyncio.Event()
+        allow_second_close = asyncio.Event()
+
+        async def fail_close() -> None:
+            raise RuntimeError("first transport close failed")
+
+        async def block_close() -> None:
+            second_started.set()
+            await allow_second_close.wait()
+            factory.created[1].target.transport.closed = True
+
+        factory.created[0].target.transport.close = fail_close  # type: ignore[method-assign]
+        factory.created[1].target.transport.close = block_close  # type: ignore[method-assign]
+        closing = asyncio.create_task(topology.close())
+        await asyncio.wait_for(second_started.wait(), 1)
+        await asyncio.sleep(0)
+        assert not closing.done()
+
+        allow_second_close.set()
+        with pytest.raises(RuntimeError, match="first transport close failed"):
+            await closing
+        assert factory.created[0].pool.closed is True
+        assert factory.created[1].pool.closed is True
+        assert factory.created[1].target.transport.closed is True
+
+    run(scenario())
+
+
+@pytest.mark.parametrize(
     "messages",
     [
         [lifecycle_pb2.TopologyMessage()],
@@ -237,6 +356,23 @@ def test_changed_worker_metadata_replaces_its_resources_atomically() -> None:
         [
             snapshot(1, [route(0, 0, worker("worker-a"))]),
             update(0, 2, []),
+        ],
+        [
+            snapshot(
+                1,
+                [
+                    route(
+                        0,
+                        0,
+                        worker(
+                            "worker-a",
+                            transport_type=lifecycle_pb2.WORKER_TRANSPORT_TRANSFER_ENGINE,
+                            max_active_batches=4096,
+                            max_pending_batches=1,
+                        ),
+                    )
+                ],
+            )
         ],
         [
             snapshot(1, [], part_index=0, part_count=2),

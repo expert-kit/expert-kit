@@ -4,6 +4,7 @@ import torch
 from expertkit_proto.ek.control.v2 import lifecycle_pb2
 
 from expertkit_transport.transports import factory
+from expertkit_transport.transports.base import WorkerTransportRuntimeRegistry
 
 
 class FakeTransport:
@@ -15,7 +16,19 @@ class FakeTransport:
         self.options = options
 
 
-def create(transport_type: int) -> FakeTransport:
+class FakeRuntime:
+    async def start(self) -> None:
+        pass
+
+    async def close(self) -> None:
+        pass
+
+
+def create(
+    transport_type: int,
+    *,
+    runtime_registry: WorkerTransportRuntimeRegistry | None = None,
+) -> FakeTransport:
     return factory.create_worker_transport(  # type: ignore[return-value]
         transport_type=transport_type,
         endpoint="worker:50052",
@@ -28,6 +41,8 @@ def create(transport_type: int) -> FakeTransport:
         dtype=torch.float16,
         device=torch.device("cpu"),
         max_in_flight=3,
+        worker_start_id="start-1",
+        runtime_registry=runtime_registry,
     )
 
 
@@ -54,6 +69,61 @@ def test_creates_shm_transport_from_published_type(monkeypatch) -> None:
         "max_in_flight": 3,
         "device": torch.device("cpu"),
     }
+
+
+def test_creates_nccl_transport_with_process_runtime(monkeypatch) -> None:
+    runtime = FakeRuntime()
+    monkeypatch.setattr(factory, "NcclWorkerTransport", FakeTransport)
+
+    transport = create(
+        lifecycle_pb2.WORKER_TRANSPORT_NCCL,
+        runtime_registry=WorkerTransportRuntimeRegistry(default_runtime=runtime),
+    )
+
+    assert transport.endpoint == "worker:50052"
+    assert transport.options == {
+        "max_in_flight": 3,
+        "device": torch.device("cpu"),
+        "runtime": runtime,
+    }
+
+
+def test_nccl_transport_requires_process_runtime() -> None:
+    try:
+        create(lifecycle_pb2.WORKER_TRANSPORT_NCCL)
+    except ValueError as error:
+        assert "process-level runtime" in str(error)
+    else:
+        raise AssertionError("NCCL Transport without a shared runtime must be rejected")
+
+
+def test_creates_transfer_engine_transport_with_worker_epoch(monkeypatch) -> None:
+    runtime = FakeRuntime()
+    monkeypatch.setattr(factory, "_create_transfer_engine_transport", FakeTransport)
+
+    transport = create(
+        lifecycle_pb2.WORKER_TRANSPORT_TRANSFER_ENGINE,
+        runtime_registry=WorkerTransportRuntimeRegistry(
+            {lifecycle_pb2.WORKER_TRANSPORT_TRANSFER_ENGINE: runtime}
+        ),
+    )
+
+    assert transport.endpoint == "worker:50052"
+    assert transport.options == {
+        "max_in_flight": 3,
+        "device": torch.device("cpu"),
+        "runtime": runtime,
+        "worker_start_id": "start-1",
+    }
+
+
+def test_transfer_engine_transport_requires_process_runtime() -> None:
+    try:
+        create(lifecycle_pb2.WORKER_TRANSPORT_TRANSFER_ENGINE)
+    except ValueError as error:
+        assert "process-level runtime" in str(error)
+    else:
+        raise AssertionError("Transfer Engine without a shared runtime must be rejected")
 
 
 def test_rejects_an_unknown_published_type() -> None:

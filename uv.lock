@@ -879,6 +879,9 @@ npu = [
 observability = [
     { name = "expertkit-worker", extra = ["observability"] },
 ]
+transfer-engine = [
+    { name = "expertkit-worker", extra = ["transfer-engine"] },
+]
 vllm = [
     { name = "expertkit-vllm" },
 ]
@@ -910,8 +913,9 @@ requires-dist = [
     { name = "expertkit-worker", extras = ["ggml"], marker = "extra == 'ggml'", editable = "ek-worker" },
     { name = "expertkit-worker", extras = ["npu"], marker = "extra == 'npu'", editable = "ek-worker" },
     { name = "expertkit-worker", extras = ["observability"], marker = "extra == 'observability'", editable = "ek-worker" },
+    { name = "expertkit-worker", extras = ["transfer-engine"], marker = "extra == 'transfer-engine'", editable = "ek-worker" },
 ]
-provides-extras = ["fused", "ggml", "observability", "npu", "vllm"]
+provides-extras = ["fused", "ggml", "observability", "npu", "transfer-engine", "vllm"]
 
 [package.metadata.requires-dev]
 dev = [
@@ -1007,7 +1011,7 @@ requires-dist = [
     { name = "torch", marker = "platform_machine != 'aarch64' or sys_platform != 'linux'", specifier = ">=2.10,<2.12" },
     { name = "torch", marker = "platform_machine == 'aarch64' and sys_platform == 'linux'", specifier = ">=2.10,<2.12", index = "https://download.pytorch.org/whl/cpu" },
 ]
-provides-extras = ["observability"]
+provides-extras = ["observability", "transfer-engine"]
 
 [[package]]
 name = "expertkit-vllm"
@@ -1056,6 +1060,9 @@ observability = [
     { name = "opentelemetry-sdk" },
     { name = "prometheus-client" },
 ]
+transfer-engine = [
+    { name = "expertkit-transport" },
+]
 
 [package.dev-dependencies]
 dev = [
@@ -1067,6 +1074,7 @@ requires-dist = [
     { name = "aiohttp", specifier = ">=3.11,<4" },
     { name = "expertkit-proto", editable = "ek-proto" },
     { name = "expertkit-transport", editable = "ek-transport" },
+    { name = "expertkit-transport", extras = ["transfer-engine"], marker = "extra == 'transfer-engine'", editable = "ek-transport" },
     { name = "ggml-python", marker = "extra == 'ggml'", specifier = "==0.0.45" },
     { name = "grpcio", specifier = "==1.71.0" },
     { name = "opentelemetry-exporter-otlp-proto-grpc", marker = "extra == 'observability'", specifier = "==1.39.1" },
@@ -1081,7 +1089,7 @@ requires-dist = [
     { name = "torch-npu", marker = "extra == 'npu'", specifier = "==2.11.0rc1" },
     { name = "triton", marker = "extra == 'fused'", specifier = "==3.6.0" },
 ]
-provides-extras = ["fused", "ggml", "observability", "npu"]
+provides-extras = ["fused", "ggml", "observability", "npu", "transfer-engine"]
 
 [package.metadata.requires-dev]
 dev = [{ name = "safetensors", specifier = ">=0.5.3,<1" }]

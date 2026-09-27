@@ -12,6 +12,7 @@ from .cluster import (
     ExpertRuntimeConfig,
     PoolConfig,
     NodeConfig,
+    AscendTransportConfig,
 )
 from pathlib import Path
 from .experiment import (
@@ -47,6 +48,7 @@ class TemplateContext(BaseModel):
     run: RunConfig
     tracing: TracingConfig
     results_path: Path
+    transport: AscendTransportConfig
 
     @classmethod
     def from_config(cls, cluster: ClusterConfig, experiment: ExperimentConfig) -> Self:
@@ -92,6 +94,7 @@ class TemplateContext(BaseModel):
             run=run,
             tracing=experiment.tracing,
             results_path=cluster.paths.results,
+            transport=cluster.transport,
         )
 
     @model_validator(mode="after")

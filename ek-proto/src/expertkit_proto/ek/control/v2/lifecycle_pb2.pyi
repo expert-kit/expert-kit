@@ -18,12 +18,16 @@ class WorkerTransportType(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
     WORKER_TRANSPORT_TYPE_UNSPECIFIED: _ClassVar[WorkerTransportType]
     WORKER_TRANSPORT_GRPC: _ClassVar[WorkerTransportType]
     WORKER_TRANSPORT_SHM: _ClassVar[WorkerTransportType]
+    WORKER_TRANSPORT_NCCL: _ClassVar[WorkerTransportType]
+    WORKER_TRANSPORT_TRANSFER_ENGINE: _ClassVar[WorkerTransportType]
 WORKER_RUN_STATE_UNSPECIFIED: WorkerRunState
 WORKER_RUNNING: WorkerRunState
 WORKER_SHUTTING_DOWN: WorkerRunState
 WORKER_TRANSPORT_TYPE_UNSPECIFIED: WorkerTransportType
 WORKER_TRANSPORT_GRPC: WorkerTransportType
 WORKER_TRANSPORT_SHM: WorkerTransportType
+WORKER_TRANSPORT_NCCL: WorkerTransportType
+WORKER_TRANSPORT_TRANSFER_ENGINE: WorkerTransportType
 
 class ResolveDefaultInstanceRequest(_message.Message):
     __slots__ = ("requested_instance_id",)

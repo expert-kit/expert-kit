@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import gc
 import threading
-from collections.abc import Awaitable
+from collections.abc import Awaitable, Iterator
 
 import pytest
 import torch
@@ -29,8 +30,18 @@ from expertkit_worker.backends import (
     ComputeBackend,
 )
 from expertkit_worker.execution import WorkerExecutor
+from expertkit_worker.execution import executor as executor_module
 from expertkit_worker.factory import _create_device_wiring
 from expertkit_worker.observability.api import WorkerMetrics
+
+
+@pytest.fixture(autouse=True)
+def release_injected_execution_quarantines_after_each_test() -> Iterator[None]:
+    """Release CPU-only fake fail-stop graphs before interpreter teardown."""
+
+    yield
+    executor_module._QUARANTINED_EXECUTIONS.clear()  # type: ignore[attr-defined]
+    gc.collect()
 
 
 class RecordingMetrics:
@@ -118,6 +129,26 @@ class BlockingBackend(TestBackend):
             raise RuntimeError("test did not release blocked Backend calls")
         torch.mul(batch.hidden_states, 3, out=prepared_output)
         return CompletedSubmission()
+
+
+class BlockingFatalBackend(TestBackend):
+    """Fail fatally after the serve task has been cancelled repeatedly."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.started = threading.Event()
+        self.release = threading.Event()
+
+    def submit(
+        self,
+        batch: BackendBatch,
+        prepared_output: torch.Tensor,
+    ) -> BackendCompletion:
+        del batch, prepared_output
+        self.started.set()
+        if not self.release.wait(timeout=5):
+            raise RuntimeError("test did not release fatal Backend call")
+        raise BackendFatalError(BackendFatalReason.ASYNC_EXECUTION, "late CUDA failure")
 
 
 def batch_spec() -> WorkerEndpointConfig:
@@ -336,10 +367,19 @@ def test_cancelled_response_does_not_cancel_active_computation() -> None:
     run(scenario())
 
 
-def test_fatal_backend_error_stops_execution() -> None:
+@pytest.mark.parametrize(
+    "reason",
+    [
+        BackendFatalReason.DEVICE_OOM,
+        BackendFatalReason.ASYNC_EXECUTION,
+        BackendFatalReason.DEVICE_FAILURE,
+        BackendFatalReason.UNEXPECTED,
+    ],
+)
+def test_fatal_backend_error_stops_execution(reason: BackendFatalReason) -> None:
     async def scenario() -> None:
         backend = TestBackend()
-        backend.error = BackendFatalError(BackendFatalReason.DEVICE_OOM, "device exhausted")
+        backend.error = BackendFatalError(reason, "device execution failed")
         _server, client, execution = await start_stack(backend)
         output = torch.empty((2, 3), dtype=torch.float32)
         try:
@@ -355,8 +395,45 @@ def test_fatal_backend_error_stops_execution() -> None:
                     await execution.wait()
 
             assert caught.value.code is TransportErrorCode.UNAVAILABLE
-            assert fatal.value.reason is BackendFatalReason.DEVICE_OOM
+            assert fatal.value.reason is reason
+            await execution.close()
+            assert execution._slots[0].quarantined  # type: ignore[attr-defined]
+            assert execution._slots[0].device_bytes > 0  # type: ignore[attr-defined]
         finally:
+            await close_stack(client, execution)
+
+    run(scenario())
+
+
+def test_repeated_serve_task_cancellation_preserves_late_fatal() -> None:
+    async def scenario() -> None:
+        backend = BlockingFatalBackend()
+        _server, client, execution = await start_stack(backend)
+        submission = asyncio.create_task(
+            client.execute(
+                worker_batch(),
+                torch.empty((2, 3), dtype=torch.float32),
+                monotonic_deadline=float("inf"),
+            )
+        )
+        try:
+            assert await asyncio.to_thread(backend.started.wait, 2)
+            execution._tasks[0].cancel()  # type: ignore[attr-defined]
+            await asyncio.sleep(0)
+            execution._tasks[0].cancel()  # type: ignore[attr-defined]
+            backend.release.set()
+
+            with pytest.raises(TransportError) as rejected:
+                await submission
+            with pytest.raises(BackendFatalError) as fatal:
+                await execution.wait()
+
+            assert rejected.value.code is TransportErrorCode.UNAVAILABLE
+            assert fatal.value.reason is BackendFatalReason.ASYNC_EXECUTION
+            assert execution._slots[0].quarantined  # type: ignore[attr-defined]
+        finally:
+            backend.release.set()
+            await asyncio.gather(submission, return_exceptions=True)
             await close_stack(client, execution)
 
     run(scenario())

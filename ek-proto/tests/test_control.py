@@ -136,6 +136,13 @@ def test_worker_route_publishes_all_dispatch_limits() -> None:
     }
 
 
+def test_worker_transport_values_extend_without_renumbering() -> None:
+    assert lifecycle_pb2.WORKER_TRANSPORT_GRPC == 1
+    assert lifecycle_pb2.WORKER_TRANSPORT_SHM == 2
+    assert lifecycle_pb2.WORKER_TRANSPORT_NCCL == 3
+    assert lifecycle_pb2.WORKER_TRANSPORT_TRANSFER_ENGINE == 4
+
+
 def test_weight_stream_envelopes_round_trip() -> None:
     worker_message = weight_control_pb2.WorkerWeightMessage(
         state_updates=weight_control_pb2.ExpertStateUpdates(

@@ -8,6 +8,8 @@ from expertkit_transport.transports.base import (
     WorkerBatchReceiver,
     WorkerEndpointConfig,
     WorkerTransport,
+    WorkerTransportRuntime,
+    WorkerTransportRuntimeRegistry,
 )
 
 __all__ = [
@@ -18,4 +20,6 @@ __all__ = [
     "WorkerBatchReceiver",
     "WorkerEndpointConfig",
     "WorkerTransport",
+    "WorkerTransportRuntime",
+    "WorkerTransportRuntimeRegistry",
 ]

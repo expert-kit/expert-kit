@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from ipaddress import IPv4Address
 from pathlib import Path
-from typing import Self
+from typing import Literal, Self
 
 import yaml
 from pydantic import Field, computed_field, model_validator
@@ -27,6 +27,7 @@ class ClusterConfig(ConfigModel):
     pools: list[PoolConfig]
     nodes: dict[str, NodeConfig]
     paths: PathConfig
+    transport: AscendTransportConfig = Field(default_factory=lambda: AscendTransportConfig())
 
     @classmethod
     def from_yaml(cls, file: Path) -> Self:
@@ -134,6 +135,16 @@ class ExpertConfig(ConfigModel):
     """Expert worker runtime configuration."""
 
     runtime: ExpertRuntimeConfig
+
+
+class AscendTransportConfig(ConfigModel):
+    """Select the A/E data backend without changing the model adapter."""
+
+    type: Literal["grpc", "transfer_engine"] = "grpc"
+    protocol: Literal["ascend_direct"] = "ascend_direct"
+    max_workers: int = Field(default=2, gt=0)
+    client_max_in_flight: int = Field(default=1, gt=0)
+    max_registered_bytes: int | None = Field(default=None, gt=0)
 
 
 class ExpertRuntimeConfig(ConfigModel):

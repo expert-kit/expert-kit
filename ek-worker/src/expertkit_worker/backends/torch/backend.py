@@ -40,6 +40,8 @@ type AcquireTorchWeights = Callable[
     ReadyWeightLease[TorchReadyWeights],
 ]
 
+_QUARANTINED_COMPLETIONS: list[object] = []
+
 
 class _TorchCompletion(BackendCompletion):
     """Retain ready weights and the submitting device stream until result release."""
@@ -72,21 +74,22 @@ class _TorchCompletion(BackendCompletion):
         with self._lock:
             if self._closed:
                 return
+            if self._failed:
+                _QUARANTINED_COMPLETIONS.append(self)
+                return
             self._closed = True
             waited = self._waited
-            failed = self._failed
 
         close_error: BaseException | None = None
-        if not waited and not failed:
+        if not waited:
             try:
                 self._work.wait_host()
             except BaseException as error:
                 close_error = error
-
-        self._lease.close()
-
         if close_error is not None:
+            _QUARANTINED_COMPLETIONS.append(self)
             raise close_error
+        self._lease.close()
 
 
 class TorchBackend(ComputeBackend):
@@ -165,6 +168,7 @@ class TorchBackend(ComputeBackend):
         self._dtype = dtype
         self._acquire_many = acquire_many
         self._runtime = runtime
+        self._unsafe_leases: list[ReadyWeightLease[TorchReadyWeights]] = []
         self._capabilities = BackendCapabilities(
             supports_dynamic_tokens=True,
             supports_concurrent_batches=True,
@@ -379,9 +383,10 @@ class TorchBackend(ComputeBackend):
             self._runtime.capture_current_work().wait_host()
         except BaseException as error:
             synchronization_error = error
-        lease.close()
         if synchronization_error is not None:
+            self._unsafe_leases.append(lease)
             raise BackendFatalError(
                 BackendFatalReason.ASYNC_EXECUTION,
                 str(synchronization_error),
             ) from synchronization_error
+        lease.close()

@@ -1,0 +1,9 @@
+[transfer_engine]
+protocol = "ascend_direct"
+metadata_server = "P2PHANDSHAKE"
+segment_name = "{{ attention.address }}"
+max_workers = {{ transport.max_workers }}
+client_max_in_flight = {{ transport.client_max_in_flight }}
+{% if transport.max_registered_bytes is not none %}
+max_registered_bytes = {{ transport.max_registered_bytes }}
+{% endif %}

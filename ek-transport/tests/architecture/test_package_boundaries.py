@@ -9,7 +9,9 @@ from pathlib import Path
 
 from expertkit_transport.transports.base import WorkerBatchReceiver
 from expertkit_transport.transports.grpc import GrpcWorkerBatchReceiver
+from expertkit_transport.transports.nccl import NcclWorkerBatchReceiver
 from expertkit_transport.transports.shm import ShmWorkerBatchReceiver
+from expertkit_transport.transports.transfer_engine import TransferEngineWorkerBatchReceiver
 
 _REPOSITORY = Path(__file__).resolve().parents[3]
 _TRANSPORT_PACKAGE = _REPOSITORY / "ek-transport/src/expertkit_transport"
@@ -86,15 +88,18 @@ def test_old_production_names_are_not_defined_or_reexported() -> None:
     assert not {path: names for path, names in violations.items() if names}
 
 
-def test_grpc_and_shm_do_not_import_each_others_implementation() -> None:
-    _assert_no_import_prefix(
-        _python_files(_TRANSPORT_PACKAGE / "transports/grpc"),
-        ("expertkit_transport.transports.shm",),
-    )
-    _assert_no_import_prefix(
-        _python_files(_TRANSPORT_PACKAGE / "transports/shm"),
-        ("expertkit_transport.transports.grpc",),
-    )
+def test_concrete_transports_do_not_import_each_others_implementation() -> None:
+    implementations = ("grpc", "shm", "nccl", "transfer_engine")
+    for implementation in implementations:
+        forbidden = tuple(
+            f"expertkit_transport.transports.{other}"
+            for other in implementations
+            if other != implementation
+        )
+        _assert_no_import_prefix(
+            _python_files(_TRANSPORT_PACKAGE / f"transports/{implementation}"),
+            forbidden,
+        )
 
 
 def test_generic_frontend_code_does_not_import_concrete_transports() -> None:
@@ -108,7 +113,9 @@ def test_generic_frontend_code_does_not_import_concrete_transports() -> None:
         ),
         (
             "expertkit_transport.transports.grpc",
+            "expertkit_transport.transports.nccl",
             "expertkit_transport.transports.shm",
+            "expertkit_transport.transports.transfer_engine",
         ),
     )
 
@@ -122,7 +129,9 @@ def test_worker_subsystems_do_not_import_concrete_transports() -> None:
         ),
         (
             "expertkit_transport.transports.grpc",
+            "expertkit_transport.transports.nccl",
             "expertkit_transport.transports.shm",
+            "expertkit_transport.transports.transfer_engine",
         ),
     )
 
@@ -149,9 +158,14 @@ def test_frontend_integrations_use_only_public_transport_imports() -> None:
     )
 
 
-def test_both_production_receivers_implement_the_complete_interface() -> None:
+def test_production_receivers_implement_the_complete_interface() -> None:
     required = WorkerBatchReceiver.__abstractmethods__
-    for receiver in (GrpcWorkerBatchReceiver, ShmWorkerBatchReceiver):
+    for receiver in (
+        GrpcWorkerBatchReceiver,
+        ShmWorkerBatchReceiver,
+        NcclWorkerBatchReceiver,
+        TransferEngineWorkerBatchReceiver,
+    ):
         assert issubclass(receiver, WorkerBatchReceiver)
         assert not inspect.isabstract(receiver)
         assert receiver.__module__.startswith("expertkit_transport.transports.")
@@ -168,6 +182,46 @@ def test_worker_factory_contains_one_explicit_branch_per_receiver() -> None:
     ]
     assert calls.count("GrpcWorkerBatchReceiver") == 1
     assert calls.count("ShmWorkerBatchReceiver") == 1
+    assert calls.count("NcclWorkerBatchReceiver") == 1
+    assert calls.count("TransferEngineWorkerBatchReceiver") == 1
+
+
+def test_frontend_factory_contains_one_explicit_branch_per_transport() -> None:
+    path = _TRANSPORT_PACKAGE / "transports/factory.py"
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    calls = [
+        node.func.id
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+    ]
+    assert calls.count("GrpcWorkerTransport") == 1
+    assert calls.count("ShmWorkerTransport") == 1
+    assert calls.count("NcclWorkerTransport") == 1
+    assert calls.count("TransferEngineWorkerTransport") == 1
+
+
+def test_worker_start_id_is_generated_once_and_shared_with_te_and_controller() -> None:
+    path = _WORKER_PACKAGE / "factory.py"
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    calls = [node for node in ast.walk(tree) if isinstance(node, ast.Call)]
+
+    generated = [
+        node for node in calls if isinstance(node.func, ast.Name) and node.func.id == "new_start_id"
+    ]
+    assert len(generated) == 1
+
+    def keyword_name(function: str, keyword: str) -> str | None:
+        matching = [
+            node for node in calls if isinstance(node.func, ast.Name) and node.func.id == function
+        ]
+        assert len(matching) == 1
+        value = next(item.value for item in matching[0].keywords if item.arg == keyword)
+        return value.id if isinstance(value, ast.Name) else None
+
+    assert keyword_name("TransferEngineWorkerBatchReceiver", "worker_start_id") == (
+        "worker_start_id"
+    )
+    assert keyword_name("create_controller_supervisor", "start_id") == "worker_start_id"
 
 
 def test_routing_does_not_import_protocol_transfer_buffers() -> None:
@@ -188,6 +242,8 @@ def test_routing_does_not_import_protocol_transfer_buffers() -> None:
         routing_files,
         (
             "expertkit_transport.transports.grpc.client_buffers",
+            "expertkit_transport.transports.nccl.client_buffers",
             "expertkit_transport.transports.shm.client_buffers",
+            "expertkit_transport.transports.transfer_engine.client_buffers",
         ),
     )
