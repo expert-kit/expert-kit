@@ -67,3 +67,10 @@ The plugin preserves vLLM's model router, including grouped or custom routing,
 and sends final `int32` expert assignments and FP32 routing weights through
 `expertkit-transport`. Transport returns the weighted, aggregated activation
 Tensor to the vLLM layer.
+
+## Inference tracing
+
+See [the tracing tutorial](../../doc/tutorial/inference-tracing.md) for the
+Ascend generator setting and direct Jaeger inspection. Manual deployments use
+`EK_TRACE_ENDPOINT`, `EK_TRACE_SAMPLE_RATIO`, and `--enforce-eager` for the
+Frontend, plus Worker `observability.tracing` YAML for the complete trace.

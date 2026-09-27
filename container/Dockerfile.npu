@@ -29,6 +29,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
       --locked \
       --package expertkit-worker \
       --extra npu \
+      --extra observability \
       --no-dev \
       --no-install-workspace
 
@@ -42,6 +43,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     --locked \
     --package expertkit-worker \
     --extra npu \
+    --extra observability \
     --no-dev
 
 FROM ${VLLM_ASCEND_IMAGE} AS ek-vllm-ascend-runtime

@@ -9,6 +9,7 @@ from dataclasses import asdict, dataclass
 from typing import Any
 
 import torch
+from expertkit_transport.tracing import trace_attributes, trace_span, traced
 
 from expertkit_torch.benchmark.datasets import BenchmarkDataset
 
@@ -168,6 +169,7 @@ def _synchronize(device: torch.device) -> None:
         torch.npu.synchronize()
 
 
+@traced("frontend.generate")
 def _measure_generation(
     model: Any,
     tokenizer: Any,
@@ -178,20 +180,28 @@ def _measure_generation(
     clock: Callable[[], float],
     synchronize: Callable[[torch.device], None],
 ) -> RunMetrics:
+    trace_attributes(
+        {
+            "expertkit.batch_size": input_ids.shape[0],
+            "expertkit.input_length": input_ids.shape[1],
+            "expertkit.output_length": output_length,
+        }
+    )
     device = input_ids.device
     input_tokens = int(attention_mask.sum().item())
 
     synchronize(device)
     prefill_start = clock()
-    output = model(
-        input_ids=input_ids,
-        attention_mask=attention_mask,
-        use_cache=True,
-        return_dict=True,
-    )
-    next_token = output.logits[:, -1, :].argmax(dim=-1, keepdim=True)
-    generated_tokens = [next_token]
-    synchronize(device)
+    with trace_span("frontend.prefill"):
+        output = model(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            use_cache=True,
+            return_dict=True,
+        )
+        next_token = output.logits[:, -1, :].argmax(dim=-1, keepdim=True)
+        generated_tokens = [next_token]
+        synchronize(device)
     prefill_seconds = clock() - prefill_start
     if prefill_seconds <= 0:
         raise RuntimeError("prefill timer did not advance")
@@ -202,25 +212,27 @@ def _measure_generation(
         if past_key_values is None:
             raise RuntimeError("model did not return a key/value cache")
         decode_start = clock()
-        for _ in range(output_length - 1):
-            attention_mask = torch.cat(
-                (
-                    attention_mask,
-                    attention_mask.new_ones((attention_mask.shape[0], 1)),
-                ),
-                dim=1,
-            )
-            output = model(
-                input_ids=next_token,
-                attention_mask=attention_mask,
-                past_key_values=past_key_values,
-                use_cache=True,
-                return_dict=True,
-            )
-            past_key_values = output.past_key_values
-            next_token = output.logits[:, -1, :].argmax(dim=-1, keepdim=True)
-            generated_tokens.append(next_token)
-        synchronize(device)
+        for step in range(output_length - 1):
+            with trace_span("frontend.decode_step", attributes={"expertkit.decode_step": step}):
+                attention_mask = torch.cat(
+                    (
+                        attention_mask,
+                        attention_mask.new_ones((attention_mask.shape[0], 1)),
+                    ),
+                    dim=1,
+                )
+                output = model(
+                    input_ids=next_token,
+                    attention_mask=attention_mask,
+                    past_key_values=past_key_values,
+                    use_cache=True,
+                    return_dict=True,
+                )
+                past_key_values = output.past_key_values
+                next_token = output.logits[:, -1, :].argmax(dim=-1, keepdim=True)
+                generated_tokens.append(next_token)
+        with trace_span("frontend.decode_sync"):
+            synchronize(device)
         decode_seconds = clock() - decode_start
         if decode_seconds <= 0:
             raise RuntimeError("decode timer did not advance")

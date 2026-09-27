@@ -16,6 +16,11 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+observability = [
+    "opentelemetry-exporter-otlp-proto-grpc==1.39.1",
+    "opentelemetry-sdk==1.39.1",
+]
+
 # The required EK safety-patched Linux wheel is installed explicitly because it
 # is not published to the public package index. Runtime capability gates reject
 # stock Mooncake wheels before any memory is registered.

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import math
 import time
 from collections.abc import Callable
@@ -20,6 +21,7 @@ from expertkit_transport.errors import (
     TransportErrorCode,
     TransportProtocolError,
 )
+from expertkit_transport.tracing import grpc_trace_metadata, trace_span, traced
 from expertkit_transport.transports.base import WorkerEndpointConfig, WorkerTransport
 from expertkit_transport.transports.shm.client_buffers import (
     ShmTransferBufferPool,
@@ -104,6 +106,7 @@ def _selected_hidden_states(batch: WorkerBatch) -> torch.Tensor:
         raise TransportProtocolError("Worker batch token indices are invalid") from error
 
 
+@traced("transport.shm.encode")
 def _copy_request_to_slot(
     batch: WorkerBatch,
     spec: WorkerEndpointConfig,
@@ -140,6 +143,7 @@ def _copy_request_to_slot(
     return buffers.generation
 
 
+@traced("transport.shm.decode")
 def _copy_slot_to_output(
     token_count: int,
     buffers: ShmTransferBuffers,
@@ -263,6 +267,7 @@ class ShmWorkerTransport(WorkerTransport):
                         spec=self._spec,
                     ),
                     wait_for_ready=False,
+                    metadata=grpc_trace_metadata(),
                 )
                 decode_open_response(response)
             except grpc.aio.AioRpcError as error:
@@ -275,6 +280,7 @@ class ShmWorkerTransport(WorkerTransport):
             self._execute = execute_call
             self._close_session = close_call
 
+    @traced("transport.shm.execute")
     async def execute(
         self,
         batch: WorkerBatch,
@@ -325,6 +331,7 @@ class ShmWorkerTransport(WorkerTransport):
                 response = await self._close_session(
                     encode_close_request(self._buffers.session_id),
                     wait_for_ready=False,
+                    metadata=grpc_trace_metadata(),
                 )
                 decode_close_response(response)
             except grpc.aio.AioRpcError as error:
@@ -358,6 +365,7 @@ class ShmWorkerTransport(WorkerTransport):
         if close_error is not None:
             raise close_error
 
+    @traced("transport.shm.admission")
     async def _acquire(self, monotonic_deadline: float) -> ShmTransferBuffers:
         remaining = monotonic_deadline - self._clock()
         if remaining <= 0:
@@ -419,28 +427,32 @@ class ShmWorkerTransport(WorkerTransport):
                 timeout_micros=timeout_micros,
             )
         )
-        call = self._execute(
-            request,
-            timeout=None,
-            wait_for_ready=False,
-        )
-        try:
-            if math.isinf(remaining):
-                response = await asyncio.shield(call)
-            else:
-                try:
-                    async with asyncio.timeout(remaining):
-                        response = await asyncio.shield(call)
-                except TimeoutError as error:
-                    with suppress(BaseException):
-                        await call
-                    raise _deadline_error("the Worker shared-memory deadline expired") from error
-        except asyncio.CancelledError:
-            with suppress(BaseException):
-                await call
-            raise
-        except grpc.aio.AioRpcError as error:
-            raise _rpc_error(error) from error
+        with trace_span("transport.shm.rpc", kind="client"):
+            call = self._execute(
+                request,
+                timeout=None,
+                wait_for_ready=False,
+                metadata=grpc_trace_metadata(),
+            )
+            try:
+                if math.isinf(remaining):
+                    response = await asyncio.shield(call)
+                else:
+                    try:
+                        async with asyncio.timeout(remaining):
+                            response = await asyncio.shield(call)
+                    except TimeoutError as error:
+                        with suppress(BaseException):
+                            await call
+                        raise _deadline_error(
+                            "the Worker shared-memory deadline expired"
+                        ) from error
+            except asyncio.CancelledError:
+                with suppress(BaseException):
+                    await call
+                raise
+            except grpc.aio.AioRpcError as error:
+                raise _rpc_error(error) from error
 
         try:
             decode_execute_response(response, generation, self._spec)
@@ -460,7 +472,7 @@ class ShmWorkerTransport(WorkerTransport):
 
     async def _run_cpu(self, function: Callable[..., Any], *args: object) -> Any:
         loop = asyncio.get_running_loop()
-        work = loop.run_in_executor(self._executor, function, *args)
+        work = loop.run_in_executor(self._executor, contextvars.copy_context().run, function, *args)
         try:
             return await asyncio.shield(work)
         except asyncio.CancelledError:

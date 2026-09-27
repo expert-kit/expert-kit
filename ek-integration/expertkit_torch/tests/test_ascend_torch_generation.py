@@ -51,7 +51,9 @@ def _inputs(
     return cluster, experiment
 
 
-def _generate(cluster: Path, experiment: Path, output: Path) -> None:
+def _generate(
+    cluster: Path, experiment: Path, output: Path, *, expect_success: bool = True
+) -> subprocess.CompletedProcess[str]:
     environment = os.environ.copy()
     environment["PYTHONPATH"] = str(ASCEND)
     completed = subprocess.run(
@@ -71,7 +73,9 @@ def _generate(cluster: Path, experiment: Path, output: Path) -> None:
         text=True,
         env=environment,
     )
-    assert completed.returncode == 0, completed.stderr
+    if expect_success:
+        assert completed.returncode == 0, completed.stderr
+    return completed
 
 
 @pytest.mark.parametrize(
@@ -159,3 +163,103 @@ def test_random_generation_does_not_emit_torch_config(
     _generate(cluster, experiment, output)
 
     assert not (output / "torch-bench.yaml").exists()
+
+
+@pytest.mark.parametrize("model_config", ["qwen3-30b-a3b", "deepseek-v3"])
+def test_tracing_defaults_off_in_every_generated_role(tmp_path: Path, model_config: str) -> None:
+    cluster, experiment = _inputs(tmp_path, model_config=model_config)
+    output = tmp_path / "generated"
+
+    _generate(cluster, experiment, output)
+
+    attention = yaml.safe_load((output / "compose.attention.yaml").read_text())
+    serve = yaml.safe_load((output / "vllm-serve.yaml").read_text())
+    assert "EK_TRACE_ENDPOINT" not in attention["services"]["attention"]["environment"]
+    assert "EK_TRACE_SAMPLE_RATIO" not in attention["services"]["attention"]["environment"]
+    assert "enforce-eager" not in serve
+    workers = sorted(output.glob("worker-pool*/workers/worker-*.yaml"))
+    assert workers
+    assert all(
+        yaml.safe_load(path.read_text())["observability"]["tracing"]["enabled"] is False
+        for path in workers
+    )
+
+
+def test_tracing_enabled_reaches_attention_and_every_worker(tmp_path: Path) -> None:
+    cluster, experiment = _inputs(tmp_path)
+    data = yaml.safe_load(experiment.read_text())
+    data["tracing"] = {
+        "enabled": True,
+        "endpoint": "http://192.0.2.40:4317",
+        "sample_ratio": 0.25,
+    }
+    experiment.write_text(yaml.safe_dump(data))
+    output = tmp_path / "generated"
+
+    _generate(cluster, experiment, output)
+
+    attention = yaml.safe_load((output / "compose.attention.yaml").read_text())
+    env = attention["services"]["attention"]["environment"]
+    assert env["EK_TRACE_ENDPOINT"] == "http://192.0.2.40:4317/"
+    assert env["EK_TRACE_SAMPLE_RATIO"] == "0.25"
+    assert "EK_TRACE_ENDPOINT" not in attention["services"]["benchmark"]["environment"]
+    serve = yaml.safe_load((output / "vllm-serve.yaml").read_text())
+    assert serve["enforce-eager"] is True
+    workers = sorted(output.glob("worker-pool*/workers/worker-*.yaml"))
+    assert len(workers) == 32
+    for path in workers:
+        tracing = yaml.safe_load(path.read_text())["observability"]["tracing"]
+        assert tracing == {
+            "enabled": True,
+            "endpoint": "http://192.0.2.40:4317/",
+            "sample_ratio": 0.25,
+        }
+
+
+def test_tracing_off_can_retain_endpoint_and_eager_mode(tmp_path: Path) -> None:
+    cluster, experiment = _inputs(tmp_path)
+    data = yaml.safe_load(experiment.read_text())
+    data["tracing"] = {
+        "enabled": False,
+        "endpoint": "http://192.0.2.40:4317",
+        "sample_ratio": 0.25,
+    }
+    data["serve"]["enforce_eager"] = True
+    experiment.write_text(yaml.safe_dump(data))
+    output = tmp_path / "generated"
+
+    _generate(cluster, experiment, output)
+
+    attention = yaml.safe_load((output / "compose.attention.yaml").read_text())
+    assert "EK_TRACE_ENDPOINT" not in attention["services"]["attention"]["environment"]
+    assert yaml.safe_load((output / "vllm-serve.yaml").read_text())["enforce-eager"] is True
+    worker = yaml.safe_load((output / "worker-pool1/workers/worker-00.yaml").read_text())
+    assert worker["observability"]["tracing"] == {"enabled": False}
+
+
+@pytest.mark.parametrize(
+    ("tracing", "error"),
+    [
+        ({"enabled": True}, "endpoint is required"),
+        ({"enabled": True, "endpoint": "https://collector:4317"}, "plaintext HTTP"),
+        ({"enabled": True, "endpoint": "http://collector:4317", "sample_ratio": 0}, "sample_ratio"),
+        (
+            {"enabled": True, "endpoint": "http://collector:4317", "sample_ratio": 1.1},
+            "sample_ratio",
+        ),
+    ],
+)
+def test_tracing_rejects_invalid_enabled_config(
+    tmp_path: Path, tracing: dict[str, object], error: str
+) -> None:
+    cluster, experiment = _inputs(tmp_path)
+    data = yaml.safe_load(experiment.read_text())
+    data["tracing"] = tracing
+    experiment.write_text(yaml.safe_dump(data))
+    output = tmp_path / "generated"
+
+    result = _generate(cluster, experiment, output, expect_success=False)
+
+    assert result.returncode != 0
+    assert error in result.stderr
+    assert not output.exists()

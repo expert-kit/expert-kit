@@ -43,6 +43,10 @@ services:
     environment:
       EK_ENABLE: "1"
       EK_ADDR: {{ control.address }}:{{ control.frontend_control_port }}
+{% if tracing.enabled %}
+      EK_TRACE_ENDPOINT: {{ tracing.endpoint | tojson }}
+      EK_TRACE_SAMPLE_RATIO: "{{ tracing.sample_ratio }}"
+{% endif %}
       ASCEND_RT_VISIBLE_DEVICES: {{ attention.visible_devices }}
 {% if transport.type == "transfer_engine" %}
       EK_TRANSPORT_CONFIG: /configs/a-transport.toml

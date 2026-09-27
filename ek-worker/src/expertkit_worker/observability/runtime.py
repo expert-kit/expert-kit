@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Mapping, Sequence
+from collections.abc import Sequence
 from functools import partial
 from typing import Any, Protocol
 
-from expertkit_transport.tracing import TraceAttribute, TraceContext, Tracer, TraceSpan
+from expertkit_transport.observability import OpenTelemetryTracer, SystemRandomIdGenerator
+from expertkit_transport.tracing import Tracer
 
 from expertkit_worker.config.models import ObservabilityConfig
 from expertkit_worker.observability.api import NoopWorkerMetrics, WorkerMetrics
@@ -136,47 +137,6 @@ class _PrometheusMetrics:
         self._device_weight_bytes.set(byte_count)
 
 
-class _OpenTelemetryTracer:
-    """Adapt one configured OpenTelemetry tracer to the shared tracing boundary."""
-
-    def __init__(self, tracer: Any, context_api: Any, trace_api: Any) -> None:
-        self._tracer = tracer
-        self._context_api = context_api
-        self._trace_api = trace_api
-
-    def current_span_is_recording(self) -> bool:
-        return bool(self._trace_api.get_current_span().is_recording())
-
-    def capture_context(self) -> TraceContext:
-        return self._context_api.get_current()
-
-    def start_span(
-        self,
-        name: str,
-        *,
-        context: TraceContext | None = None,
-        attributes: Mapping[str, TraceAttribute] | None = None,
-    ) -> TraceSpan:
-        return self._tracer.start_span(
-            name,
-            context=context,
-            attributes=None if attributes is None else dict(attributes),
-        )
-
-    def start_as_current_span(
-        self,
-        name: str,
-        *,
-        context: TraceContext | None = None,
-        attributes: Mapping[str, TraceAttribute] | None = None,
-    ) -> Any:
-        return self._tracer.start_as_current_span(
-            name,
-            context=context,
-            attributes=None if attributes is None else dict(attributes),
-        )
-
-
 class _OptionalObservability:
     def __init__(self, config: ObservabilityConfig, *, worker_id: str) -> None:
         self._listen = config.prometheus.listen if config.prometheus.enabled else None
@@ -198,8 +158,6 @@ class _OptionalObservability:
         self._tracer: Tracer | None = None
         self._interceptors: tuple[Any, ...] = ()
         if config.tracing.enabled:
-            from opentelemetry import context as otel_context
-            from opentelemetry import trace as otel_trace
             from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
             from opentelemetry.instrumentation.grpc import aio_server_interceptor
             from opentelemetry.sdk.resources import Resource
@@ -216,6 +174,7 @@ class _OptionalObservability:
                     }
                 ),
                 sampler=ParentBased(TraceIdRatioBased(config.tracing.sample_ratio)),
+                id_generator=SystemRandomIdGenerator(),
             )
             exporter = OTLPSpanExporter(endpoint=endpoint, insecure=True)
             provider.add_span_processor(
@@ -227,11 +186,7 @@ class _OptionalObservability:
                 )
             )
             self._tracer_provider = provider
-            self._tracer = _OpenTelemetryTracer(
-                provider.get_tracer("expertkit-worker"),
-                otel_context,
-                otel_trace,
-            )
+            self._tracer = OpenTelemetryTracer(provider.get_tracer("expertkit-worker"))
             self._interceptors = (aio_server_interceptor(tracer_provider=provider),)
 
     @property

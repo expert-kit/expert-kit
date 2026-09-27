@@ -273,3 +273,37 @@ def test_tracing_extracts_parent_context_and_exports_off_the_rpc_path() -> None:
             assert by_name[name].parent_span_id == by_name["worker.batch.execute"].span_id
 
     asyncio.run(scenario())
+
+
+def test_frontend_export_is_asynchronous_and_close_flushes() -> None:
+    from expertkit_transport.observability import FrontendTracing
+    from expertkit_transport.tracing import trace_span, use_tracer
+
+    async def scenario() -> None:
+        collector = _TraceCollector()
+        server = grpc.aio.server()
+        trace_service_pb2_grpc.add_TraceServiceServicer_to_server(collector, server)
+        port = server.add_insecure_port("127.0.0.1:0")
+        await server.start()
+        frontend = FrontendTracing(f"http://127.0.0.1:{port}")
+        try:
+            with use_tracer(frontend.tracer), trace_span("frontend.model_forward"):
+                pass
+            async with asyncio.timeout(3):
+                await collector.received.wait()
+            assert not collector.release.is_set()
+        finally:
+            collector.release.set()
+            await asyncio.to_thread(frontend.close)
+            await asyncio.to_thread(frontend.close)
+            await server.stop(None)
+        spans = [
+            span
+            for request in collector.requests
+            for resource in request.resource_spans
+            for scope in resource.scope_spans
+            for span in scope.spans
+        ]
+        assert [span.name for span in spans] == ["frontend.model_forward"]
+
+    asyncio.run(scenario())

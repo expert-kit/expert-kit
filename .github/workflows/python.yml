@@ -125,7 +125,11 @@ jobs:
             tests: ek-worker/tests/unit/backends/ggml ek-worker/tests/unit/test_factory.py
           - extra: observability
             import_check: import opentelemetry.sdk, prometheus_client
-            tests: ek-worker/tests/integration/observability
+            tests: >-
+              ek-worker/tests/integration/observability
+              ek-transport/tests/unit/test_tracing.py
+              ek-integration/expertkit_torch/tests/test_benchmark.py
+              ek-integration/expertkit_vllm/tests/test_tracing.py
 
     steps:
       - name: Check out source
