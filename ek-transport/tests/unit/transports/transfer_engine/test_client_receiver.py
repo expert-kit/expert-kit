@@ -286,7 +286,9 @@ async def start_pair(
         session_close_grace_secs=session_close_grace_secs,
         owns_runtime=False,
     )
-    buffers = receiver.create_batch_buffers(BatchBufferConfig(4, 3, 2, torch.float32, torch.device("cpu")))
+    buffers = receiver.create_batch_buffers(
+        BatchBufferConfig(4, 3, 2, torch.float32, torch.device("cpu"))
+    )
     await receiver.start()
     transport = TransferEngineWorkerTransport(
         f"127.0.0.1:{receiver.bound_port}",
@@ -316,9 +318,11 @@ async def complete(received: ReceivedBatch, *, multiplier: float = 2) -> None:
     await received.complete(destination)
 
 
-def test_worker_pulls_three_inputs_and_writes_one_output() -> None:
+@pytest.mark.parametrize("unary", [False, True])
+def test_worker_pulls_three_inputs_and_writes_one_output(unary: bool) -> None:
     async def scenario() -> None:
         pair = await start_pair()
+        pair.transport._use_unary_execute = unary
         batch = worker_batch()
         output = torch.empty((2, 3), dtype=torch.float32)
         try:
@@ -502,11 +506,14 @@ def test_unexpected_native_batch_exception_retains_both_registered_arenas(
     asyncio.run(scenario())
 
 
+@pytest.mark.parametrize("unary", [False, True])
 def test_repeated_cancel_during_terminal_release_still_publishes_completion(
     monkeypatch: pytest.MonkeyPatch,
+    unary: bool,
 ) -> None:
     async def scenario() -> None:
         pair = await start_pair(max_in_flight=1)
+        pair.transport._use_unary_execute = unary
         release_started = asyncio.Event()
         allow_release = asyncio.Event()
         original_finish = pair.receiver._queue.finish  # type: ignore[attr-defined]
@@ -828,7 +835,9 @@ def test_two_phase_close_gates_sibling_between_deregister_and_commit(
             max_pending_batches=1,
             owns_runtime=False,
         )
-        buffers = receiver.create_batch_buffers(BatchBufferConfig(4, 3, 2, torch.float32, torch.device("cpu")))
+        buffers = receiver.create_batch_buffers(
+            BatchBufferConfig(4, 3, 2, torch.float32, torch.device("cpu"))
+        )
         await receiver.start()
         transports = [
             TransferEngineWorkerTransport(
@@ -927,7 +936,9 @@ def test_concurrent_prepared_epochs_hold_gate_until_every_commit(
             max_pending_batches=1,
             owns_runtime=False,
         )
-        buffers = receiver.create_batch_buffers(BatchBufferConfig(4, 3, 2, torch.float32, torch.device("cpu")))
+        buffers = receiver.create_batch_buffers(
+            BatchBufferConfig(4, 3, 2, torch.float32, torch.device("cpu"))
+        )
         await receiver.start()
         transports = [
             TransferEngineWorkerTransport(
@@ -1027,7 +1038,9 @@ def test_close_waits_past_start_timeout_for_active_sibling_session(
             max_pending_batches=1,
             owns_runtime=False,
         )
-        buffers = receiver.create_batch_buffers(BatchBufferConfig(4, 3, 2, torch.float32, torch.device("cpu")))
+        buffers = receiver.create_batch_buffers(
+            BatchBufferConfig(4, 3, 2, torch.float32, torch.device("cpu"))
+        )
         await receiver.start()
         transports = [
             TransferEngineWorkerTransport(
@@ -1733,7 +1746,9 @@ def test_unprovable_input_staging_retains_the_caller_batch_and_poisoned_graph(
         monkeypatch.setattr(
             client_module,
             "accelerator_for",
-            lambda device: type("InjectedAccelerator", (), {"current_stream": lambda self: object()})(),
+            lambda device: type(
+                "InjectedAccelerator", (), {"current_stream": lambda self: object()}
+            )(),
         )
 
         original_copy = client_module._copy_tensor  # type: ignore[attr-defined]
@@ -1802,7 +1817,9 @@ def test_unprovable_output_staging_quarantines_the_output_pool_lease(
         monkeypatch.setattr(
             client_module,
             "accelerator_for",
-            lambda device: type("InjectedAccelerator", (), {"current_stream": lambda self: object()})(),
+            lambda device: type(
+                "InjectedAccelerator", (), {"current_stream": lambda self: object()}
+            )(),
         )
 
         original_copy = client_module._copy_tensor  # type: ignore[attr-defined]

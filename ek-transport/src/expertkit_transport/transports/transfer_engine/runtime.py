@@ -176,5 +176,23 @@ class TransferEngineRuntime(MooncakeMemoryTransport):
             monotonic_deadline=monotonic_deadline,
         )
 
+    async def batch_read_ready(
+        self,
+        target_session: str,
+        local_tensors: Sequence[torch.Tensor],
+        remote_addresses: Sequence[int],
+        lengths: Sequence[int],
+        *,
+        monotonic_deadline: float,
+    ) -> None:
+        """Read all input regions and acquire them in one native submission."""
+        await self._batch_transfer(
+            "read",
+            target_session,
+            self._tensor_slices(local_tensors, remote_addresses, lengths),
+            monotonic_deadline=monotonic_deadline,
+            acquire_writes=True,
+        )
+
 
 __all__ = ["TransferEngineRuntime", "TransferEngineRuntimeConfig", "TransferEngineRuntimeProtocol"]

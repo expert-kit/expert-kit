@@ -172,6 +172,8 @@ class TransferEngineWorkerTransport(WorkerTransport):
         self._channel: grpc.aio.Channel | None = None
         self._open: Any = None
         self._execute: Any = None
+        self._execute_unary: Any = None
+        self._use_unary_execute = False
         self._close_session: Any = None
         self._sequence = 0
         self._registered = False
@@ -224,6 +226,11 @@ class TransferEngineWorkerTransport(WorkerTransport):
                 )
                 execute = channel.unary_stream(
                     _EXECUTE_METHOD,
+                    request_serializer=_identity,
+                    response_deserializer=_identity,
+                )
+                execute_unary = channel.unary_unary(
+                    "/ek.worker.v2.TransferEngineComputationService/ExecuteUnary",
                     request_serializer=_identity,
                     response_deserializer=_identity,
                 )
@@ -289,6 +296,8 @@ class TransferEngineWorkerTransport(WorkerTransport):
             self._channel = channel
             self._open = open_session
             self._execute = execute
+            self._execute_unary = execute_unary
+            self._use_unary_execute = result.execute_unary
             self._close_session = close_session
 
     async def execute(
@@ -414,7 +423,8 @@ class TransferEngineWorkerTransport(WorkerTransport):
             distinct_expert_ids=batch.distinct_expert_ids,
         )
         self._runtime.ensure_healthy()
-        call = self._execute(
+        execute = self._execute_unary if self._use_unary_execute else self._execute
+        call = execute(
             encode_execute_pull_request(request, self._spec),
             # Keep the control stream alive briefly after the request deadline so
             # the Worker can drain an already-started DMA and report its terminal
@@ -424,24 +434,25 @@ class TransferEngineWorkerTransport(WorkerTransport):
         )
         terminal_confirmed = False
         try:
-            first = await call.read()
-            if first is grpc.aio.EOF:
-                raise TransportProtocolError("Transfer Engine stream ended before admission")
-            try:
-                decode_admitted(first, sequence)
-            except TransportProtocolError as admission_error:
+            if self._use_unary_execute:
+                terminal = await call
+            else:
+                first = await call.read()
+                if first is grpc.aio.EOF:
+                    raise TransportProtocolError("Transfer Engine stream ended before admission")
                 try:
-                    decode_terminal(first, sequence, self._spec)
-                except TransportError:
-                    # A first-frame terminal error is an ordered, explicit
-                    # pre-admission rejection.  No remote DMA can follow it.
-                    terminal_confirmed = True
-                    raise
-                raise admission_error
-
-            terminal = await call.read()
-            if terminal is grpc.aio.EOF:
-                raise TransportProtocolError("Transfer Engine stream ended before completion")
+                    decode_admitted(first, sequence)
+                except TransportProtocolError as admission_error:
+                    try:
+                        decode_terminal(first, sequence, self._spec)
+                    except TransportError:
+                        # Ordered pre-admission rejection cannot issue remote DMA.
+                        terminal_confirmed = True
+                        raise
+                    raise admission_error
+                terminal = await call.read()
+                if terminal is grpc.aio.EOF:
+                    raise TransportProtocolError("Transfer Engine stream ended before completion")
             try:
                 decode_terminal(terminal, sequence, self._spec)
             except TransportError:
@@ -450,16 +461,17 @@ class TransferEngineWorkerTransport(WorkerTransport):
                 )
                 terminal_confirmed = True
                 raise
-            await self._runtime.acquire_remote_writes(
-                monotonic_deadline=math.inf,
-            )
+            fused_output = self._native_staging_available()
+            if not fused_output:
+                await self._runtime.acquire_remote_writes(monotonic_deadline=math.inf)
             terminal_confirmed = True
-            trailing = await call.read()
-            if trailing is not grpc.aio.EOF:
-                raise TransportProtocolError("Transfer Engine stream contains extra messages")
+            if not self._use_unary_execute:
+                trailing = await call.read()
+                if trailing is not grpc.aio.EOF:
+                    raise TransportProtocolError("Transfer Engine stream contains extra messages")
 
             try:
-                await self._unpack_output(batch, output, slot)
+                await self._unpack_output(batch, output, slot, acquire_writes=fused_output)
             except _UnsafeDeviceStaging as unsafe:
                 raise self._quarantine_device_staging(
                     unsafe.phase,
@@ -526,6 +538,23 @@ class TransferEngineWorkerTransport(WorkerTransport):
         monotonic_deadline: float,
     ) -> None:
         token_count = batch.token_count
+        if self._native_staging_available():
+
+            def copy_input() -> None:
+                if batch.token_indices is None:
+                    _copy_tensor(slot.hidden_states[:token_count], batch.hidden_states)
+                else:
+                    torch.index_select(
+                        batch.hidden_states,
+                        0,
+                        batch.token_indices,
+                        out=slot.hidden_states[:token_count],
+                    )
+                _copy_tensor(slot.expert_ids[:token_count], batch.expert_ids)
+                _copy_tensor(slot.routing_weights[:token_count], batch.routing_weights)
+
+            await self._stage_device(copy_input, slot, "input", monotonic_deadline)
+            return
         with torch.inference_mode():
             try:
                 if batch.token_indices is None:
@@ -575,7 +604,18 @@ class TransferEngineWorkerTransport(WorkerTransport):
         batch: WorkerBatch,
         output: torch.Tensor,
         slot: TransferArenaSlot,
+        *,
+        acquire_writes: bool = False,
     ) -> None:
+        if self._native_staging_available():
+            await self._stage_device(
+                lambda: _copy_tensor(output, slot.partial_output[: batch.token_count]),
+                slot,
+                "output",
+                math.inf,
+                acquire_writes=acquire_writes,
+            )
+            return
         try:
             _copy_tensor(output, slot.partial_output[: batch.token_count])
             if slot.copy_event is not None:
@@ -604,6 +644,57 @@ class TransferEngineWorkerTransport(WorkerTransport):
             if slot.copy_event is not None:
                 raise _UnsafeDeviceStaging("output-copy fence", error) from error
             raise
+
+    def _native_staging_available(self) -> bool:
+        return self._device.type == "npu" and callable(
+            getattr(self._runtime, "run_device_operation", None)
+        )
+
+    async def _stage_device(
+        self,
+        copy: Callable[[], None],
+        slot: TransferArenaSlot,
+        phase: str,
+        deadline: float,
+        *,
+        acquire_writes: bool = False,
+    ) -> None:
+        accelerator = accelerator_for(self._device)
+        stream = accelerator.current_stream()
+
+        def stage() -> None:
+            with torch.inference_mode(), accelerator.stream_context(stream):
+                try:
+                    copy()
+                    slot.copy_event.record(stream)
+                except BaseException as error:
+                    raise _UnsafeDeviceStaging(f"{phase}-copy", error) from error
+
+        try:
+            await self._runtime.run_device_operation(
+                stage,
+                monotonic_deadline=deadline,
+                subject=f"NPU {phase} staging",
+                acquire_writes=acquire_writes,
+                stream=stream,
+                completion_event=slot.copy_event,
+            )
+        except _UnsafeDeviceStaging:
+            raise
+        except asyncio.CancelledError as error:
+            try:
+                self._runtime.ensure_healthy()
+            except TransportError:
+                raise _UnsafeDeviceStaging(f"{phase}-copy fence", error) from error
+            raise
+        except TransportError as error:
+            try:
+                self._runtime.ensure_healthy()
+            except TransportError:
+                raise _UnsafeDeviceStaging(f"{phase}-copy fence", error) from error
+            raise
+        except BaseException as error:
+            raise _UnsafeDeviceStaging(f"{phase}-copy fence", error) from error
 
     def _quarantine_device_staging(
         self,
@@ -707,6 +798,8 @@ class TransferEngineWorkerTransport(WorkerTransport):
         self._channel = None
         self._open = None
         self._execute = None
+        self._execute_unary = None
+        self._use_unary_execute = False
         self._close_session = None
         self._worker_session_nonce = None
         if self._quarantined_slots or self._retain_arena:

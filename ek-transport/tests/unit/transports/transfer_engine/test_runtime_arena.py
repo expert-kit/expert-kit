@@ -555,6 +555,45 @@ def test_unexpected_native_batch_exception_quarantines_registered_storage(
     asyncio.run(scenario())
 
 
+def test_read_ready_acquire_status_failure_retains_registered_storage(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def scenario() -> None:
+        engine = _BlockingEngine()
+        engine.release.set()
+        runtime = TransferEngineRuntime(
+            TransferEngineRuntimeConfig(
+                segment_name="127.0.0.1",
+                metadata_server="P2PHANDSHAKE",
+                protocol="tcp",
+                device="cpu",
+            ),
+            engine=engine,
+        )
+        slab = torch.empty(1024, dtype=torch.uint8)
+        await runtime.register_tensor(slab)
+
+        def fail_acquire(_stream: object = None) -> None:
+            runtime._require_success(-1, "injected acquire")  # type: ignore[attr-defined]
+
+        monkeypatch.setattr(runtime, "_acquire_native", fail_acquire)
+        with pytest.raises(TransportError, match="injected acquire failed"):
+            await runtime.batch_read_ready(
+                "peer:19002",
+                (slab[:16],),
+                (12345,),
+                (16,),
+                monotonic_deadline=time.monotonic() + 5,
+            )
+        assert engine.started.is_set()
+        with pytest.raises(TransportError, match="quarantined"):
+            runtime.ensure_healthy()
+        assert runtime._registrations[slab.data_ptr()][0] is slab  # type: ignore[attr-defined]
+        await runtime.close()
+
+    asyncio.run(scenario())
+
+
 def test_cancelled_registration_commits_python_ownership_before_raising() -> None:
     async def scenario() -> None:
         engine = _BlockingRegistrationEngine()
@@ -619,7 +658,8 @@ def test_cancelled_unregistration_commits_python_release_before_raising() -> Non
     asyncio.run(scenario())
 
 
-def test_cancel_waits_for_native_dma_before_registered_slab_can_be_reused() -> None:
+@pytest.mark.parametrize("read_ready", [False, True])
+def test_cancel_waits_for_native_dma_before_registered_slab_can_be_reused(read_ready: bool) -> None:
     async def scenario() -> None:
         engine = _BlockingEngine()
         runtime = TransferEngineRuntime(
@@ -636,8 +676,9 @@ def test_cancel_waits_for_native_dma_before_registered_slab_can_be_reused() -> N
         await runtime.start()
         assert runtime.session_id == "127.0.0.1:19001"
         await runtime.register_tensor(slab)
+        read = runtime.batch_read_ready if read_ready else runtime.batch_read
         transfer = asyncio.create_task(
-            runtime.batch_read(
+            read(
                 "peer:19002",
                 (slab[:16],),
                 (12345,),

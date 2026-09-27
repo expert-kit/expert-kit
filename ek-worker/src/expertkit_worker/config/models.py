@@ -289,6 +289,7 @@ class TransferEngineTransportConfig(_StrictModel):
     transport_hint: Literal[""] = ""
     enable_experimental_rdma: bool = False
     max_registered_bytes: int | None = Field(default=None, gt=0)
+    ascend_receive_fence: Literal["stream", "device"] = "stream"
 
     @model_validator(mode="after")
     def validate_rdma_opt_in(self) -> TransferEngineTransportConfig:

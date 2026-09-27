@@ -258,11 +258,18 @@ class ExecutionSlot(ABC):
                 return self._set_result(None, initial_error, None)
 
             try:
+                borrowed = self._transport_buffers.execution_views(
+                    source, received.output_destination
+                )
                 return self._execute_impl(
                     received=received,
                     source=source,
                     backend=backend,
-                    tensors=self._valid_views(source.token_count),
+                    tensors=(
+                        self._valid_views(source.token_count)
+                        if borrowed is None
+                        else _SlotTensors(*borrowed)
+                    ),
                     clock=clock,
                     tracer=tracer,
                     batch_span=batch_span,

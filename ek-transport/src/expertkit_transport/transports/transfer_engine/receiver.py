@@ -308,6 +308,11 @@ class TransferEngineWorkerBatchReceiver(WorkerBatchReceiver):
                         request_deserializer=_identity,
                         response_serializer=_identity,
                     ),
+                    "ExecuteUnary": grpc.unary_unary_rpc_method_handler(
+                        self._execute_unary,
+                        request_deserializer=_identity,
+                        response_serializer=_identity,
+                    ),
                     _CLOSE_METHOD_NAME: grpc.unary_unary_rpc_method_handler(
                         self._close_session,
                         request_deserializer=_identity,
@@ -505,6 +510,7 @@ class TransferEngineWorkerBatchReceiver(WorkerBatchReceiver):
                 session_nonce=session.session_nonce,
                 backend=self._runtime.backend,
                 arena=self._arena.descriptor,
+                execute_unary=self._runtime.device.type == "npu",
             ),
             self._spec,
         )
@@ -526,6 +532,20 @@ class TransferEngineWorkerBatchReceiver(WorkerBatchReceiver):
             await context.abort(grpc.StatusCode.INVALID_ARGUMENT, str(error))
             raise AssertionError("context.abort must terminate the handler") from error
         return b""
+
+    async def _execute_unary(self, payload: bytes, context: grpc.aio.ServicerContext) -> bytes:
+        """Reuse the same admission/drain state machine with one terminal reply."""
+        terminal: bytes | None = None
+        responses = self._execute_pull(payload, context)
+        try:
+            async for response in responses:
+                terminal = response
+        finally:
+            await responses.aclose()
+        if terminal is None:
+            await context.abort(grpc.StatusCode.INTERNAL, "execution ended without terminal state")
+            raise AssertionError("context.abort must terminate the handler")
+        return terminal
 
     async def _execute_pull(
         self,
@@ -665,7 +685,9 @@ class TransferEngineWorkerBatchReceiver(WorkerBatchReceiver):
         remote = item.session.arena.addresses(request.client_slot_index)
         lengths = transfer_lengths(self._spec, token_count)
         try:
-            await self._runtime.batch_read(
+            read_ready = getattr(self._runtime, "batch_read_ready", None)
+            read = read_ready if callable(read_ready) else self._runtime.batch_read
+            await read(
                 item.session.target_session_id,
                 (
                     item.slot.hidden_states[:token_count],
@@ -676,9 +698,10 @@ class TransferEngineWorkerBatchReceiver(WorkerBatchReceiver):
                 lengths[:3],
                 monotonic_deadline=item.monotonic_deadline,
             )
-            await self._runtime.acquire_remote_writes(
-                monotonic_deadline=item.monotonic_deadline,
-            )
+            if not callable(read_ready):
+                await self._runtime.acquire_remote_writes(
+                    monotonic_deadline=item.monotonic_deadline,
+                )
             if not item._input_ready.done():
                 item._input_ready.set_result(None)
             return await asyncio.shield(item._response)
@@ -967,10 +990,10 @@ class TransferEngineWorkerBatchReceiver(WorkerBatchReceiver):
                 self._sessions.pop(session.client_epoch)
                 if not self._sessions:
                     self._sessions_empty.set()
-                if (
-                    not remaining_target_sessions
-                    and session.backend not in {"rdma", "ascend_direct"}
-                ):
+                if not remaining_target_sessions and session.backend not in {
+                    "rdma",
+                    "ascend_direct",
+                }:
                     self._target_generations.pop(session.target_session_id)
                 gates.remove(session.client_epoch)
                 if not gates:

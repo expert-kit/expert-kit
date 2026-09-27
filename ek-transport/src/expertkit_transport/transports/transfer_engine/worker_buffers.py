@@ -30,7 +30,7 @@ def _require_tensor(
 
 
 class TransferEngineWorkerBatchBuffers(WorkerBatchBuffers):
-    """Copy a registered receive slot into one fixed Backend execution slot."""
+    """Borrow a registered receive slot until computation and WRITE complete."""
 
     def __init__(self, spec: BatchBufferConfig, *, experts_per_layer: int) -> None:
         if (
@@ -58,6 +58,18 @@ class TransferEngineWorkerBatchBuffers(WorkerBatchBuffers):
     @property
     def host_staging_bytes(self) -> int:
         return self._spec.max_batch_tokens * self._spec.top_k * 8
+
+    def execution_views(
+        self,
+        batch: WorkerBatch,
+        destination: torch.Tensor | None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        self._require_open()
+        if destination is None:
+            raise ValueError("Transfer Engine output requires a registered destination")
+        # release_input drops a view, not the lease. The receiver returns the
+        # arena slot only after terminal WRITE/rejection handling.
+        return batch.hidden_states, batch.expert_ids, batch.routing_weights, destination
 
     def copy_input(
         self,
@@ -92,9 +104,13 @@ class TransferEngineWorkerBatchBuffers(WorkerBatchBuffers):
                 dtype=dtype,
                 device=self._spec.device,
             )
-        hidden_states.copy_(batch.hidden_states)
-        expert_ids.copy_(batch.expert_ids)
-        routing_weights.copy_(batch.routing_weights)
+        for destination, source in (
+            (hidden_states, batch.hidden_states),
+            (expert_ids, batch.expert_ids),
+            (routing_weights, batch.routing_weights),
+        ):
+            if destination.data_ptr() != source.data_ptr():
+                destination.copy_(source)
 
         host_expert_ids = self._host_expert_ids[: batch.token_count]
         host_routing_weights = self._host_routing_weights[: batch.token_count]
@@ -137,7 +153,8 @@ class TransferEngineWorkerBatchBuffers(WorkerBatchBuffers):
             dtype=self._spec.dtype,
             device=self._spec.device,
         )
-        destination.copy_(partial_output)
+        if destination.data_ptr() != partial_output.data_ptr():
+            destination.copy_(partial_output)
         return destination
 
     def close(self) -> None:

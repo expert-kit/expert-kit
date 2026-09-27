@@ -267,6 +267,7 @@ async def build_worker_application(
                     transport_hint=config.transport.transport_hint,
                     enable_experimental_rdma=config.transport.enable_experimental_rdma,
                     max_registered_bytes=config.transport.max_registered_bytes,
+                    ascend_receive_fence=config.transport.ascend_receive_fence,
                 )
             )
             receiver = TransferEngineWorkerBatchReceiver(

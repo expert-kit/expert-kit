@@ -40,6 +40,7 @@ class TransferOpenSessionResult:
     session_nonce: str
     backend: str
     arena: TransferArenaDescriptor
+    execute_unary: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -208,6 +209,7 @@ def encode_open_session_response(
         {
             "version": _PROTOCOL_VERSION,
             "kind": "open_session_response",
+            "execute_unary": result.execute_unary,
             "worker_start_id": result.worker_start_id,
             "worker_session_id": result.worker_session_id,
             "session_nonce": result.session_nonce,
@@ -232,12 +234,16 @@ def decode_open_session_response(
     backend = _string(fields, "backend", maximum_bytes=32)
     if backend != expected_backend:
         raise TransportProtocolError("Transfer Engine data backend changed during open")
+    execute_unary = fields.get("execute_unary", False)
+    if not isinstance(execute_unary, bool):
+        raise TransportProtocolError("Transfer Engine execute_unary must be a Boolean")
     return TransferOpenSessionResult(
         worker_start_id=worker_start_id,
         worker_session_id=_string(fields, "worker_session_id"),
         session_nonce=_string(fields, "session_nonce", maximum_bytes=128),
         backend=backend,
         arena=_decode_arena(fields, spec),
+        execute_unary=execute_unary,
     )
 
 

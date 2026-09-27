@@ -18,9 +18,32 @@ registered across requests. Optional `max_registered_bytes` limits the total
 registered memory. Worker admission also accounts for alignment overhead.
 
 Before a native call, executor threads select the correct NPU. Local staging
-events order producer copies before READ/WRITE. After known successful remote
-completion, an ACL device synchronization orders local consumers. This first
-receive barrier synchronizes the whole device.
+events order producer copies before READ/WRITE. Successful ADXL `TransferSync`
+is the DMA terminal boundary; the forced Mooncake binding also waits for every
+slice to complete before returning. E only sends a terminal success response
+after its WRITE completes. Local consumers then drain their associated stream,
+without synchronizing unrelated execution-slot streams. Set
+`ascend_receive_fence = "device"` in A's TE configuration and E's transport
+configuration to retain the previous device-wide receive barrier when needed.
+
+The E execution slot borrows the registered input and output arena views.
+`release_input()` drops the request view but does not release the arena lease;
+the receiver retains it until response WRITE or terminal rejection handling
+finishes. Routing values are still validated. Transports without leased buffers
+continue using the execution slot's fixed allocations.
+
+Input READ and its receive barrier share one native submission. A's local
+input copies and event recording share another; its output acquire, copy,
+and event recording share one submission too. Staging callbacks return after
+enqueueing instead of blocking native submission threads on event completion.
+One runtime-owned completion thread queries pending events in batches and
+notifies the event loop only when a batch completes. Submission and completion
+share one terminal future, avoiding per-operation tasks and query round trips.
+The caller retains its arena and tensor owners until the recorded event completes,
+including after cancellation or deadline expiry. The three input regions remain
+one batch READ. On NPU, OpenSession negotiates `ExecuteUnary` to return one terminal
+response over the cached gRPC channel. `ExecutePull` remains available for
+older peers. Neither control method carries activation payloads.
 
 Cancellation and deadlines wait for the submitted native call to return.
 Native transfer failures are treated as an unknown DMA state: the process

@@ -1,8 +1,8 @@
 """Process-wide Mooncake Transfer Engine adapter.
 
-Mooncake's Python API is synchronous.  This module confines every native call
-to one bounded executor and does not release a caller's registered memory until
-an in-flight native operation reaches a terminal state.
+Mooncake's Python API is synchronous. Native submissions use a bounded executor;
+local staging completion is queried in batches on a separate bounded executor.
+Registered memory remains owned until device work reaches a terminal state.
 """
 
 from __future__ import annotations
@@ -10,9 +10,11 @@ from __future__ import annotations
 import asyncio
 import math
 import os
+import threading
 import time
 import uuid
 from collections.abc import Callable, Sequence
+from concurrent.futures import Future as ConcurrentFuture
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import suppress
 from dataclasses import dataclass
@@ -172,8 +174,14 @@ class MooncakeDriverConfig:
     enable_experimental_rdma: bool = False
     max_registered_bytes: int | None = None
     client_max_in_flight: int | None = None
+    ascend_receive_fence: str = "stream"
 
     def __post_init__(self) -> None:
+        if not isinstance(self.ascend_receive_fence, str) or self.ascend_receive_fence not in {
+            "stream",
+            "device",
+        }:
+            raise ValueError("ascend_receive_fence must be stream or device")
         for name in ("segment_name", "metadata_server", "protocol"):
             value = getattr(self, name)
             if not isinstance(value, str) or not value:
@@ -257,6 +265,13 @@ class MooncakeMemoryTransport:
         self._registrations: dict[int, tuple[object, int]] = {}
         self._pending_registrations: dict[int, tuple[object, int]] = {}
         self._operations: set[asyncio.Future[Any]] = set()
+        self._staging_events: dict[
+            asyncio.Future[Any], tuple[Any, Any, asyncio.AbstractEventLoop]
+        ] = {}
+        self._staging_condition = threading.Condition()
+        self._completion_running = False
+        self._staging_failure: BaseException | None = None
+        self._completion_executor: ThreadPoolExecutor | None = None
         self._quarantine_reason: str | None = None
         self._closing = False
         self._close_task: asyncio.Task[None] | None = None
@@ -437,27 +452,21 @@ class MooncakeMemoryTransport:
         if self.device.type == "cpu":
             return
         try:
-            engine = self._require_engine()
-            name = (
-                "acquire_ascend_writes" if self.device.type == "npu" else "flush_gpudirect_writes"
+            stream = (
+                torch.get_device_module(self.device).current_stream(self.device)
+                if self.device.type == "npu"
+                else None
             )
-            flush = getattr(engine, name, None)
-            if not callable(flush):
-                raise RuntimeError(f"the Mooncake wheel lacks required receive fence {name}")
             await self._run_native(
-                flush,
+                partial(self._acquire_native, stream),
                 # A recorded remote-write completion still needs an acquire even
-                # after the request deadline. Validate the native result in the
-                # commit hook before deferred cancellation can escape.
+                # after the request deadline. Complete and validate the barrier
+                # inside this native operation before cancellation can escape.
                 monotonic_deadline=math.inf,
                 subject=f"{self.device.type.upper()} remote-write acquire fence",
-                commit=lambda result: self._require_success(
-                    result,
-                    f"{self.device.type.upper()} remote-write acquire fence",
-                ),
             )
         except asyncio.CancelledError:
-            # The commit hook ran before _run_native re-raised cancellation.
+            # The native barrier completed before _run_native raised cancellation.
             raise
         except BaseException as error:
             self.quarantine(
@@ -608,6 +617,145 @@ class MooncakeMemoryTransport:
         else:
             self._session_id = self._config.segment_name
 
+    def _acquire_native(self, stream: Any = None) -> None:
+        if self.device.type == "cpu":
+            return
+        if self.device.type == "npu" and self._config.ascend_receive_fence == "stream":
+            # The forced adapter reports completion only after ADXL TransferSync
+            # succeeds. READ data, or peer WRITE followed by its terminal control
+            # response, is DMA-terminal before this local consumer runs. Drain
+            # its stream without waiting for unrelated execution-slot streams.
+            if stream is None:
+                stream = torch.get_device_module(self.device).current_stream(self.device)
+            stream.synchronize()
+            return
+        name = "acquire_ascend_writes" if self.device.type == "npu" else "flush_gpudirect_writes"
+        flush = getattr(self._require_engine(), name, None)
+        if not callable(flush):
+            raise RuntimeError(f"the Mooncake wheel lacks required receive fence {name}")
+        self._require_success(flush(), f"{self.device.type.upper()} remote-write acquire fence")
+
+    async def run_device_operation(
+        self,
+        call: Callable[[], _T],
+        *,
+        monotonic_deadline: float,
+        subject: str,
+        acquire_writes: bool = False,
+        stream: Any = None,
+        completion_event: Any = None,
+    ) -> _T:
+        """Submit local work, then retain its owners until the recorded event completes.
+
+        With a completion event, the callback only enqueues work and records the
+        event. Waiting must not occupy a native submission thread. Callers without
+        an event retain the synchronous callback contract.
+        """
+        self.ensure_healthy()
+
+        def operation() -> _T:
+            if acquire_writes:
+                try:
+                    self._acquire_native(stream)
+                except BaseException:
+                    self.quarantine("remote-write visibility could not be proven")
+                    raise
+            return call()
+
+        if completion_event is not None and not callable(getattr(completion_event, "query", None)):
+            raise TypeError("staging completion event must implement query()")
+        return await self._run_native(
+            operation,
+            monotonic_deadline=monotonic_deadline,
+            subject=subject,
+            completion_event=completion_event,
+        )
+
+    def _staging_submitted(
+        self,
+        event: Any,
+        waiter: asyncio.Future[Any],
+        loop: asyncio.AbstractEventLoop,
+        submitted: ConcurrentFuture[Any],
+    ) -> None:
+        try:
+            result = submitted.result()
+        except BaseException as error:
+            self.quarantine("local staging submission failed before completion was proven")
+            loop.call_soon_threadsafe(self._finish_staging_batch, ((waiter, None),), error)
+            return
+        with self._staging_condition:
+            if self._staging_failure is not None:
+                loop.call_soon_threadsafe(
+                    self._finish_staging_batch, ((waiter, None),), self._staging_failure
+                )
+                return
+            self._staging_events[waiter] = (event, result, loop)
+            if not self._completion_running:
+                self._completion_running = True
+                self._completion_executor.submit(self._poll_staging_events)
+            self._staging_condition.notify()
+
+    def _query_staging_events(self, events: tuple[Any, ...]) -> tuple[bool, ...]:
+        def query() -> tuple[bool, ...]:
+            return tuple(event.query() for event in events)
+
+        return self._invoke_native(query)
+
+    def _finish_staging_batch(
+        self,
+        completed: tuple[tuple[asyncio.Future[Any], Any], ...],
+        error: BaseException | None = None,
+    ) -> None:
+        for waiter, result in completed:
+            if waiter.cancelled():
+                self.quarantine("staging completion waiter was cancelled before terminal state")
+            elif not waiter.done():
+                if error is None:
+                    waiter.set_result(result)
+                else:
+                    waiter.set_exception(error)
+
+    def _poll_staging_events(self) -> None:
+        # Query and coalesce completions entirely on one native thread. Only
+        # terminal batches wake the event loop; pending queries do not round-trip
+        # through asyncio or allocate a Task for each staging operation.
+        try:
+            while True:
+                with self._staging_condition:
+                    if not self._staging_events:
+                        self._completion_running = False
+                        return
+                    pending = tuple(self._staging_events.items())
+                ready = self._query_staging_events(tuple(entry[0] for _, entry in pending))
+                if not all(isinstance(complete, bool) for complete in ready):
+                    raise TypeError("staging event query() must return a Boolean")
+                batches: dict[asyncio.AbstractEventLoop, list[tuple[asyncio.Future[Any], Any]]] = {}
+                with self._staging_condition:
+                    for (waiter, (_, result, loop)), complete in zip(pending, ready, strict=True):
+                        if complete:
+                            self._staging_events.pop(waiter)
+                            batches.setdefault(loop, []).append((waiter, result))
+                for loop, completed in batches.items():
+                    loop.call_soon_threadsafe(self._finish_staging_batch, tuple(completed))
+                if not batches:
+                    # Briefly release the GIL when the device is still busy.
+                    # New submissions wake this wait immediately.
+                    with self._staging_condition:
+                        self._staging_condition.wait(timeout=0.0001)
+        except BaseException as error:
+            self.quarantine("local staging event query failed before completion was proven")
+            with self._staging_condition:
+                self._staging_failure = error
+                pending = tuple(self._staging_events.items())
+                self._staging_events.clear()
+                self._completion_running = False
+            batches = {}
+            for waiter, (_, result, loop) in pending:
+                batches.setdefault(loop, []).append((waiter, result))
+            for loop, completed in batches.items():
+                loop.call_soon_threadsafe(self._finish_staging_batch, tuple(completed), error)
+
     async def _batch_transfer(
         self,
         operation: str,
@@ -615,6 +763,7 @@ class MooncakeMemoryTransport:
         slices: Sequence[MemorySlice],
         *,
         monotonic_deadline: float,
+        acquire_writes: bool = False,
     ) -> None:
         self.ensure_healthy()
         await self.start()
@@ -639,18 +788,31 @@ class MooncakeMemoryTransport:
             if operation == "read"
             else engine.batch_transfer_sync_write
         )
+        stream = (
+            torch.get_device_module(self.device).current_stream(self.device)
+            if acquire_writes and self.device.type == "npu"
+            else None
+        )
+
+        def transfer() -> object:
+            result = native(
+                target_session, local, list(remote), list(sizes), self._config.transport_hint
+            )
+            if acquire_writes and result in (None, 0):
+                try:
+                    self._acquire_native(stream)
+                except BaseException:
+                    # A status-derived TransportError must quarantine as well;
+                    # it is not an ordinary deadline/cancellation from the wait.
+                    self.quarantine("remote-write visibility could not be proven")
+                    raise
+            return result
+
         try:
             result = await self._run_native(
-                partial(
-                    native,
-                    target_session,
-                    local,
-                    list(remote),
-                    list(sizes),
-                    self._config.transport_hint,
-                ),
+                transfer,
                 monotonic_deadline=monotonic_deadline,
-                subject=f"Mooncake batch {operation}",
+                subject=f"Mooncake batch {operation}" + (" and acquire" if acquire_writes else ""),
             )
             if self._config.protocol == "ascend_direct" and result not in (None, 0):
                 raise RuntimeError("Ascend transfer failed without proven DMA termination")
@@ -676,6 +838,7 @@ class MooncakeMemoryTransport:
         subject: str,
         commit: Callable[[_T], None] | None = None,
         allow_during_close: bool = False,
+        completion_event: Any = None,
     ) -> _T:
         if self._closing and not allow_during_close:
             raise TransportError(
@@ -689,7 +852,21 @@ class MooncakeMemoryTransport:
         if remaining <= 0:
             raise _deadline_error(f"deadline expired before {subject}")
         loop = asyncio.get_running_loop()
-        future = loop.run_in_executor(self._executor, self._invoke_native, call)
+        if completion_event is None:
+            future = loop.run_in_executor(self._executor, self._invoke_native, call)
+        else:
+            # This single terminal future spans submission and device completion.
+            # Shielding/draining it retains the caller's callback and Tensor owners
+            # without introducing a second coroutine or event-loop wake per phase.
+            future = loop.create_future()
+            if self._completion_executor is None:
+                self._completion_executor = ThreadPoolExecutor(
+                    max_workers=1, thread_name_prefix="expertkit-staging-completion"
+                )
+            submitted = self._executor.submit(self._invoke_native, call)
+            submitted.add_done_callback(
+                partial(self._staging_submitted, completion_event, future, loop)
+            )
         self._operations.add(future)
         cancelled = False
         expired = False
@@ -722,7 +899,7 @@ class MooncakeMemoryTransport:
             commit(result)
         if cancelled:
             raise asyncio.CancelledError
-        if expired:
+        if expired or self._clock() >= monotonic_deadline:
             raise _deadline_error(f"deadline expired during {subject}")
         return result
 
@@ -735,6 +912,12 @@ class MooncakeMemoryTransport:
             try:
                 return await asyncio.shield(future), cancelled
             except asyncio.CancelledError:
+                if future.cancelled():
+                    # Event-loop shutdown can cancel an internal staging Task.
+                    # An already-cancelled future will never reach completion;
+                    # retain storage rather than spinning in the drain loop.
+                    self.quarantine("native completion waiter was cancelled before terminal state")
+                    raise
                 cancelled = True
 
     def _invoke_native(self, call: Callable[[], _T]) -> _T:
@@ -752,6 +935,8 @@ class MooncakeMemoryTransport:
         operations = tuple(self._operations)
         if operations:
             await asyncio.gather(*(asyncio.shield(op) for op in operations), return_exceptions=True)
+        if self._quarantine_reason is not None:
+            return
         async with self._registration_lock:
             engine = self._engine
             if engine is not None:
@@ -783,6 +968,8 @@ class MooncakeMemoryTransport:
         self._actual_backend = None
         self._engine = None
         self._executor.shutdown(wait=True, cancel_futures=False)
+        if self._completion_executor is not None:
+            self._completion_executor.shutdown(wait=True, cancel_futures=False)
 
     def _validate_region_device(self, region: MemoryRegion) -> None:
         if region.device != str(self.device):
