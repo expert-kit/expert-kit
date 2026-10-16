@@ -187,6 +187,11 @@ request. Success requires more than a healthy HTTP response: confirm that the
 Controller sees all Workers, the Weight Server serves original layer IDs 3
 through 60, and Worker logs show a real expert load and computation.
 
+Keep `backend: ascend_fused` on both expert pools for this converted BF16
+checkpoint. The backend consumes the standard gate, up, and down projection
+weights after the conversion removes the original FP8 declaration; it does not
+make the original FP8 checkpoint executable.
+
 ## 5. Benchmark gates
 
 After one routed request passes, run the benchmark from the shared workflow.

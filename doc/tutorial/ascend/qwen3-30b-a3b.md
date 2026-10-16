@@ -58,7 +58,8 @@ and replace its Host-local addresses and paths.
 In `cluster.yaml`, set `paths.models.qwen3-30b-a3b` to
 `<QWEN3_30B_A3B_MODEL_DIR>`, `paths.datasets.sharegpt` to
 `<SHAREGPT_DATASET_DIR>`, and `paths.results` to
-`<RESULTS_DIR>`.
+`<RESULTS_DIR>`. Keep `backend: ascend_fused` on both expert pools for the BF16
+fused-operator path described in the common tutorial.
 
 Keep the Qwen model block in `experiment.yaml` and select ShareGPT:
 

@@ -405,6 +405,7 @@ class AscendFusedBackend(ComputeBackend):
             w2_scale = None
 
         inactive_mask = batch.expert_ids.eq(-1)
+        # Remap global routing IDs to ordinal indices in the lease-ordered weight lists.
         local_expert_ids = _global_to_local(
             batch.expert_ids,
             lease.expert_ids,

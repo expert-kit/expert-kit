@@ -11,7 +11,7 @@ model:
 
 worker:
   id: {{ pool.id }}-{{ worker.id }}
-  backend: torch
+  backend: {{ pool.backend }}
   device: {{ worker.device_name }}
   max_batch_tokens: {{ expert.runtime.max_batch_tokens }}
   max_active_batches_per_device: {{ expert.runtime.max_active_batches_per_device }}

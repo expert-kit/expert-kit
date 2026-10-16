@@ -3,19 +3,21 @@
 
 from __future__ import annotations
 
-import argparse
 import json
 import math
 import statistics
 import time
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import nullcontext
 from dataclasses import dataclass
+from enum import StrEnum
 from pathlib import Path
-from typing import Any
+from typing import Annotated, Any
 
 import torch
 import torch.nn.functional as functional
+import typer
 from safetensors.torch import save
 
 from expertkit_worker.backends import BackendBatch, ComputeBackend
@@ -24,9 +26,92 @@ from expertkit_worker.backends.factory import (
     create_weight_adapter,
     torch_dtype,
 )
-from expertkit_worker.config import WorkerConfig
+from expertkit_worker.config import ActivationDType, BackendName, WorkerConfig
 from expertkit_worker.device import CpuWorkerRuntime, CudaWorkerRuntime, WorkerDeviceRuntime
 from expertkit_worker.weights import ReadyWeightTable, WeightAdapter, parse_safetensors
+
+
+class Distribution(StrEnum):
+    BALANCED = "balanced"
+    UNIFORM = "uniform"
+    HOT = "hot"
+
+
+class BenchmarkQuantization(StrEnum):
+    NONE = "none"
+    MODELSLIM_W8A8_DYNAMIC = "modelslim-w8a8-dynamic"
+
+
+class ExpertCompute(StrEnum):
+    SWIGLU = "swiglu"
+    DEEPSEEK_V4 = "deepseek_v4"
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class BenchmarkOptions:
+    backend: BackendName = BackendName.ASCEND_FUSED
+    device: str = "npu:0"
+    dtype: ActivationDType = ActivationDType.BF16
+    quantization: BenchmarkQuantization = BenchmarkQuantization.NONE
+    expert_compute: ExpertCompute = ExpertCompute.SWIGLU
+    swiglu_limit: float = 0.0
+    tokens: int = 32
+    hidden_dim: int = 1024
+    intermediate_dim: int = 512
+    top_k: int = 2
+    experts: int = 8
+    distribution: Distribution = Distribution.BALANCED
+    hot_experts: int | None = None
+    hot_multiplier: float = 10.0
+    inactive_rate: float = 0.0
+    concurrency: int = 1
+    routing_cases: int = 1
+    routing_replay: Path | None = None
+    warmup: int = 5
+    repeats: int = 20
+    seed: int = 1234
+    atol: float | None = None
+    rtol: float | None = None
+    max_relative_l2: float = 0.06
+    min_cosine: float = 0.995
+    skip_correctness: bool = False
+    profile: bool = False
+    profile_dir: Path = Path("benchmark-traces")
+    output: Path | None = None
+
+    def __post_init__(self) -> None:
+        for name in (
+            "tokens",
+            "hidden_dim",
+            "intermediate_dim",
+            "top_k",
+            "experts",
+            "concurrency",
+            "routing_cases",
+            "repeats",
+        ):
+            if getattr(self, name) <= 0:
+                raise ValueError(f"--{name.replace('_', '-')} must be positive")
+        if self.warmup < 0:
+            raise ValueError("--warmup must be nonnegative")
+        if self.top_k > self.experts:
+            raise ValueError("--top-k cannot exceed --experts")
+        if not 0 <= self.inactive_rate <= 1:
+            raise ValueError("--inactive-rate must be in [0, 1]")
+        if self.hot_experts is not None and not 1 <= self.hot_experts <= self.experts:
+            raise ValueError("--hot-experts must be in [1, --experts]")
+        if not math.isfinite(self.hot_multiplier) or self.hot_multiplier < 1:
+            raise ValueError("--hot-multiplier must be finite and at least 1")
+        if not math.isfinite(self.swiglu_limit) or self.swiglu_limit < 0:
+            raise ValueError("--swiglu-limit must be finite and nonnegative")
+        for name in ("atol", "rtol", "max_relative_l2"):
+            value = getattr(self, name)
+            if value is not None and (not math.isfinite(value) or value < 0):
+                raise ValueError(f"--{name.replace('_', '-')} must be finite and nonnegative")
+        if not -1 <= self.min_cosine <= 1:
+            raise ValueError("--min-cosine must be in [-1, 1]")
+        if self.expert_compute == ExpertCompute.SWIGLU and self.swiglu_limit != 0:
+            raise ValueError("--swiglu-limit requires --expert-compute deepseek_v4")
 
 
 @dataclass(slots=True)
@@ -41,6 +126,9 @@ class _Setup:
     source_values: list[dict[str, torch.Tensor]]
     source_buffers: list[bytearray]
     cpu_weights: list[Any]
+    concurrency: int
+    routing_cases: int
+    routing_source: str
 
     def close(self) -> None:
         for expert_id in range(self.config.model.experts_per_layer):
@@ -52,7 +140,8 @@ class _Setup:
 class _SubmissionGroup:
     def __init__(self, setup: _Setup) -> None:
         self._setup = setup
-        concurrency = len(setup.batches)
+        concurrency = setup.concurrency
+        self._case_index = 0
         self._pool = (
             ThreadPoolExecutor(max_workers=concurrency)
             if concurrency > 1 and setup.runtime.device.type == "cpu"
@@ -70,13 +159,20 @@ class _SubmissionGroup:
         if self._pool is not None:
             self._pool.shutdown()
 
+    @torch.inference_mode()
     def run(self) -> None:
+        start = self._case_index * self._setup.concurrency
+        stop = start + self._setup.concurrency
+        batches = self._setup.batches[start:stop]
+        outputs = self._setup.outputs[start:stop]
+        self._case_index = (self._case_index + 1) % self._setup.routing_cases
+
         if self._pool is not None:
             futures = [
                 self._pool.submit(self._submit_and_wait, batch, output)
                 for batch, output in zip(
-                    self._setup.batches,
-                    self._setup.outputs,
+                    batches,
+                    outputs,
                     strict=True,
                 )
             ]
@@ -85,15 +181,15 @@ class _SubmissionGroup:
             return
 
         if not self._streams:
-            self._submit_and_wait(self._setup.batches[0], self._setup.outputs[0])
+            self._submit_and_wait(batches[0], outputs[0])
             return
 
         completions = []
         try:
             for stream, batch, output in zip(
                 self._streams,
-                self._setup.batches,
-                self._setup.outputs,
+                batches,
+                outputs,
                 strict=True,
             ):
                 stream_context = self._setup.runtime.stream_context  # type: ignore[attr-defined]
@@ -105,6 +201,10 @@ class _SubmissionGroup:
             for completion in completions:
                 completion.close()
 
+    def reset_routing_case(self) -> None:
+        """Restart deterministic case selection without changing backend state."""
+        self._case_index = 0
+
     def _submit_and_wait(self, batch: BackendBatch, output: torch.Tensor) -> None:
         completion = self._setup.backend.submit(batch, output)
         try:
@@ -113,69 +213,7 @@ class _SubmissionGroup:
             completion.close()
 
 
-def _parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
-        "--backend",
-        choices=("torch", "ggml", "fused", "ascend_fused"),
-        default="ascend_fused",
-    )
-    parser.add_argument("--device", default="npu:0")
-    parser.add_argument("--dtype", choices=("fp16", "bf16", "fp32"), default="bf16")
-    parser.add_argument(
-        "--quantization",
-        choices=("none", "modelslim-w8a8-dynamic"),
-        default="none",
-    )
-    parser.add_argument("--expert-compute", choices=("swiglu", "deepseek_v4"), default="swiglu")
-    parser.add_argument("--swiglu-limit", type=float, default=0.0)
-    parser.add_argument("--tokens", type=int, default=32)
-    parser.add_argument("--hidden-dim", type=int, default=1024)
-    parser.add_argument("--intermediate-dim", type=int, default=512)
-    parser.add_argument("--top-k", type=int, default=2)
-    parser.add_argument("--experts", type=int, default=8)
-    parser.add_argument("--distribution", choices=("balanced", "hot"), default="balanced")
-    parser.add_argument("--inactive-rate", type=float, default=0.0)
-    parser.add_argument("--concurrency", type=int, default=1)
-    parser.add_argument("--warmup", type=int, default=5)
-    parser.add_argument("--repeats", type=int, default=20)
-    parser.add_argument("--seed", type=int, default=1234)
-    parser.add_argument("--atol", type=float)
-    parser.add_argument("--rtol", type=float)
-    parser.add_argument("--max-relative-l2", type=float, default=0.06)
-    parser.add_argument("--min-cosine", type=float, default=0.995)
-    parser.add_argument("--skip-correctness", action="store_true")
-    parser.add_argument("--profile", action="store_true")
-    parser.add_argument("--profile-dir", type=Path, default=Path("benchmark-traces"))
-    parser.add_argument("--output", type=Path)
-    args = parser.parse_args()
-    for name in (
-        "tokens",
-        "hidden_dim",
-        "intermediate_dim",
-        "top_k",
-        "experts",
-        "concurrency",
-        "repeats",
-    ):
-        if getattr(args, name) <= 0:
-            parser.error(f"--{name.replace('_', '-')} must be positive")
-    if args.warmup < 0:
-        parser.error("--warmup must be nonnegative")
-    if args.top_k > args.experts:
-        parser.error("--top-k cannot exceed --experts")
-    if not 0 <= args.inactive_rate < 1:
-        parser.error("--inactive-rate must be in [0, 1)")
-    if args.max_relative_l2 < 0:
-        parser.error("--max-relative-l2 must be nonnegative")
-    if not -1 <= args.min_cosine <= 1:
-        parser.error("--min-cosine must be in [-1, 1]")
-    if args.expert_compute == "swiglu" and args.swiglu_limit != 0:
-        parser.error("--swiglu-limit requires --expert-compute deepseek_v4")
-    return args
-
-
-def _make_config(args: argparse.Namespace) -> WorkerConfig:
+def _make_config(args: BenchmarkOptions) -> WorkerConfig:
     model: dict[str, Any] = {
         "instance_id": 1,
         "name": "benchmark/model",
@@ -286,32 +324,164 @@ def _make_source_values(
     return values
 
 
+def _balanced_ids(args: BenchmarkOptions, generator: torch.Generator) -> torch.Tensor:
+    """Distribute assignments round-robin; K <= G keeps each token's IDs distinct."""
+    return (
+        torch.arange(args.tokens * args.top_k).reshape(args.tokens, args.top_k) % args.experts
+    ).to(torch.int32)
+
+
+def _uniform_ids(args: BenchmarkOptions, generator: torch.Generator) -> torch.Tensor:
+    """Sample distinct experts independently for each token."""
+    probabilities = torch.ones((args.tokens, args.experts), dtype=torch.float32)
+    return torch.multinomial(probabilities, args.top_k, replacement=False, generator=generator).to(
+        torch.int32
+    )
+
+
+def _hot_ids(args: BenchmarkOptions, generator: torch.Generator) -> torch.Tensor:
+    """Favor a seeded hot set while preserving distinct top-k IDs within each token."""
+    hot_count = args.top_k if args.hot_experts is None else args.hot_experts
+    hot_ids = torch.randperm(args.experts, generator=generator)[:hot_count]
+    probabilities = torch.ones(args.experts, dtype=torch.float32)
+    probabilities[hot_ids] *= args.hot_multiplier
+    return torch.multinomial(
+        probabilities.expand(args.tokens, -1),
+        args.top_k,
+        replacement=False,
+        generator=generator,
+    ).to(torch.int32)
+
+
+type GenerateIds = Callable[[BenchmarkOptions, torch.Generator], torch.Tensor]
+
+ID_GENERATORS: dict[Distribution, GenerateIds] = {
+    Distribution.BALANCED: _balanced_ids,
+    Distribution.UNIFORM: _uniform_ids,
+    Distribution.HOT: _hot_ids,
+}
+
+
+@dataclass(frozen=True, slots=True)
+class _RoutingReplayCase:
+    expert_ids: torch.Tensor
+    lease_expert_ids: tuple[int, ...]
+
+
+def _require_int(value: object, *, field: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"{field} must contain integers")
+    return value
+
+
+def _load_routing_replay(args: BenchmarkOptions) -> list[_RoutingReplayCase] | None:
+    path = args.routing_replay
+    if path is None:
+        return None
+    if args.inactive_rate:
+        raise ValueError("--inactive-rate cannot be combined with --routing-replay")
+    try:
+        document = json.loads(path.read_text())
+    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        raise ValueError(f"cannot read --routing-replay: {error}") from error
+    if not isinstance(document, dict) or document.get("schema_version") != 1:
+        raise ValueError("--routing-replay must use schema_version 1")
+    raw_cases = document.get("cases")
+    if not isinstance(raw_cases, list) or not raw_cases:
+        raise ValueError("--routing-replay cases must be a non-empty list")
+    if len(raw_cases) % args.concurrency:
+        raise ValueError("--routing-replay case count must be divisible by --concurrency")
+
+    cases: list[_RoutingReplayCase] = []
+    expected_shape = (args.tokens, args.top_k)
+    for case_index, raw_case in enumerate(raw_cases):
+        if not isinstance(raw_case, dict):
+            raise ValueError(f"routing replay case {case_index} must be an object")
+        raw_ids = raw_case.get("expert_ids")
+        if not isinstance(raw_ids, list) or len(raw_ids) != args.tokens:
+            raise ValueError(
+                f"routing replay case {case_index} expert_ids must have shape {expected_shape}"
+            )
+        rows: list[list[int]] = []
+        for row in raw_ids:
+            if not isinstance(row, list) or len(row) != args.top_k:
+                raise ValueError(
+                    f"routing replay case {case_index} expert_ids must have shape {expected_shape}"
+                )
+            values = [
+                _require_int(value, field=f"routing replay case {case_index} expert_ids")
+                for value in row
+            ]
+            if any(value < -1 or value >= args.experts for value in values):
+                raise ValueError(
+                    f"routing replay case {case_index} expert IDs must be -1 or in [0, experts)"
+                )
+            active = [value for value in values if value >= 0]
+            if len(active) != len(set(active)):
+                raise ValueError(
+                    f"routing replay case {case_index} has duplicate active IDs in one token"
+                )
+            rows.append(values)
+
+        raw_lease = raw_case.get("lease_expert_ids")
+        if not isinstance(raw_lease, list):
+            raise ValueError(f"routing replay case {case_index} lease_expert_ids must be a list")
+        lease = tuple(
+            _require_int(
+                value,
+                field=f"routing replay case {case_index} lease_expert_ids",
+            )
+            for value in raw_lease
+        )
+        if not lease:
+            raise ValueError(f"routing replay case {case_index} lease_expert_ids must not be empty")
+        expected_lease = tuple(sorted({value for row in rows for value in row if value >= 0}))
+        if lease != expected_lease:
+            raise ValueError(
+                f"routing replay case {case_index} lease_expert_ids must equal the sorted "
+                "distinct active routing IDs"
+            )
+        cases.append(
+            _RoutingReplayCase(
+                expert_ids=torch.tensor(rows, dtype=torch.int32),
+                lease_expert_ids=lease,
+            )
+        )
+    return cases
+
+
 def _make_batch(
-    args: argparse.Namespace,
+    args: BenchmarkOptions,
     *,
     dtype: torch.dtype,
     device: torch.device,
     slot: int,
+    routing_case: int = 0,
+    replay: _RoutingReplayCase | None = None,
 ) -> BackendBatch:
-    generator = torch.Generator().manual_seed(args.seed + 10_000 + slot)
+    batch_index = routing_case * args.concurrency + slot
+    generator = torch.Generator().manual_seed(args.seed + 10_000 + batch_index)
     hidden = torch.randn(
         (args.tokens, args.hidden_dim),
         generator=generator,
         dtype=torch.float32,
     ).mul_(0.1)
-    ids = torch.empty((args.tokens, args.top_k), dtype=torch.int32)
-    for token in range(args.tokens):
-        base = token * args.top_k if args.distribution == "balanced" else (token // 5) * args.top_k
-        for route in range(args.top_k):
-            ids[token, route] = (base + route) % args.experts
-    if args.inactive_rate:
-        mask = torch.rand(ids.shape, generator=generator) < args.inactive_rate
-        mask[:, 0] = False
-        ids.masked_fill_(mask, -1)
+    ids = (
+        ID_GENERATORS[args.distribution](args, generator)
+        if replay is None
+        else replay.expert_ids.clone()
+    )
     routing = torch.rand(ids.shape, generator=generator, dtype=torch.float32)
-    routing.masked_fill_(ids.eq(-1), 0)
     routing.div_(routing.sum(dim=1, keepdim=True))
-    distinct = tuple(sorted(set(ids[ids.ge(0)].tolist())))
+    if replay is None and args.inactive_rate:
+        mask = torch.rand(ids.shape, generator=generator) < args.inactive_rate
+        ids.masked_fill_(mask, -1)
+    routing.masked_fill_(ids.eq(-1), 0)
+    distinct = (
+        tuple(torch.unique(ids[ids.ge(0)], sorted=True).tolist())
+        if replay is None
+        else replay.lease_expert_ids
+    )
     return BackendBatch(
         layer_id=0,
         hidden_states=hidden.to(device=device, dtype=dtype),
@@ -321,7 +491,8 @@ def _make_batch(
     )
 
 
-def _build_setup(args: argparse.Namespace) -> _Setup:
+def _build_setup(args: BenchmarkOptions) -> _Setup:
+    replay_cases = _load_routing_replay(args)
     config = _make_config(args)
     runtime = _make_runtime(args.device)
     dtype = torch_dtype(config.model.activation_dtype)
@@ -360,10 +531,34 @@ def _build_setup(args: argparse.Namespace) -> _Setup:
             runtime=runtime,
             acquire_many=table.acquire_many,
         )
-        batches = [
-            _make_batch(args, dtype=dtype, device=runtime.device, slot=slot)
-            for slot in range(args.concurrency)
-        ]
+        if replay_cases is None:
+            routing_cases = args.routing_cases
+            batches = [
+                _make_batch(
+                    args,
+                    dtype=dtype,
+                    device=runtime.device,
+                    slot=slot,
+                    routing_case=routing_case,
+                )
+                for routing_case in range(routing_cases)
+                for slot in range(args.concurrency)
+            ]
+            routing_source = "synthetic"
+        else:
+            routing_cases = len(replay_cases) // args.concurrency
+            batches = [
+                _make_batch(
+                    args,
+                    dtype=dtype,
+                    device=runtime.device,
+                    slot=index % args.concurrency,
+                    routing_case=index // args.concurrency,
+                    replay=replay,
+                )
+                for index, replay in enumerate(replay_cases)
+            ]
+            routing_source = "replay"
         outputs = [torch.empty_like(batch.hidden_states) for batch in batches]
     return _Setup(
         config=config,
@@ -376,6 +571,9 @@ def _build_setup(args: argparse.Namespace) -> _Setup:
         source_values=source_values,
         source_buffers=source_buffers,
         cpu_weights=cpu_weights,
+        concurrency=args.concurrency,
+        routing_cases=routing_cases,
+        routing_source=routing_source,
     )
 
 
@@ -429,7 +627,7 @@ def _reference_output(setup: _Setup, batch: BackendBatch) -> torch.Tensor:
 
 
 def _check_correctness(
-    args: argparse.Namespace,
+    args: BenchmarkOptions,
     setup: _Setup,
     runner: _SubmissionGroup,
 ) -> dict[str, Any]:
@@ -442,16 +640,14 @@ def _check_correctness(
     mean = 0.0
     maximum_relative_l2 = 0.0
     minimum_cosine = 1.0
-    for batch_index, (batch, actual) in enumerate(
-        zip(setup.batches, setup.outputs, strict=True)
-    ):
+    batches = setup.batches[: setup.concurrency]
+    outputs = setup.outputs[: setup.concurrency]
+    for batch_index, (batch, actual) in enumerate(zip(batches, outputs, strict=True)):
         expected = _reference_output(setup, batch)
         actual_cpu = actual.float().cpu()
         difference = (actual_cpu - expected).abs()
         max_abs_error = difference.max().item()
-        relative_l2 = float(
-            difference.norm() / expected.norm().clamp_min(1e-10)
-        )
+        relative_l2 = float(difference.norm() / expected.norm().clamp_min(1e-10))
         if torch.count_nonzero(expected) == 0:
             cosine = 1.0 if torch.count_nonzero(actual_cpu) == 0 else 0.0
         else:
@@ -489,7 +685,7 @@ def _check_correctness(
         "atol": atol,
         "rtol": rtol,
         "max_abs_error": maximum,
-        "mean_abs_error": mean / len(setup.batches),
+        "mean_abs_error": mean / len(batches),
         "max_relative_l2": maximum_relative_l2,
         "max_relative_l2_limit": args.max_relative_l2,
         "min_cosine_similarity": minimum_cosine,
@@ -497,7 +693,7 @@ def _check_correctness(
     }
 
 
-def _profile_context(args: argparse.Namespace, device: torch.device):
+def _profile_context(args: BenchmarkOptions, device: torch.device):
     if not args.profile:
         return nullcontext(None)
     args.profile_dir.mkdir(parents=True, exist_ok=True)
@@ -555,15 +751,14 @@ def _percentile(values: list[float], fraction: float) -> float:
     return ordered[lower] + (ordered[upper] - ordered[lower]) * (position - lower)
 
 
-def _run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
+def _run_benchmark(args: BenchmarkOptions) -> dict[str, Any]:
     setup = _build_setup(args)
     runner = _SubmissionGroup(setup)
     try:
         correctness = (
-            {"checked": False}
-            if args.skip_correctness
-            else _check_correctness(args, setup, runner)
+            {"checked": False} if args.skip_correctness else _check_correctness(args, setup, runner)
         )
+        runner.reset_routing_case()
         for _ in range(args.warmup):
             runner.run()
 
@@ -573,7 +768,12 @@ def _run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
         with _profile_context(args, setup.runtime.device) as active_profiler:
             for _ in range(args.repeats):
                 started = time.perf_counter_ns()
-                runner.run()
+                with (
+                    torch.profiler.record_function("microbench.iteration")
+                    if active_profiler is not None
+                    else nullcontext()
+                ):
+                    runner.run()
                 durations_ms.append((time.perf_counter_ns() - started) / 1_000_000)
                 if active_profiler is not None:
                     active_profiler.step()
@@ -598,8 +798,13 @@ def _run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
                 "experts": args.experts,
             },
             "routing": {
+                "source": setup.routing_source,
                 "distribution": args.distribution,
+                "hot_experts": args.top_k if args.hot_experts is None else args.hot_experts,
+                "hot_multiplier": args.hot_multiplier,
                 "inactive_rate": args.inactive_rate,
+                "cases": setup.routing_cases,
+                "unique_lease_keys": len({batch.distinct_expert_ids for batch in setup.batches}),
                 "seed": args.seed,
             },
             "execution": {
@@ -636,8 +841,91 @@ def _run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
         setup.close()
 
 
-def main() -> None:
-    args = _parse_args()
+app = typer.Typer(help=__doc__, pretty_exceptions_show_locals=False, add_completion=False)
+
+
+@app.command()
+def main(
+    backend: BackendName = BackendName.ASCEND_FUSED,
+    device: str = "npu:0",
+    dtype: ActivationDType = ActivationDType.BF16,
+    quantization: BenchmarkQuantization = BenchmarkQuantization.NONE,
+    expert_compute: ExpertCompute = ExpertCompute.SWIGLU,
+    swiglu_limit: float = 0.0,
+    tokens: int = 32,
+    hidden_dim: int = 1024,
+    intermediate_dim: int = 512,
+    top_k: int = 2,
+    experts: int = 8,
+    distribution: Distribution = Distribution.BALANCED,
+    hot_experts: Annotated[
+        int | None, typer.Option(help="Hot-set size; defaults to top-k.")
+    ] = None,
+    hot_multiplier: Annotated[
+        float, typer.Option(help="Hot-expert sampling weight multiplier.")
+    ] = 10.0,
+    inactive_rate: float = 0.0,
+    concurrency: int = 1,
+    routing_cases: Annotated[
+        int,
+        typer.Option(help="Pre-generated routing cases cycled across iterations."),
+    ] = 1,
+    routing_replay: Annotated[
+        Path | None,
+        typer.Option(
+            help=(
+                "Schema-v1 routing replay JSON; cases are grouped consecutively by "
+                "concurrency and must match --tokens/--top-k."
+            )
+        ),
+    ] = None,
+    warmup: int = 5,
+    repeats: int = 20,
+    seed: int = 1234,
+    atol: float | None = None,
+    rtol: float | None = None,
+    max_relative_l2: float = 0.06,
+    min_cosine: float = 0.995,
+    skip_correctness: Annotated[bool, typer.Option("--skip-correctness")] = False,
+    profile: Annotated[bool, typer.Option("--profile")] = False,
+    profile_dir: Path = Path("benchmark-traces"),
+    output: Path | None = None,
+) -> None:
+    """Benchmark one backend; profiling is opt-in and excludes setup/warmup."""
+    try:
+        args = BenchmarkOptions(
+            backend=backend,
+            device=device,
+            dtype=dtype,
+            quantization=quantization,
+            expert_compute=expert_compute,
+            swiglu_limit=swiglu_limit,
+            tokens=tokens,
+            hidden_dim=hidden_dim,
+            intermediate_dim=intermediate_dim,
+            top_k=top_k,
+            experts=experts,
+            distribution=distribution,
+            hot_experts=hot_experts,
+            hot_multiplier=hot_multiplier,
+            inactive_rate=inactive_rate,
+            concurrency=concurrency,
+            routing_cases=routing_cases,
+            routing_replay=routing_replay,
+            warmup=warmup,
+            repeats=repeats,
+            seed=seed,
+            atol=atol,
+            rtol=rtol,
+            max_relative_l2=max_relative_l2,
+            min_cosine=min_cosine,
+            skip_correctness=skip_correctness,
+            profile=profile,
+            profile_dir=profile_dir,
+            output=output,
+        )
+    except ValueError as error:
+        raise typer.BadParameter(str(error)) from error
     result = _run_benchmark(args)
     rendered = json.dumps(result, indent=2, sort_keys=True)
     if args.output is not None:
@@ -647,4 +935,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    app()

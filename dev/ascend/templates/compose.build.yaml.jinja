@@ -18,6 +18,7 @@ services:
       target: ek-worker-ascend-runtime
       args:
         UV_IMAGE: {{ images.uv }}
+        CANN_IMAGE: {{ images.cann }}
         UV_DEFAULT_INDEX: https://mirror.nju.edu.cn/pypi/web/simple
 
   attention-image:
@@ -29,4 +30,5 @@ services:
       args:
         # NJU mirror of the selected nightly-main-a3 digest.
         VLLM_ASCEND_IMAGE: {{ images.vllm_ascend }}
-        UV_DEFAULT_INDEX: https://mirror.nju.edu.cn/pypi/web/simple
+        # UV_DEFAULT_INDEX: https://mirror.nju.edu.cn/pypi/web/simple
+        UV_DEFAULT_INDEX: https://mirrors.ustc.edu.cn/pypi/simple

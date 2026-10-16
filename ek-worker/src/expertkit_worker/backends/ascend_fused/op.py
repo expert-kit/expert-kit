@@ -52,6 +52,13 @@ def run_ascend_fused_moe(
 
     expert_num = len(w13)
 
+    w13 = _prepare_expert_tensors_for_gmm(w13)
+    w2 = _prepare_expert_tensors_for_gmm(w2)
+    if w13_scale is not None:
+        w13_scale = _prepare_expert_tensors_for_gmm(w13_scale)
+    if w2_scale is not None:
+        w2_scale = _prepare_expert_tensors_for_gmm(w2_scale)
+
     routing_quant_mode = _get_routing_quant_mode(compute_type)
     if routing_quant_mode != -1 and (w13_scale is None or w2_scale is None):
         raise ValueError("dynamic W8A8 requires w13_scale and w2_scale")
@@ -200,3 +207,11 @@ def _apply_swiglu_ascend_fused(
         up.clamp_(min=-swiglu_limit, max=swiglu_limit)
 
     return torch_npu.npu_swiglu(gate_up, dim=-1)
+
+
+def _prepare_expert_tensors_for_gmm(tensors: list[Tensor]) -> list[Tensor]:
+    """Add a leading expert axis to single-expert GMM inputs without copying."""
+    if len(tensors) != 1:
+        return tensors
+
+    return [tensors[0].unsqueeze(0)]

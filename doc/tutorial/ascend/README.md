@@ -53,6 +53,21 @@ because vLLM mounts it from the attention bundle and the Weight Server mounts
 it from the control bundle. Expert Hosts receive assigned expert blobs from
 the Weight Server.
 
+### Ascend fused Worker backend
+
+The Ascend examples select `backend: ascend_fused` independently for each
+expert pool. Generated Workers then execute routing, grouped matmuls, SwiGLU,
+and token restoration with `torch_npu` fused operators on the configured
+`npu:<id>` device. The backend accepts BF16 or FP16 activations and supports
+unquantized expert weights plus ModelSlim dynamic W8A8 weights. GPTQ, static
+W8A8, FP4, CPU, and CUDA configurations must use another backend.
+
+Each cluster example also pins `images.cann`, which is the Worker image base.
+Keep that CANN image compatible with the locked PyTorch and `torch-npu`
+versions. `worker.backend.submit` ends after Host-side enqueue; use the Worker
+device-stage metrics or an NPU profiler when measuring fused execution rather
+than treating that span as device latency.
+
 If a Host requires a Python mirror, prefix commands that resolve packages:
 
 ```bash
@@ -254,6 +269,50 @@ uv run --no-sync --package expertkit-torch \
 The vLLM benchmark measures online HTTP serving. The Torch benchmark uses
 fixed offline batches; report the two execution modes separately.
 
+### Replay captured routing in the backend microbenchmark
+
+The backend microbenchmark accepts a normalized routing file without requiring
+production trace spans. A schema-v1 file contains the original global expert
+IDs and the matching sorted lease IDs for each case:
+
+```json
+{
+  "schema_version": 1,
+  "cases": [
+    {
+      "expert_ids": [[42, 7], [19, -1]],
+      "lease_expert_ids": [7, 19, 42]
+    }
+  ]
+}
+```
+
+Every case must have the same `[tokens, top_k]` shape. Put five same-shaped
+layer samples in `cases` to cycle through those layers; choose a repeat count
+that is a multiple of five to make `latency_ms.mean` an equally weighted
+per-layer average. Run the Ascend fused path with dimensions matching the
+captured model:
+
+```bash
+uv run --no-sync python ek-worker/benchmarks/bench_backend.py \
+  --backend ascend_fused \
+  --device npu:0 \
+  --dtype bf16 \
+  --tokens <TOKENS> \
+  --hidden-dim <HIDDEN_DIM> \
+  --intermediate-dim <EXPERT_INTERMEDIATE_DIM> \
+  --top-k <TOP_K> \
+  --experts <EXPERTS_PER_LAYER> \
+  --routing-replay <ROUTING_REPLAY_JSON> \
+  --warmup 10 \
+  --repeats 50 \
+  --output <RESULTS_DIR>/ascend-fused-routing-replay.json
+```
+
+Replay preserves routing IDs and lease order. Hidden states and routing weights
+remain deterministic synthetic inputs, so this isolates backend routing and
+expert execution rather than reproducing the complete vLLM request.
+
 ### 7. Stop the deployment
 
 Stop containers without deleting named volumes:
@@ -276,7 +335,7 @@ dev/ascend/run-compose.sh control down
 
 | Role | Python | PyTorch | torch-npu | CANN | vLLM / vLLM-Ascend |
 | --- | ---: | ---: | ---: | ---: | --- |
-| Worker image | `3.12` | `2.11.0` | `2.11.0rc1` | `9.0.1` base image | Not installed |
+| Worker image | `3.12` | `2.11.0` | `2.11.0rc1` | `9.0.1-a3` example base image | Not installed |
 | Torch ablation | `>=3.12` | `2.11.0` | `2.11.0rc1` | Host installation | Not installed |
 | Attention image | Image-owned | Image-owned Torch 2.10 profile | Image-owned | `9.0.1` profile | vLLM `0.25.1`; selected vLLM-Ascend `main-a3` snapshot |
 
