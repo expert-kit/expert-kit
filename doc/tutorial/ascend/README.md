@@ -239,9 +239,7 @@ Run the one-shot vLLM benchmark container with the Host UID/GID so result
 files remain writable outside Docker:
 
 ```bash
-dev/ascend/run-compose.sh attention run --rm \
-  --user "$(id -u):$(id -g)" \
-  benchmark
+dev/ascend/run-compose.sh attention run --rm benchmark
 ```
 
 Inspect logs without changing the deployment:
