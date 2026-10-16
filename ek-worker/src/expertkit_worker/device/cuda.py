@@ -13,10 +13,10 @@ from .runtime import DeviceWork
 
 @dataclass(frozen=True, slots=True)
 class CudaWork:
-    event: Event
+    stream: Stream
 
     def wait_host(self) -> None:
-        self.event.synchronize()
+        self.stream.synchronize()
 
 
 class CudaWorkerRuntime:
@@ -37,10 +37,8 @@ class CudaWorkerRuntime:
     def capture_current_work(self) -> DeviceWork:
         with self.device_context():
             stream = self.current_stream()
-            event = self.create_event(enable_timing=False)
-            self.record_event(event, stream)
 
-        return CudaWork(event)
+        return CudaWork(stream)
 
     def create_stream(self, *, priority: int = 0) -> Stream:
         return Stream(device=self.device, priority=priority)

@@ -16,11 +16,7 @@ from expertkit_worker.weights.adapter import (
     WeightPlacementFatalError,
     WeightPlacementFatalReason,
 )
-from expertkit_worker.weights.format import (
-    SafeTensorData,
-    SafeTensorDType,
-    SafeTensorRegion,
-)
+from expertkit_worker.weights.format import SafeTensorData, SafeTensorDType, SafeTensorRegion
 
 _TORCH_DTYPES = {
     SafeTensorDType.FP16: torch.float16,
@@ -266,7 +262,11 @@ class TorchWeightAdapter(WeightAdapter[TorchExpertWeights, TorchExpertWeights]):
         try:
             # H2D with copy, or get a view if device is CPU
             copy = device.type != "cpu" or self._compute_dtype != self._source_dtype
-            ready = cpu_weight.to(device=device, dtype=self._compute_dtype, copy=copy)
+            ready = cpu_weight.to(
+                device=device,
+                dtype=self._compute_dtype,
+                copy=copy,
+            )
 
             runtime.capture_current_work().wait_host()
 

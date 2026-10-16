@@ -112,22 +112,49 @@ def create_weight_adapter(
             source_dtype=source_dtype,
             compute_dtype=compute_dtype,
         )
-    try:
-        from expertkit_worker.backends.fused import FusedWeightAdapter
-    except ModuleNotFoundError as error:
-        if error.name == "triton":
-            raise RuntimeError("the fused Backend requires the locked fused extra") from error
-        raise
+    if config.worker.backend is BackendName.FUSED:
+        try:
+            from expertkit_worker.backends.fused import FusedWeightAdapter
+        except ModuleNotFoundError as error:
+            if error.name == "triton":
+                raise RuntimeError("the fused Backend requires the locked fused extra") from error
+            raise
 
-    return FusedWeightAdapter(
-        num_layers=config.model.num_layers,
-        experts_per_layer=config.model.experts_per_layer,
-        hidden_dim=config.model.hidden_dim,
-        intermediate_dim=config.model.expert_intermediate_dim,
-        source_dtype=source_dtype,
-        compute_dtype=compute_dtype,
-        device=runtime.device,
-    )
+        return FusedWeightAdapter(
+            num_layers=config.model.num_layers,
+            experts_per_layer=config.model.experts_per_layer,
+            hidden_dim=config.model.hidden_dim,
+            intermediate_dim=config.model.expert_intermediate_dim,
+            source_dtype=source_dtype,
+            compute_dtype=compute_dtype,
+            device=runtime.device,
+        )
+
+    if config.worker.backend is BackendName.ASCEND_FUSED:
+        from expertkit_worker.backends.ascend_fused import (
+            AscendFusedModelSlimW8A8WeightAdapter,
+            AscendFusedWeightAdapter,
+        )
+
+        if config.model.quantization is not None:
+            if config.model.quantization.type is not QuantizationType.MODELSLIM_W8A8_DYNAMIC:
+                raise ValueError("unsupported Ascend fused quantization type")
+            return AscendFusedModelSlimW8A8WeightAdapter(
+                hidden_dim=config.model.hidden_dim,
+                intermediate_dim=config.model.expert_intermediate_dim,
+                runtime=runtime,
+                compute_dtype=compute_dtype,
+            )
+
+        return AscendFusedWeightAdapter(
+            num_layers=config.model.num_layers,
+            experts_per_layer=config.model.experts_per_layer,
+            hidden_dim=config.model.hidden_dim,
+            intermediate_dim=config.model.expert_intermediate_dim,
+            source_dtype=source_dtype,
+            compute_dtype=compute_dtype,
+            runtime=runtime,
+        )
 
 
 def create_compute_backend(
@@ -168,20 +195,45 @@ def create_compute_backend(
             cpu_threads=config.worker.ggml.cpu_threads,
             acquire_many=acquire_many,
         )
-    try:
-        from expertkit_worker.backends.fused import FusedBackend
-    except ModuleNotFoundError as error:
-        if error.name == "triton":
-            raise RuntimeError("the fused Backend requires the locked fused extra") from error
-        raise
 
-    return FusedBackend(
-        num_layers=config.model.num_layers,
-        experts_per_layer=config.model.experts_per_layer,
-        hidden_dim=config.model.hidden_dim,
-        intermediate_dim=config.model.expert_intermediate_dim,
-        top_k=config.model.top_k,
-        dtype=dtype,
-        device=runtime.device,
-        acquire_many=acquire_many,
-    )
+    if config.worker.backend is BackendName.FUSED:
+        try:
+            from expertkit_worker.backends.fused import FusedBackend
+        except ModuleNotFoundError as error:
+            if error.name == "triton":
+                raise RuntimeError("the fused Backend requires the locked fused extra") from error
+            raise
+
+        return FusedBackend(
+            num_layers=config.model.num_layers,
+            experts_per_layer=config.model.experts_per_layer,
+            hidden_dim=config.model.hidden_dim,
+            intermediate_dim=config.model.expert_intermediate_dim,
+            top_k=config.model.top_k,
+            dtype=dtype,
+            device=runtime.device,
+            acquire_many=acquire_many,
+        )
+
+    if config.worker.backend is BackendName.ASCEND_FUSED:
+        from expertkit_worker.backends.ascend_fused import (
+            AscendFusedBackend,
+            AscendFusedComputeType,
+        )
+
+        compute_type = (
+            AscendFusedComputeType.DYNAMIC_W8A8
+            if config.model.quantization is not None
+            else AscendFusedComputeType.UNQUANTIZED
+        )
+
+        return AscendFusedBackend(
+            hidden_dim=config.model.hidden_dim,
+            intermediate_dim=config.model.expert_intermediate_dim,
+            top_k=config.model.top_k,
+            dtype=dtype,
+            runtime=runtime,
+            acquire_many=acquire_many,
+            compute_type=compute_type,
+            swiglu_limit=config.model.swiglu_limit,
+        )

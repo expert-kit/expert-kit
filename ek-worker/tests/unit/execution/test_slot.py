@@ -381,6 +381,8 @@ class _FakeAsyncRuntime:
         self.fail_stream_creation = fail_stream_creation
         self.current_device_set = False
         self.stream_synchronized = False
+        self.recorded_events: list[tuple[_FakeEvent, _FakeStream]] = []
+        self.synchronized_events: list[_FakeEvent] = []
         self._sequence = 0
 
     @contextmanager
@@ -418,6 +420,7 @@ class _FakeAsyncRuntime:
         assert isinstance(stream, _FakeStream)
         self._sequence += 1
         event.sequence = self._sequence
+        self.recorded_events.append((event, stream))
 
     def wait_event(self, stream: _FakeStream, event: _FakeEvent) -> None:
         assert isinstance(stream, _FakeStream)
@@ -425,6 +428,7 @@ class _FakeAsyncRuntime:
 
     def synchronize_event(self, event: _FakeEvent) -> None:
         event.synchronized = True
+        self.synchronized_events.append(event)
 
     def event_done(self, event: _FakeEvent) -> bool:
         return event.synchronized
@@ -466,7 +470,8 @@ def test_async_slot_uses_injected_stream_events_and_device_timings() -> None:
         batch_span=span,
     )
 
-    assert runtime.stream_synchronized is True
+    assert runtime.stream_synchronized is False
+    assert runtime.synchronized_events == [runtime.recorded_events[-1][0]]
     assert result.output is not None
     torch.testing.assert_close(result.output, worker_batch().hidden_states * 2)
     assert span.attributes == {
