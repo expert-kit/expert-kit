@@ -10,8 +10,11 @@ from safetensors.torch import save
 sys.modules.setdefault("torch_npu", ModuleType("torch_npu"))
 
 from expertkit_worker.backends.ascend_fused.weights import (
+    AscendFusedCpuWeights,
+    AscendFusedModelSlimW8A8CpuWeights,
     AscendFusedModelSlimW8A8ExpertWeights,
     AscendFusedModelSlimW8A8WeightAdapter,
+    AscendFusedWeightAdapter,
 )
 from expertkit_worker.backends.factory import create_compute_backend, create_weight_adapter
 from expertkit_worker.config import BackendName, QuantizationType
@@ -54,6 +57,18 @@ def _adapter(
         intermediate_dim=8,
         runtime=_FakeNpuRuntime(),  # type: ignore[arg-type]
         compute_dtype=compute_dtype,
+    )
+
+
+def _float_adapter() -> AscendFusedWeightAdapter:
+    return AscendFusedWeightAdapter(
+        num_layers=1,
+        experts_per_layer=4,
+        hidden_dim=4,
+        intermediate_dim=8,
+        source_dtype=torch.bfloat16,
+        compute_dtype=torch.bfloat16,
+        runtime=_FakeNpuRuntime(),  # type: ignore[arg-type]
     )
 
 
@@ -122,6 +137,46 @@ def test_modelslim_adapter_uses_fp32_scales_for_fp16_output() -> None:
     assert ready.dtype is torch.float16
     assert ready.w13_scale.dtype is torch.float32
     assert ready.w2_scale.dtype is torch.float32
+
+
+def test_float_adapter_rejects_cached_weight_from_another_model() -> None:
+    cached = AscendFusedCpuWeights(
+        gate_proj=torch.empty((7, 4), dtype=torch.bfloat16),
+        up_proj=torch.empty((7, 4), dtype=torch.bfloat16),
+        down_proj=torch.empty((4, 7), dtype=torch.bfloat16),
+    )
+
+    with pytest.raises(ValueError, match="shape does not match"):
+        _float_adapter().make_ready_weight(cached, layer_id=0, expert_id=0)
+
+
+def test_float_adapter_rejects_cached_weight_with_wrong_source_dtype() -> None:
+    cached = AscendFusedCpuWeights(
+        gate_proj=torch.empty((8, 4), dtype=torch.float32),
+        up_proj=torch.empty((8, 4), dtype=torch.float32),
+        down_proj=torch.empty((4, 8), dtype=torch.float32),
+    )
+
+    with pytest.raises(ValueError, match="dtype does not match"):
+        _float_adapter().make_ready_weight(cached, layer_id=0, expert_id=0)
+
+
+def test_modelslim_adapter_rejects_cached_weight_from_another_model() -> None:
+    cached = AscendFusedModelSlimW8A8CpuWeights(
+        matrices=(
+            torch.empty((7, 4), dtype=torch.int8),
+            torch.empty((7, 4), dtype=torch.int8),
+            torch.empty((4, 7), dtype=torch.int8),
+        ),
+        scales=(
+            torch.ones((7, 1)),
+            torch.ones((7, 1)),
+            torch.ones((4, 1)),
+        ),
+    )
+
+    with pytest.raises(ValueError, match="shape does not match"):
+        _adapter().make_ready_weight(cached, layer_id=0, expert_id=0)
 
 
 @pytest.mark.parametrize("field", ["weight_scale", "weight_offset"])

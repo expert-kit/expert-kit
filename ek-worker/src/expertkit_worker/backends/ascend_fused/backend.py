@@ -13,17 +13,12 @@ from expertkit_worker.backends.base import (
     BackendResourceEstimate,
     BackendWeightUnavailable,
     ComputeBackend,
-    InvalidBackendInput,
 )
 from expertkit_worker.device.runtime import DeviceWork, WorkerDeviceRuntime
 from expertkit_worker.weights import ReadyWeightLease, WeightsNotReady
 
 from .op import AscendFusedComputeType, run_ascend_fused_moe
-from .weights import (
-    AscendFusedExpertWeights,
-    AscendFusedModelSlimW8A8ExpertWeights,
-    _dynamic_gmm_scale_dtype,
-)
+from .weights import AscendFusedExpertWeights, AscendFusedModelSlimW8A8ExpertWeights
 
 type AscendFusedReadyWeights = (
     AscendFusedExpertWeights | AscendFusedModelSlimW8A8ExpertWeights
@@ -130,11 +125,6 @@ class AscendFusedBackend(ComputeBackend):
         self._runtime = runtime
         self._acquire_many = acquire_many
         self._compute_type = AscendFusedComputeType(compute_type)
-        self._weight_type = (
-            AscendFusedModelSlimW8A8ExpertWeights
-            if self._compute_type is AscendFusedComputeType.DYNAMIC_W8A8
-            else AscendFusedExpertWeights
-        )
         self._swiglu_limit = swiglu_limit
         self._capabilities = BackendCapabilities(
             supports_dynamic_tokens=True,
@@ -219,10 +209,9 @@ class AscendFusedBackend(ComputeBackend):
         prepared_output: torch.Tensor,
     ) -> BackendCompletion:
         """Launch one complete local MoE contribution into prepared_output."""
-        self._validate_batch(batch, prepared_output)
         lease = self._acquire(batch)
         try:
-            self._validate_weights(lease, batch)
+            self._validate_lease(lease, batch)
 
             with torch.inference_mode():
                 retained_tensors = self._compute(batch, prepared_output, lease)
@@ -243,35 +232,6 @@ class AscendFusedBackend(ComputeBackend):
                 str(error),
             ) from error
 
-    def _validate_batch(
-        self,
-        batch: BackendBatch,
-        prepared_output: torch.Tensor,
-    ) -> None:
-        device = self._runtime.device
-        if batch.hidden_dim != self._hidden_dim:
-            raise InvalidBackendInput(
-                "batch hidden dimension does not match the Ascend fused Backend"
-            )
-        if batch.top_k != self._top_k:
-            raise InvalidBackendInput("batch top_k does not match the Ascend fused Backend")
-        if batch.hidden_states.dtype != self._dtype:
-            raise InvalidBackendInput("batch dtype does not match the Ascend fused Backend")
-        if batch.hidden_states.device != device:
-            raise InvalidBackendInput("batch device does not match the Ascend fused Backend")
-        if prepared_output.shape != batch.hidden_states.shape:
-            raise InvalidBackendInput("prepared output shape does not match hidden states")
-        if prepared_output.dtype != self._dtype:
-            raise InvalidBackendInput(
-                "prepared output dtype does not match the Ascend fused Backend"
-            )
-        if prepared_output.device != device:
-            raise InvalidBackendInput(
-                "prepared output device does not match the Ascend fused Backend"
-            )
-        if not prepared_output.is_contiguous():
-            raise InvalidBackendInput("prepared output must be contiguous")
-
     def _acquire(
         self,
         batch: BackendBatch,
@@ -284,7 +244,7 @@ class AscendFusedBackend(ComputeBackend):
         except WeightsNotReady as error:
             raise BackendWeightUnavailable(error.expert_ids) from error
 
-    def _validate_weights(
+    def _validate_lease(
         self,
         lease: ReadyWeightLease[AscendFusedReadyWeights],
         batch: BackendBatch,
@@ -299,86 +259,6 @@ class AscendFusedBackend(ComputeBackend):
                 BackendFatalReason.UNEXPECTED,
                 "ready weight lookup returned the wrong object count",
             )
-
-        device = self._runtime.device
-        for weight in lease.objects:
-            if not isinstance(weight, self._weight_type):
-                raise BackendFatalError(
-                    BackendFatalReason.UNEXPECTED,
-                    "ready weight lookup returned the wrong Ascend fused object type",
-                )
-            if weight.w13.shape != (
-                self._hidden_dim,
-                2 * self._intermediate_dim,
-            ) or weight.w2.shape != (self._intermediate_dim, self._hidden_dim):
-                raise BackendFatalError(
-                    BackendFatalReason.UNEXPECTED,
-                    "ready Ascend fused weight shape does not match the Backend",
-                )
-            expected_weight_dtype = (
-                torch.int8
-                if self._compute_type is AscendFusedComputeType.DYNAMIC_W8A8
-                else self._dtype
-            )
-            if (
-                weight.w13.dtype != expected_weight_dtype
-                or weight.w2.dtype != expected_weight_dtype
-            ):
-                raise BackendFatalError(
-                    BackendFatalReason.UNEXPECTED,
-                    "ready Ascend fused weight dtype does not match the Backend",
-                )
-            if weight.w13.device != device or weight.w2.device != device:
-                raise BackendFatalError(
-                    BackendFatalReason.UNEXPECTED,
-                    "ready Ascend fused weight device does not match the Backend",
-                )
-            if not weight.w13.is_contiguous() or not weight.w2.is_contiguous():
-                raise BackendFatalError(
-                    BackendFatalReason.UNEXPECTED,
-                    "ready Ascend fused weights must be contiguous",
-                )
-            if weight.w13.requires_grad or weight.w2.requires_grad:
-                raise BackendFatalError(
-                    BackendFatalReason.UNEXPECTED,
-                    "ready Ascend fused weights must not require gradients",
-                )
-            if isinstance(weight, AscendFusedModelSlimW8A8ExpertWeights):
-                if weight.dtype != self._dtype:
-                    raise BackendFatalError(
-                        BackendFatalReason.UNEXPECTED,
-                        "ready ModelSlim output dtype does not match the Backend",
-                    )
-                if (
-                    weight.w13_scale.shape != (2 * self._intermediate_dim,)
-                    or weight.w2_scale.shape != (self._hidden_dim,)
-                ):
-                    raise BackendFatalError(
-                        BackendFatalReason.UNEXPECTED,
-                        "ready ModelSlim scale shape does not match the Backend",
-                    )
-                scales = (weight.w13_scale, weight.w2_scale)
-                expected_scale_dtype = _dynamic_gmm_scale_dtype(self._dtype)
-                if any(scale.dtype != expected_scale_dtype for scale in scales):
-                    raise BackendFatalError(
-                        BackendFatalReason.UNEXPECTED,
-                        "ready ModelSlim scale dtype does not match the GMM output dtype",
-                    )
-                if any(scale.device != device for scale in scales):
-                    raise BackendFatalError(
-                        BackendFatalReason.UNEXPECTED,
-                        "ready ModelSlim scale device does not match the Backend",
-                    )
-                if any(not scale.is_contiguous() for scale in scales):
-                    raise BackendFatalError(
-                        BackendFatalReason.UNEXPECTED,
-                        "ready ModelSlim scales must be contiguous",
-                    )
-                if any(scale.requires_grad for scale in scales):
-                    raise BackendFatalError(
-                        BackendFatalReason.UNEXPECTED,
-                        "ready ModelSlim scales must not require gradients",
-                    )
 
     def _compute(
         self,

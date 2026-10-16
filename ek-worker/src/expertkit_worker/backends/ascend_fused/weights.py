@@ -283,6 +283,16 @@ class AscendFusedWeightAdapter(WeightAdapter[AscendFusedCpuWeights, AscendFusedE
         expert_id: int,
     ) -> AscendFusedExpertWeights:
         """Create and synchronize the final object for one stable expert position."""
+        if not isinstance(cpu_weight, AscendFusedCpuWeights):
+            raise TypeError("Ascend fused cached weight has the wrong object type")
+        if cpu_weight.gate_proj.shape != (
+            self._intermediate_dim,
+            self._hidden_dim,
+        ):
+            raise ValueError("Ascend fused cached weight shape does not match the model")
+        if cpu_weight.gate_proj.dtype != self._source_dtype:
+            raise ValueError("Ascend fused cached weight dtype does not match the source")
+
         runtime = self._runtime
         device = runtime.device
         try:
@@ -402,6 +412,14 @@ class AscendFusedModelSlimW8A8WeightAdapter(
         layer_id: int,
         expert_id: int,
     ) -> AscendFusedModelSlimW8A8ExpertWeights:
+        if not isinstance(cpu_weight, AscendFusedModelSlimW8A8CpuWeights):
+            raise TypeError("ModelSlim cached weight has the wrong object type")
+        if cpu_weight.matrices[0].shape != (
+            self._intermediate_dim,
+            self._hidden_dim,
+        ):
+            raise ValueError("ModelSlim cached weight shape does not match the model")
+
         del layer_id, expert_id
         device = self._runtime.device
         try:
